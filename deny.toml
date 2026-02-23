@@ -1,14 +1,15 @@
 # cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
 # Run: cargo deny check
 
+[graph]
+all-features = true
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+# Ignore specific advisories by ID
+ignore = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -22,14 +23,11 @@ allow = [
     "OpenSSL",
     "BlueOak-1.0.0",
 ]
-copyleft = "deny"
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
-
-# Deny known-bad crates
 deny = []
 
 [sources]
