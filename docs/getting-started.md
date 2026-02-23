@@ -13,7 +13,7 @@ collaborating with team members, and syncing via git.
 Clone the repository and build:
 
 ```bash
-git clone https://github.com/your-org/sigyn.git
+git clone https://github.com/tonybenoy/sigyn.git
 cd sigyn
 cargo build --release
 ```

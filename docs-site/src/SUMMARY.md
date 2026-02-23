@@ -10,6 +10,7 @@
 - [CLI Reference](./cli-reference.md)
 - [Environments](./environments.md)
 - [Import and Export](./import-export.md)
+- [Multiple Vaults and Organizations](./multi-vault.md)
 
 # Collaboration
 

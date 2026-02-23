@@ -11,8 +11,8 @@ build-dir = "book"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/sigyn/sigyn"
-edit-url-template = "https://github.com/sigyn/sigyn/edit/main/docs-site/src/{path}"
+git-repository-url = "https://github.com/tonybenoy/sigyn"
+edit-url-template = "https://github.com/tonybenoy/sigyn/edit/main/docs-site/src/{path}"
 no-section-label = false
 
 [output.html.search]

@@ -8,7 +8,7 @@ SRC_DIR="$SCRIPT_DIR/src"
 DOCS_DIR="$(dirname "$SCRIPT_DIR")/docs"
 
 # Copy docs that map directly to mdBook pages
-for file in architecture.md security.md cli-reference.md getting-started.md delegation.md sync.md; do
+for file in architecture.md security.md cli-reference.md getting-started.md delegation.md sync.md multi-vault.md; do
     if [ -f "$DOCS_DIR/$file" ]; then
         cp "$DOCS_DIR/$file" "$SRC_DIR/$file"
     fi

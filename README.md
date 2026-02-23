@@ -1,16 +1,27 @@
-# Sigyn
+<p align="center">
+  <img src="assets/logo.png" alt="Sigyn" width="200">
+</p>
 
-**Serverless, encrypted, peer-to-peer secret management.**
+<h1 align="center">Sigyn</h1>
 
-<!--
-[![CI](https://github.com/OWNER/sigyn/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/sigyn/actions/workflows/ci.yml)
+<p align="center"><strong>Serverless, encrypted, peer-to-peer secret management.</strong></p>
+
+[![CI](https://github.com/tonybenoy/sigyn/actions/workflows/ci.yml/badge.svg)](https://github.com/tonybenoy/sigyn/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![crates.io](https://img.shields.io/crates/v/sigyn-cli.svg)](https://crates.io/crates/sigyn-cli)
--->
+[![Docs](https://img.shields.io/badge/docs-sigyn.org-blue)](https://sigyn.org)
 
 Sigyn is a CLI secret manager that keeps every secret encrypted at rest,
 syncs through plain Git, and never requires a central server. Think of it
 as Doppler -- but fully serverless and peer-to-peer.
+
+## Why "Sigyn"?
+
+In Norse mythology, Sigyn is the goddess of fidelity and devotion -- she
+faithfully holds a bowl over her bound husband Loki to shield him from
+venom. Sigyn the tool does the same for your secrets: it stands guard over
+your sensitive data, shielding it from exposure with steadfast encryption
+and access control. Loyalty, protection, and quiet reliability -- that is
+what Sigyn is about.
 
 ---
 
@@ -163,7 +174,7 @@ sigyn run export --env prod --format shell  # eval-ready export statements
 Contributions are welcome. To get started:
 
 ```bash
-git clone https://github.com/OWNER/sigyn.git
+git clone https://github.com/tonybenoy/sigyn.git
 cd sigyn
 cargo build
 cargo test

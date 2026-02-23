@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="logo.png" alt="Sigyn" width="200">
+</p>
+
 # Sigyn
 
 **Serverless encrypted P2P secret manager**
 
 Sigyn is a command-line tool for managing application secrets — API keys, database credentials, certificates, and other sensitive configuration. Unlike hosted secret managers, Sigyn requires no server infrastructure. Secrets are encrypted at rest, stored locally, and synced between team members via git.
+
+## The Name
+
+In Norse mythology, Sigyn is the goddess of fidelity and devotion — she faithfully holds a bowl over her bound husband Loki to shield him from venom. Sigyn the tool does the same for your secrets: it stands guard over your sensitive data, shielding it from exposure with steadfast encryption and access control. Loyalty, protection, and quiet reliability.
 
 ## Why Sigyn?
 
