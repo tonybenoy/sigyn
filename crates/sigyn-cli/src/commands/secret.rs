@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::{AuditLog, AuditAction};
 use sigyn_core::audit::entry::AuditOutcome;
+use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::crypto::{envelope, vault_cipher::VaultCipher};
 use sigyn_core::identity::keygen::IdentityStore;
 use sigyn_core::identity::LoadedIdentity;
-use sigyn_core::policy::{PolicyEngine, AccessRequest, PolicyDecision};
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::policy::storage::VaultPolicy;
+use sigyn_core::policy::{AccessRequest, PolicyDecision, PolicyEngine};
 use sigyn_core::secrets::types::SecretValue;
 use sigyn_core::vault::{env_file, VaultManifest, VaultPaths};
 
@@ -107,11 +107,10 @@ pub fn unlock_vault(
         .context(format!("vault '{}' not found", vault_name))?;
     let manifest = VaultManifest::from_toml(&manifest_content)?;
 
-    let header_bytes = std::fs::read(paths.members_path(&vault_name))
-        .context("failed to read vault members")?;
-    let header: sigyn_core::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice())
-            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+    let header_bytes =
+        std::fs::read(paths.members_path(&vault_name)).context("failed to read vault members")?;
+    let header: sigyn_core::crypto::EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
     let master_key =
         envelope::unseal_master_key(&header, loaded.encryption_key(), manifest.vault_id)
@@ -120,10 +119,8 @@ pub fn unlock_vault(
     let cipher = VaultCipher::new(master_key);
 
     // Load policy (returns empty policy if file doesn't exist)
-    let policy = VaultPolicy::load_encrypted(
-        &paths.policy_path(&vault_name),
-        &cipher,
-    ).unwrap_or_default();
+    let policy =
+        VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &cipher).unwrap_or_default();
 
     Ok(UnlockedVaultContext {
         cipher,
@@ -138,7 +135,11 @@ pub fn unlock_vault(
 }
 
 /// Check policy and bail on deny
-pub fn check_access(ctx: &UnlockedVaultContext, action: AccessAction, key: Option<&str>) -> Result<()> {
+pub fn check_access(
+    ctx: &UnlockedVaultContext,
+    action: AccessAction,
+    key: Option<&str>,
+) -> Result<()> {
     let engine = PolicyEngine::new(&ctx.policy, &ctx.manifest.owner);
     let request = AccessRequest {
         actor: ctx.fingerprint.clone(),
@@ -206,11 +207,14 @@ pub fn handle(
             let is_update = plaintext.get(&key).is_some();
             plaintext.set(key.clone(), SecretValue::String(value), &ctx.fingerprint);
 
-            let encrypted =
-                env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
-            audit(&ctx, AuditAction::SecretWritten { key: key.clone() }, AuditOutcome::Success);
+            audit(
+                &ctx,
+                AuditAction::SecretWritten { key: key.clone() },
+                AuditOutcome::Success,
+            );
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -239,14 +243,14 @@ pub fn handle(
             let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
 
             let entry = plaintext.get(&key).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "secret '{}' not found in env '{}'",
-                    key,
-                    ctx.env_name
-                )
+                anyhow::anyhow!("secret '{}' not found in env '{}'", key, ctx.env_name)
             })?;
 
-            audit(&ctx, AuditAction::SecretRead { key: key.clone() }, AuditOutcome::Success);
+            audit(
+                &ctx,
+                AuditAction::SecretRead { key: key.clone() },
+                AuditOutcome::Success,
+            );
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -305,8 +309,7 @@ pub fn handle(
                 println!("{}", style("─".repeat(60)).dim());
                 for (key, entry) in &plaintext.entries {
                     let val = entry.value.display_value(reveal);
-                    let type_tag =
-                        style(format!("[{}]", entry.value.type_name())).dim();
+                    let type_tag = style(format!("[{}]", entry.value.type_name())).dim();
                     println!("  {} {} = {}", type_tag, style(key).bold(), val);
                 }
             }
@@ -324,23 +327,19 @@ pub fn handle(
             let mut plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
 
             if plaintext.remove(&key).is_none() {
-                anyhow::bail!(
-                    "secret '{}' not found in env '{}'",
-                    key,
-                    ctx.env_name
-                );
+                anyhow::bail!("secret '{}' not found in env '{}'", key, ctx.env_name);
             }
 
-            let encrypted =
-                env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
-            audit(&ctx, AuditAction::SecretDeleted { key: key.clone() }, AuditOutcome::Success);
+            audit(
+                &ctx,
+                AuditAction::SecretDeleted { key: key.clone() },
+                AuditOutcome::Success,
+            );
 
-            crate::output::print_success(&format!(
-                "Removed '{}' from env '{}'",
-                key, ctx.env_name
-            ));
+            crate::output::print_success(&format!("Removed '{}' from env '{}'", key, ctx.env_name));
         }
         SecretCommands::Generate {
             key,
@@ -358,9 +357,7 @@ pub fn handle(
                 "uuid" => sigyn_core::secrets::GenerationTemplate::Uuid,
                 "hex" => sigyn_core::secrets::GenerationTemplate::Hex { length },
                 "base64" => sigyn_core::secrets::GenerationTemplate::Base64 { length },
-                "alphanumeric" => {
-                    sigyn_core::secrets::GenerationTemplate::Alphanumeric { length }
-                }
+                "alphanumeric" => sigyn_core::secrets::GenerationTemplate::Alphanumeric { length },
                 other => anyhow::bail!(
                     "unknown generation type: '{}'. Use: password, uuid, hex, base64, alphanumeric",
                     other
@@ -385,11 +382,14 @@ pub fn handle(
                 &ctx.fingerprint,
             );
 
-            let encrypted =
-                env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
-            audit(&ctx, AuditAction::SecretWritten { key: key.clone() }, AuditOutcome::Success);
+            audit(
+                &ctx,
+                AuditAction::SecretWritten { key: key.clone() },
+                AuditOutcome::Success,
+            );
 
             if json {
                 crate::output::print_json(&serde_json::json!({

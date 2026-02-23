@@ -13,16 +13,40 @@ fn test_promote_dev_to_staging() {
 
     // 1. Create dev env with 5 secrets
     let mut dev = PlaintextEnv::new();
-    dev.set("DB_URL".into(), SecretValue::String("postgres://dev".into()), &fp);
-    dev.set("API_KEY".into(), SecretValue::String("sk-dev-111".into()), &fp);
-    dev.set("REDIS_URL".into(), SecretValue::String("redis://dev".into()), &fp);
+    dev.set(
+        "DB_URL".into(),
+        SecretValue::String("postgres://dev".into()),
+        &fp,
+    );
+    dev.set(
+        "API_KEY".into(),
+        SecretValue::String("sk-dev-111".into()),
+        &fp,
+    );
+    dev.set(
+        "REDIS_URL".into(),
+        SecretValue::String("redis://dev".into()),
+        &fp,
+    );
     dev.set("LOG_LEVEL".into(), SecretValue::String("debug".into()), &fp);
-    dev.set("FEATURE_FLAG".into(), SecretValue::String("true".into()), &fp);
+    dev.set(
+        "FEATURE_FLAG".into(),
+        SecretValue::String("true".into()),
+        &fp,
+    );
 
     // 2. Create staging env with 2 secrets, one overlapping key (API_KEY)
     let mut staging = PlaintextEnv::new();
-    staging.set("API_KEY".into(), SecretValue::String("sk-staging-old".into()), &fp);
-    staging.set("CDN_URL".into(), SecretValue::String("https://cdn.staging".into()), &fp);
+    staging.set(
+        "API_KEY".into(),
+        SecretValue::String("sk-staging-old".into()),
+        &fp,
+    );
+    staging.set(
+        "CDN_URL".into(),
+        SecretValue::String("https://cdn.staging".into()),
+        &fp,
+    );
 
     // 3. Promote dev to staging (no filter = all keys)
     let result = promote_env(&dev, &mut staging, &fp, None);
@@ -76,9 +100,17 @@ fn test_filtered_promotion_only_selected_keys() {
     let fp = make_fp(2);
 
     let mut dev = PlaintextEnv::new();
-    dev.set("DB_URL".into(), SecretValue::String("postgres://dev".into()), &fp);
+    dev.set(
+        "DB_URL".into(),
+        SecretValue::String("postgres://dev".into()),
+        &fp,
+    );
     dev.set("API_KEY".into(), SecretValue::String("sk-dev".into()), &fp);
-    dev.set("SECRET_SAUCE".into(), SecretValue::String("spicy".into()), &fp);
+    dev.set(
+        "SECRET_SAUCE".into(),
+        SecretValue::String("spicy".into()),
+        &fp,
+    );
 
     let mut staging = PlaintextEnv::new();
 
@@ -100,7 +132,11 @@ fn test_promotion_with_nonexistent_keys_in_filter() {
     let fp = make_fp(3);
 
     let mut dev = PlaintextEnv::new();
-    dev.set("DB_URL".into(), SecretValue::String("postgres://dev".into()), &fp);
+    dev.set(
+        "DB_URL".into(),
+        SecretValue::String("postgres://dev".into()),
+        &fp,
+    );
 
     let mut staging = PlaintextEnv::new();
 
@@ -123,7 +159,11 @@ fn test_promote_empty_source_is_noop() {
 
     let source = PlaintextEnv::new();
     let mut target = PlaintextEnv::new();
-    target.set("EXISTING".into(), SecretValue::String("keep-me".into()), &fp);
+    target.set(
+        "EXISTING".into(),
+        SecretValue::String("keep-me".into()),
+        &fp,
+    );
 
     let result = promote_env(&source, &mut target, &fp, None);
 

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use fd_lock::RwLock;
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 pub struct VaultLock {
     _lock: RwLock<File>,
@@ -24,7 +24,8 @@ impl VaultLock {
             .map_err(|e| SigynError::LockFailed(e.to_string()))?;
 
         let mut lock = RwLock::new(file);
-        let _ = lock.try_write()
+        let _ = lock
+            .try_write()
             .map_err(|e| SigynError::LockFailed(e.to_string()))?;
 
         Ok(Self { _lock: lock })

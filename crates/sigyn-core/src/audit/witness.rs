@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use crate::crypto::keys::{KeyFingerprint, VerifyingKeyWrapper};
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessSignature {
@@ -70,8 +70,7 @@ impl WitnessLog {
     pub fn open(path: &Path) -> Result<Self> {
         let entries = if path.exists() {
             let data = std::fs::read_to_string(path)?;
-            serde_json::from_str(&data)
-                .map_err(|e| SigynError::Deserialization(e.to_string()))?
+            serde_json::from_str(&data).map_err(|e| SigynError::Deserialization(e.to_string()))?
         } else {
             Vec::new()
         };
@@ -83,11 +82,7 @@ impl WitnessLog {
 
     /// Add a witness signature for the given entry hash. If no WitnessedEntry exists
     /// for that hash yet, one is created with `required_witnesses = 1`.
-    pub fn add_witness(
-        &mut self,
-        entry_hash: [u8; 32],
-        witness: WitnessSignature,
-    ) -> Result<()> {
+    pub fn add_witness(&mut self, entry_hash: [u8; 32], witness: WitnessSignature) -> Result<()> {
         if let Some(existing) = self.entries.iter_mut().find(|e| e.entry_hash == entry_hash) {
             existing.signatures.push(witness);
         } else {

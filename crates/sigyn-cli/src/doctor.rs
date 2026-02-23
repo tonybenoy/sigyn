@@ -1,6 +1,6 @@
+use crate::config::sigyn_home;
 use anyhow::Result;
 use console::style;
-use crate::config::sigyn_home;
 
 pub fn run_doctor() -> Result<()> {
     println!("{}", style("Sigyn Doctor").bold().cyan());

@@ -30,8 +30,7 @@ impl VaultPaths {
     }
 
     pub fn env_path(&self, vault_name: &str, env_name: &str) -> PathBuf {
-        self.env_dir(vault_name)
-            .join(format!("{}.vault", env_name))
+        self.env_dir(vault_name).join(format!("{}.vault", env_name))
     }
 
     pub fn audit_path(&self, name: &str) -> PathBuf {

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::crypto::keys::KeyFingerprint;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ForkMode {

@@ -9,17 +9,24 @@ pub enum SecretValue {
     Json(serde_json::Value),
     Certificate(String),
     SshPrivateKey(String),
-    File { name: String, content: Vec<u8> },
+    File {
+        name: String,
+        content: Vec<u8>,
+    },
     Generated(String),
-    Reference { vault: String, env: String, key: String },
+    Reference {
+        vault: String,
+        env: String,
+        key: String,
+    },
 }
 
 impl SecretValue {
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            SecretValue::String(s)
-            | SecretValue::Multiline(s)
-            | SecretValue::Generated(s) => Some(s),
+            SecretValue::String(s) | SecretValue::Multiline(s) | SecretValue::Generated(s) => {
+                Some(s)
+            }
             _ => None,
         }
     }

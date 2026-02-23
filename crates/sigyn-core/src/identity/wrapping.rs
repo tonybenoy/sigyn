@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::keys::{KeyFingerprint, X25519PublicKey};
+use super::profile::IdentityProfile;
 use crate::crypto::kdf;
 use crate::crypto::keys::VerifyingKeyWrapper;
+use crate::crypto::keys::{KeyFingerprint, X25519PublicKey};
 use crate::error::Result;
-use super::profile::IdentityProfile;
 
 #[derive(Serialize, Deserialize)]
 pub struct WrappedIdentity {

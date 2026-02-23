@@ -63,8 +63,7 @@ impl GenerationTemplate {
                 use base64::Engine;
                 let byte_len = (*length * 3).div_ceil(4);
                 let bytes: Vec<u8> = (0..byte_len).map(|_| rng.gen()).collect();
-                let encoded =
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+                let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
                 encoded[..*length].to_string()
             }
             GenerationTemplate::Alphanumeric { length } => {

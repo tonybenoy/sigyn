@@ -1,12 +1,16 @@
 pub mod cloud;
 
 use anyhow::Result;
+use sigyn_core::crypto::keys::KeyFingerprint;
 use sigyn_core::secrets::types::SecretValue;
 use sigyn_core::vault::PlaintextEnv;
-use sigyn_core::crypto::keys::KeyFingerprint;
 
 /// Import secrets from a .env file
-pub fn import_dotenv(content: &str, env: &mut PlaintextEnv, fingerprint: &KeyFingerprint) -> Result<usize> {
+pub fn import_dotenv(
+    content: &str,
+    env: &mut PlaintextEnv,
+    fingerprint: &KeyFingerprint,
+) -> Result<usize> {
     let mut count = 0;
 
     for line in content.lines() {
@@ -52,7 +56,11 @@ fn parse_dotenv_line(line: &str) -> Option<(String, String)> {
 }
 
 /// Import secrets from a JSON object (key: value pairs)
-pub fn import_json(content: &str, env: &mut PlaintextEnv, fingerprint: &KeyFingerprint) -> Result<usize> {
+pub fn import_json(
+    content: &str,
+    env: &mut PlaintextEnv,
+    fingerprint: &KeyFingerprint,
+) -> Result<usize> {
     let parsed: serde_json::Value = serde_json::from_str(content)?;
     let obj = parsed
         .as_object()
@@ -80,10 +88,7 @@ pub fn import_file(
 ) -> Result<usize> {
     let content = std::fs::read_to_string(path)?;
 
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "json" => import_json(&content, env, fingerprint),
@@ -119,10 +124,19 @@ export EXPORTED_VAR=hello
         let mut env = PlaintextEnv::new();
         let count = import_dotenv(content, &mut env, &test_fp()).unwrap();
         assert_eq!(count, 4);
-        assert_eq!(env.get("DB_URL").unwrap().value.as_str(), Some("postgres://localhost"));
-        assert_eq!(env.get("API_KEY").unwrap().value.as_str(), Some("sk-test-123"));
+        assert_eq!(
+            env.get("DB_URL").unwrap().value.as_str(),
+            Some("postgres://localhost")
+        );
+        assert_eq!(
+            env.get("API_KEY").unwrap().value.as_str(),
+            Some("sk-test-123")
+        );
         assert_eq!(env.get("SECRET").unwrap().value.as_str(), Some("my secret"));
-        assert_eq!(env.get("EXPORTED_VAR").unwrap().value.as_str(), Some("hello"));
+        assert_eq!(
+            env.get("EXPORTED_VAR").unwrap().value.as_str(),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -131,7 +145,10 @@ export EXPORTED_VAR=hello
         let mut env = PlaintextEnv::new();
         let count = import_json(content, &mut env, &test_fp()).unwrap();
         assert_eq!(count, 2);
-        assert_eq!(env.get("DB_URL").unwrap().value.as_str(), Some("postgres://localhost"));
+        assert_eq!(
+            env.get("DB_URL").unwrap().value.as_str(),
+            Some("postgres://localhost")
+        );
     }
 
     #[test]

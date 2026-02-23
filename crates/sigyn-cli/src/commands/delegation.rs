@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::audit::entry::AuditOutcome;
+use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::crypto::envelope::{self, EnvelopeHeader};
 use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::delegation::tree::DelegationNode;
 use sigyn_core::delegation::invite::InvitationFile;
 use sigyn_core::delegation::revoke::revoke_member;
+use sigyn_core::delegation::tree::DelegationNode;
 use sigyn_core::identity::keygen::IdentityStore;
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::policy::member::MemberPolicy;
@@ -15,7 +15,7 @@ use sigyn_core::policy::roles::Role;
 use sigyn_core::policy::storage::VaultPolicy;
 use sigyn_core::vault::{env_file, VaultPaths};
 
-use super::secret::{unlock_vault, check_access, UnlockedVaultContext};
+use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 use crate::config::sigyn_home;
 
 #[derive(Subcommand)]
@@ -114,8 +114,7 @@ fn save_header(header: &EnvelopeHeader, paths: &VaultPaths, vault_name: &str) ->
     ciborium::into_writer(header, &mut buf)
         .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
     let members_path = paths.members_path(vault_name);
-    std::fs::write(&members_path, &buf)
-        .context("failed to write members file")?;
+    std::fs::write(&members_path, &buf).context("failed to write members file")?;
     Ok(())
 }
 
@@ -155,10 +154,7 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                     ctx.vault_name
                 );
                 println!("{}", style("\u{2500}".repeat(60)).dim());
-                println!(
-                    "  [owner] {} (you)",
-                    &ctx.manifest.owner.to_hex()[..12]
-                );
+                println!("  [owner] {} (you)", &ctx.manifest.owner.to_hex()[..12]);
 
                 if trees.is_empty() {
                     println!("  \u{2514}\u{2500}\u{2500} (no delegated members yet)");
@@ -199,7 +195,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             // Look up the invitee's public key from the identity store
             let home = sigyn_home();
             let store = IdentityStore::new(home.clone());
-            let identities = store.list()
+            let identities = store
+                .list()
                 .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
             let invitee_identity = identities
                 .iter()
@@ -219,9 +216,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             // Add recipient to envelope header
             let header_bytes = std::fs::read(ctx.paths.members_path(&ctx.vault_name))
                 .context("failed to read vault members")?;
-            let mut header: EnvelopeHeader =
-                ciborium::from_reader(header_bytes.as_slice())
-                    .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+            let mut header: EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
+                .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
             envelope::add_recipient(
                 &mut header,
@@ -270,9 +266,12 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 .context("failed to write invitation file")?;
 
             // Audit
-            audit_log(&ctx, AuditAction::MemberInvited {
-                fingerprint: invitee_fp.clone(),
-            });
+            audit_log(
+                &ctx,
+                AuditAction::MemberInvited {
+                    fingerprint: invitee_fp.clone(),
+                },
+            );
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -290,10 +289,7 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                     role_enum,
                     envs
                 ));
-                println!(
-                    "  Invitation file: {}",
-                    invitation_path.display()
-                );
+                println!("  Invitation file: {}", invitation_path.display());
             }
         }
         DelegationCommands::Accept { invitation } => {
@@ -303,15 +299,16 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             }
 
             // Read and parse the invitation file
-            let contents = std::fs::read_to_string(path)
-                .context("failed to read invitation file")?;
-            let invite_file: InvitationFile = serde_json::from_str(&contents)
-                .context("invalid invitation file format")?;
+            let contents =
+                std::fs::read_to_string(path).context("failed to read invitation file")?;
+            let invite_file: InvitationFile =
+                serde_json::from_str(&contents).context("invalid invitation file format")?;
 
             // Verify the inviter's signature by looking up their identity in the store
             let home = sigyn_home();
             let store = IdentityStore::new(home);
-            let identities = store.list()
+            let identities = store
+                .list()
                 .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
 
             let inviter_identity = identities
@@ -319,12 +316,12 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 .find(|id| id.fingerprint == invite_file.inviter_fingerprint);
 
             if let Some(inviter) = inviter_identity {
-                invite_file
-                    .verify(&inviter.signing_pubkey)
-                    .map_err(|_| anyhow::anyhow!(
+                invite_file.verify(&inviter.signing_pubkey).map_err(|_| {
+                    anyhow::anyhow!(
                         "invitation signature verification failed for inviter {}",
                         invite_file.inviter_fingerprint.to_hex()
-                    ))?;
+                    )
+                })?;
             } else {
                 // Inviter identity not in local store; warn but proceed
                 eprintln!(
@@ -349,7 +346,10 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 crate::output::print_success("Invitation accepted");
                 println!("  Invitation ID: {}", invite_file.id);
                 println!("  Vault:         {}", invite_file.vault_name);
-                println!("  Invited by:    {}", &invite_file.inviter_fingerprint.to_hex()[..12]);
+                println!(
+                    "  Invited by:    {}",
+                    &invite_file.inviter_fingerprint.to_hex()[..12]
+                );
                 println!("  Role:          {}", invite_file.proposed_role);
                 println!("  Environments:  {}", invite_file.allowed_envs.join(", "));
                 if inviter_identity.is_some() {
@@ -359,7 +359,10 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 }
             }
         }
-        DelegationCommands::Revoke { fingerprint, cascade } => {
+        DelegationCommands::Revoke {
+            fingerprint,
+            cascade,
+        } => {
             let ctx = unlock_vault(None, Some(vault_name), None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
@@ -369,9 +372,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             // Load current header
             let header_bytes = std::fs::read(ctx.paths.members_path(&ctx.vault_name))
                 .context("failed to read vault members")?;
-            let mut header: EnvelopeHeader =
-                ciborium::from_reader(header_bytes.as_slice())
-                    .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+            let mut header: EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
+                .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
             let mut policy = ctx.policy.clone();
 
@@ -379,11 +381,15 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             // ones about to be revoked. We look up pubkeys from the identity store.
             let home = sigyn_home();
             let store = IdentityStore::new(home);
-            let identities = store.list()
+            let identities = store
+                .list()
                 .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
 
             // Include the owner (current user) plus all policy members
-            let mut remaining_pubkeys: Vec<(KeyFingerprint, sigyn_core::crypto::keys::X25519PublicKey)> = Vec::new();
+            let mut remaining_pubkeys: Vec<(
+                KeyFingerprint,
+                sigyn_core::crypto::keys::X25519PublicKey,
+            )> = Vec::new();
 
             // Add the owner/current identity
             remaining_pubkeys.push((
@@ -393,7 +399,10 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
 
             // Add all known members from the identity store
             for member_policy in policy.members.values() {
-                if let Some(id) = identities.iter().find(|id| id.fingerprint == member_policy.fingerprint) {
+                if let Some(id) = identities
+                    .iter()
+                    .find(|id| id.fingerprint == member_policy.fingerprint)
+                {
                     remaining_pubkeys.push((id.fingerprint.clone(), id.encryption_pubkey.clone()));
                 }
             }
@@ -415,14 +424,20 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                     let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
                     if env_path.exists() {
                         // Decrypt with old cipher, re-encrypt with new cipher
-                        let encrypted = env_file::read_encrypted_env(&env_path)
-                            .map_err(|e| anyhow::anyhow!("failed to read env '{}': {}", env_name, e))?;
-                        let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)
-                            .map_err(|e| anyhow::anyhow!("failed to decrypt env '{}': {}", env_name, e))?;
+                        let encrypted = env_file::read_encrypted_env(&env_path).map_err(|e| {
+                            anyhow::anyhow!("failed to read env '{}': {}", env_name, e)
+                        })?;
+                        let plaintext =
+                            env_file::decrypt_env(&encrypted, &ctx.cipher).map_err(|e| {
+                                anyhow::anyhow!("failed to decrypt env '{}': {}", env_name, e)
+                            })?;
                         let re_encrypted = env_file::encrypt_env(&plaintext, new_cipher, env_name)
-                            .map_err(|e| anyhow::anyhow!("failed to re-encrypt env '{}': {}", env_name, e))?;
-                        env_file::write_encrypted_env(&env_path, &re_encrypted)
-                            .map_err(|e| anyhow::anyhow!("failed to write env '{}': {}", env_name, e))?;
+                            .map_err(|e| {
+                                anyhow::anyhow!("failed to re-encrypt env '{}': {}", env_name, e)
+                            })?;
+                        env_file::write_encrypted_env(&env_path, &re_encrypted).map_err(|e| {
+                            anyhow::anyhow!("failed to write env '{}': {}", env_name, e)
+                        })?;
                     }
                 }
 
@@ -441,13 +456,19 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             save_header(&header, &ctx.paths, &ctx.vault_name)?;
 
             // Audit log entries
-            audit_log(&ctx, AuditAction::MemberRevoked {
-                fingerprint: target_fp.clone(),
-            });
+            audit_log(
+                &ctx,
+                AuditAction::MemberRevoked {
+                    fingerprint: target_fp.clone(),
+                },
+            );
             for cascade_fp in &result.cascade_revoked {
-                audit_log(&ctx, AuditAction::MemberRevoked {
-                    fingerprint: cascade_fp.clone(),
-                });
+                audit_log(
+                    &ctx,
+                    AuditAction::MemberRevoked {
+                        fingerprint: cascade_fp.clone(),
+                    },
+                );
             }
             if result.master_key_rotated {
                 audit_log(&ctx, AuditAction::MasterKeyRotated);
@@ -504,14 +525,19 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             }
 
             if json {
-                let items: Vec<_> = found.iter().map(|inv| serde_json::json!({
-                    "id": inv.id.to_string(),
-                    "vault_name": inv.vault_name,
-                    "inviter": inv.inviter_fingerprint.to_hex(),
-                    "role": inv.proposed_role.to_string(),
-                    "envs": inv.allowed_envs,
-                    "created_at": inv.created_at.to_rfc3339(),
-                })).collect();
+                let items: Vec<_> = found
+                    .iter()
+                    .map(|inv| {
+                        serde_json::json!({
+                            "id": inv.id.to_string(),
+                            "vault_name": inv.vault_name,
+                            "inviter": inv.inviter_fingerprint.to_hex(),
+                            "role": inv.proposed_role.to_string(),
+                            "envs": inv.allowed_envs,
+                            "created_at": inv.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
                 crate::output::print_json(&items)?;
             } else {
                 println!("{}", style("Pending Invitations").bold());

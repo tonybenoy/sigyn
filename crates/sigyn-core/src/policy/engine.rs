@@ -1,7 +1,7 @@
-use crate::crypto::keys::KeyFingerprint;
-use crate::error::Result;
 use super::acl::matches_secret_pattern;
 use super::storage::VaultPolicy;
+use crate::crypto::keys::KeyFingerprint;
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct AccessRequest {
@@ -98,10 +98,7 @@ impl<'a> PolicyEngine<'a> {
 
         if let Some(key) = &request.key {
             if !matches_secret_pattern(key, &member.secret_patterns)? {
-                return Ok(PolicyDecision::Deny(format!(
-                    "no access to key '{}'",
-                    key
-                )));
+                return Ok(PolicyDecision::Deny(format!("no access to key '{}'", key)));
             }
         }
 

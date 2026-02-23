@@ -3,7 +3,7 @@ use clap::Subcommand;
 use sigyn_core::secrets::types::SecretValue;
 use sigyn_core::vault::env_file;
 
-use crate::commands::secret::{unlock_vault, check_access};
+use crate::commands::secret::{check_access, unlock_vault};
 use crate::output;
 use sigyn_core::policy::engine::AccessAction;
 
@@ -133,8 +133,8 @@ pub fn handle(
 ) -> Result<()> {
     match cmd {
         ImportCommands::Dotenv { file, env } => {
-            let content = std::fs::read_to_string(&file)
-                .context(format!("failed to read file: {}", file))?;
+            let content =
+                std::fs::read_to_string(&file).context(format!("failed to read file: {}", file))?;
 
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Write, None)?;
@@ -147,7 +147,8 @@ pub fn handle(
                 sigyn_core::vault::PlaintextEnv::new()
             };
 
-            let count = crate::importexport::import_dotenv(&content, &mut plaintext, &ctx.fingerprint)?;
+            let count =
+                crate::importexport::import_dotenv(&content, &mut plaintext, &ctx.fingerprint)?;
 
             if count > 0 {
                 let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
@@ -157,8 +158,8 @@ pub fn handle(
             print_summary(count, "dotenv file", &file, json)?;
         }
         ImportCommands::Json { file, env } => {
-            let content = std::fs::read_to_string(&file)
-                .context(format!("failed to read file: {}", file))?;
+            let content =
+                std::fs::read_to_string(&file).context(format!("failed to read file: {}", file))?;
 
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Write, None)?;
@@ -171,7 +172,8 @@ pub fn handle(
                 sigyn_core::vault::PlaintextEnv::new()
             };
 
-            let count = crate::importexport::import_json(&content, &mut plaintext, &ctx.fingerprint)?;
+            let count =
+                crate::importexport::import_json(&content, &mut plaintext, &ctx.fingerprint)?;
 
             if count > 0 {
                 let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
@@ -180,22 +182,33 @@ pub fn handle(
 
             print_summary(count, "JSON file", &file, json)?;
         }
-        ImportCommands::Doppler { project, config, env } => {
+        ImportCommands::Doppler {
+            project,
+            config,
+            env,
+        } => {
             let pairs = crate::importexport::cloud::import_doppler(&project, &config)?;
             let source = format!("Doppler ({}/{})", project, config);
             let count = store_pairs(pairs, vault, identity, env.as_deref())?;
             print_summary(count, "Doppler", &source, json)?;
         }
-        ImportCommands::Aws { secret_id, region, env } => {
-            let pairs = crate::importexport::cloud::import_aws_secret(
-                &secret_id,
-                region.as_deref(),
-            )?;
+        ImportCommands::Aws {
+            secret_id,
+            region,
+            env,
+        } => {
+            let pairs =
+                crate::importexport::cloud::import_aws_secret(&secret_id, region.as_deref())?;
             let source = format!("AWS Secrets Manager ({})", secret_id);
             let count = store_pairs(pairs, vault, identity, env.as_deref())?;
             print_summary(count, "AWS Secrets Manager", &source, json)?;
         }
-        ImportCommands::Gcp { project, secret, version, env } => {
+        ImportCommands::Gcp {
+            project,
+            secret,
+            version,
+            env,
+        } => {
             let pairs = crate::importexport::cloud::import_gcp_secret(
                 &project,
                 &secret,
@@ -205,7 +218,11 @@ pub fn handle(
             let count = store_pairs(pairs, vault, identity, env.as_deref())?;
             print_summary(count, "GCP Secret Manager", &source, json)?;
         }
-        ImportCommands::OnePassword { vault: op_vault, item, env } => {
+        ImportCommands::OnePassword {
+            vault: op_vault,
+            item,
+            env,
+        } => {
             let pairs = crate::importexport::cloud::import_1password(&op_vault, &item)?;
             let source = format!("1Password ({}/{})", op_vault, item);
             let count = store_pairs(pairs, vault, identity, env.as_deref())?;
@@ -224,10 +241,7 @@ fn print_summary(count: usize, provider: &str, source: &str, json: bool) -> Resu
             "source": source,
         }))?;
     } else {
-        output::print_success(&format!(
-            "{} secrets imported from {}",
-            count, source
-        ));
+        output::print_success(&format!("{} secrets imported from {}", count, source));
     }
     Ok(())
 }

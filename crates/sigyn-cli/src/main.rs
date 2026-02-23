@@ -158,12 +158,7 @@ fn main() -> Result<()> {
             commands::vault::handle(command, cli.identity.as_deref(), json)?;
         }
         Commands::Secret { command } => {
-            commands::secret::handle(
-                command,
-                cli.vault.as_deref(),
-                cli.identity.as_deref(),
-                json,
-            )?;
+            commands::secret::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Env { command } => {
             commands::env::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
@@ -211,12 +206,7 @@ fn main() -> Result<()> {
             commands::delegation::handle(command, cli.vault.as_deref(), json)?;
         }
         Commands::Import { command } => {
-            commands::import::handle(
-                command,
-                cli.vault.as_deref(),
-                cli.identity.as_deref(),
-                json,
-            )?;
+            commands::import::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;

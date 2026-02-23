@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::identity::{Identity, IdentityProfile, LoadedIdentity};
 use sigyn_core::identity::keygen::IdentityStore;
+use sigyn_core::identity::{Identity, IdentityProfile, LoadedIdentity};
 
 use crate::config::sigyn_home;
 
@@ -98,10 +98,7 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                     "  Email:       {}",
                     id.profile.email.as_deref().unwrap_or("-")
                 );
-                println!(
-                    "  Fingerprint: {}",
-                    style(id.fingerprint.to_hex()).cyan()
-                );
+                println!("  Fingerprint: {}", style(id.fingerprint.to_hex()).cyan());
                 println!(
                     "  Created:     {}",
                     id.profile.created_at.format("%Y-%m-%d %H:%M:%S UTC")
@@ -119,13 +116,7 @@ fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<I
             .or_else(|| {
                 sigyn_core::crypto::KeyFingerprint::from_hex(name_or_fp)
                     .ok()
-                    .and_then(|fp| {
-                        store
-                            .list()
-                            .ok()?
-                            .into_iter()
-                            .find(|i| i.fingerprint == fp)
-                    })
+                    .and_then(|fp| store.list().ok()?.into_iter().find(|i| i.fingerprint == fp))
             })
             .ok_or_else(|| anyhow::anyhow!("identity not found: {}", name_or_fp)),
         None => {
@@ -140,16 +131,11 @@ fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<I
     }
 }
 
-pub fn load_identity(
-    store: &IdentityStore,
-    name_or_fp: Option<&str>,
-) -> Result<LoadedIdentity> {
+pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<LoadedIdentity> {
     let identity = resolve_identity(store, name_or_fp)?;
 
-    let passphrase = rpassword::prompt_password(format!(
-        "Passphrase for '{}': ",
-        identity.profile.name
-    ))?;
+    let passphrase =
+        rpassword::prompt_password(format!("Passphrase for '{}': ", identity.profile.name))?;
 
     store
         .load(&identity.fingerprint, &passphrase)

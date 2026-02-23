@@ -1,8 +1,8 @@
-pub mod schedule;
-pub mod hooks;
 pub mod breach;
-pub mod history;
 pub mod dead;
+pub mod history;
+pub mod hooks;
+pub mod schedule;
 
-pub use schedule::RotationSchedule;
 pub use breach::{BreachModeConfig, BreachReport};
+pub use schedule::RotationSchedule;

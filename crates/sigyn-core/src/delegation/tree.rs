@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::crypto::keys::KeyFingerprint;
 use crate::policy::roles::Role;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegationNode {

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::{AuditLog, AuditAction};
 use sigyn_core::audit::entry::AuditOutcome;
+use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::crypto::envelope;
 use sigyn_core::crypto::vault_cipher::VaultCipher;
 use sigyn_core::identity::keygen::IdentityStore;

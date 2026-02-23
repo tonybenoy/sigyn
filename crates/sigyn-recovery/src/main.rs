@@ -3,7 +3,11 @@ use clap::{Parser, Subcommand};
 use console::style;
 
 #[derive(Parser)]
-#[command(name = "sigyn-recovery", version, about = "Sigyn disaster recovery tool")]
+#[command(
+    name = "sigyn-recovery",
+    version,
+    about = "Sigyn disaster recovery tool"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -113,10 +117,8 @@ fn cmd_split(identity: &str, threshold: u8, total: u8, output_dir: Option<&str>)
         .ok_or_else(|| anyhow::anyhow!("identity '{}' not found", identity))?;
 
     // Prompt for passphrase to unlock
-    let passphrase = rpassword::prompt_password(format!(
-        "Enter passphrase for '{}': ",
-        ident.profile.name
-    ))?;
+    let passphrase =
+        rpassword::prompt_password(format!("Enter passphrase for '{}': ", ident.profile.name))?;
 
     let loaded = store
         .load(&ident.fingerprint, &passphrase)
@@ -147,7 +149,12 @@ fn cmd_split(identity: &str, threshold: u8, total: u8, output_dir: Option<&str>)
     for shard in &shard_set.shards {
         let filename = format!(
             "shard-{}-{}.json",
-            ident.fingerprint.to_hex().chars().take(8).collect::<String>(),
+            ident
+                .fingerprint
+                .to_hex()
+                .chars()
+                .take(8)
+                .collect::<String>(),
             shard.index
         );
         let path = out_dir.join(&filename);
@@ -183,10 +190,10 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
     let mut shards = Vec::new();
 
     for path in shard_paths {
-        let content = std::fs::read_to_string(path)
-            .context(format!("failed to read shard: {}", path))?;
-        let shard: sigyn_core::identity::Shard = serde_json::from_str(&content)
-            .context(format!("failed to parse shard: {}", path))?;
+        let content =
+            std::fs::read_to_string(path).context(format!("failed to read shard: {}", path))?;
+        let shard: sigyn_core::identity::Shard =
+            serde_json::from_str(&content).context(format!("failed to parse shard: {}", path))?;
         shards.push(shard);
     }
 
@@ -232,10 +239,10 @@ fn cmd_print_shards(shard_paths: &[String]) -> Result<()> {
     println!("{}", style("═".repeat(60)).dim());
 
     for path in shard_paths {
-        let content = std::fs::read_to_string(path)
-            .context(format!("failed to read shard: {}", path))?;
-        let shard: sigyn_core::identity::Shard = serde_json::from_str(&content)
-            .context(format!("failed to parse shard: {}", path))?;
+        let content =
+            std::fs::read_to_string(path).context(format!("failed to read shard: {}", path))?;
+        let shard: sigyn_core::identity::Shard =
+            serde_json::from_str(&content).context(format!("failed to parse shard: {}", path))?;
 
         println!();
         println!(
@@ -289,8 +296,7 @@ fn cmd_snapshots(vault_name: &str) -> Result<()> {
                 let oid = oid?;
                 let commit = repo.find_commit(oid)?;
                 let time = commit.time();
-                let ts = chrono::DateTime::from_timestamp(time.seconds(), 0)
-                    .unwrap_or_default();
+                let ts = chrono::DateTime::from_timestamp(time.seconds(), 0).unwrap_or_default();
 
                 println!(
                     "  {} {} {}",
@@ -312,9 +318,7 @@ fn cmd_snapshots(vault_name: &str) -> Result<()> {
         }
         Err(_) => {
             println!("  Vault is not tracked by git. No snapshots available.");
-            println!(
-                "  Initialize with: sigyn sync configure --remote-url <url>"
-            );
+            println!("  Initialize with: sigyn sync configure --remote-url <url>");
         }
     }
 
@@ -361,15 +365,9 @@ fn cmd_succession_set(successor: &str, dead_man_days: u64) -> Result<()> {
 
     std::fs::write(&path, serde_json::to_string_pretty(&config)?)?;
 
-    println!(
-        "{} Succession plan configured",
-        style("✓").green().bold()
-    );
+    println!("{} Succession plan configured", style("✓").green().bold());
     println!("  Successor: {}", successor);
-    println!(
-        "  Dead-man trigger: {} days of inactivity",
-        dead_man_days
-    );
+    println!("  Dead-man trigger: {} days of inactivity", dead_man_days);
 
     Ok(())
 }

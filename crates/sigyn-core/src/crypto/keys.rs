@@ -1,10 +1,10 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use x25519_dalek::{StaticSecret, PublicKey};
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct KeyFingerprint(pub [u8; 16]);
@@ -24,7 +24,9 @@ impl KeyFingerprint {
     pub fn from_hex(s: &str) -> Result<Self> {
         let bytes = hex_decode(s).map_err(|e| SigynError::InvalidKey(e.to_string()))?;
         if bytes.len() != 16 {
-            return Err(SigynError::InvalidKey("fingerprint must be 16 bytes".into()));
+            return Err(SigynError::InvalidKey(
+                "fingerprint must be 16 bytes".into(),
+            ));
         }
         let mut fp = [0u8; 16];
         fp.copy_from_slice(&bytes);
@@ -150,8 +152,8 @@ impl std::fmt::Debug for VerifyingKeyWrapper {
 
 impl VerifyingKeyWrapper {
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<()> {
-        let sig = Signature::from_slice(signature)
-            .map_err(|_| SigynError::SignatureVerification)?;
+        let sig =
+            Signature::from_slice(signature).map_err(|_| SigynError::SignatureVerification)?;
         self.0
             .verify(message, &sig)
             .map_err(|_| SigynError::SignatureVerification)
@@ -172,13 +174,20 @@ mod verifying_key_serde {
     use super::*;
     use serde::{Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(key: &VerifyingKey, ser: S) -> std::result::Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        key: &VerifyingKey,
+        ser: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         ser.serialize_bytes(&key.to_bytes())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> std::result::Result<VerifyingKey, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> std::result::Result<VerifyingKey, D::Error> {
         let bytes: Vec<u8> = Deserialize::deserialize(de)?;
-        let arr: [u8; 32] = bytes.try_into().map_err(|_| serde::de::Error::custom("expected 32 bytes"))?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 32 bytes"))?;
         VerifyingKey::from_bytes(&arr).map_err(serde::de::Error::custom)
     }
 }

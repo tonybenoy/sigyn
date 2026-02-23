@@ -37,7 +37,9 @@ pub fn format_docker_env(env: &PlaintextEnv) -> String {
 }
 
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/') {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))

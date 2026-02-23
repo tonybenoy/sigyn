@@ -3,7 +3,7 @@ use clap::Subcommand;
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::vault::env_file;
 
-use super::secret::{unlock_vault, check_access};
+use super::secret::{check_access, unlock_vault};
 
 #[derive(Subcommand)]
 pub enum RunCommands {
@@ -49,7 +49,11 @@ pub fn handle(
     _json: bool,
 ) -> Result<()> {
     match cmd {
-        RunCommands::Exec { env, clean, command } => {
+        RunCommands::Exec {
+            env,
+            clean,
+            command,
+        } => {
             if command.is_empty() {
                 anyhow::bail!("no command specified. Usage: sigyn run exec -- <command>");
             }

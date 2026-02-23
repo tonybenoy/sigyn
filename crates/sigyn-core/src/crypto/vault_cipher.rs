@@ -1,9 +1,9 @@
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
 use chacha20poly1305::aead::generic_array::GenericArray;
+use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::error::{SigynError, Result};
 use super::nonce::generate_nonce;
+use crate::error::{Result, SigynError};
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct VaultCipher {

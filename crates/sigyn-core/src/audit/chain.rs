@@ -1,9 +1,9 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use crate::crypto::keys::{KeyFingerprint, SigningKeyPair};
-use crate::error::{SigynError, Result};
 use super::entry::{AuditAction, AuditEntry, AuditOutcome};
+use crate::crypto::keys::{KeyFingerprint, SigningKeyPair};
+use crate::error::{Result, SigynError};
 
 pub struct AuditLog {
     path: std::path::PathBuf,
@@ -83,8 +83,8 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let json = serde_json::to_string(&entry)
-            .map_err(|e| SigynError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(&entry).map_err(|e| SigynError::Serialization(e.to_string()))?;
         writeln!(file, "{}", json)?;
 
         self.last_hash = Some(entry.entry_hash);

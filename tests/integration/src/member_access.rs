@@ -199,12 +199,7 @@ fn test_member_can_decrypt_actual_secrets() {
     let member_key = X25519PrivateKey::generate();
 
     let master_key = [0xFFu8; 32];
-    let mut header = seal_master_key(
-        &master_key,
-        &[owner_key.public_key()],
-        vault_id,
-    )
-    .unwrap();
+    let mut header = seal_master_key(&master_key, &[owner_key.public_key()], vault_id).unwrap();
 
     // Add member to envelope
     add_recipient(&mut header, &master_key, &member_key.public_key(), vault_id).unwrap();
@@ -213,7 +208,11 @@ fn test_member_can_decrypt_actual_secrets() {
     let cipher = VaultCipher::new(master_key);
     let fp = owner_key.public_key().fingerprint();
     let mut env = PlaintextEnv::new();
-    env.set("SECRET_KEY".into(), SecretValue::String("super-secret-value".into()), &fp);
+    env.set(
+        "SECRET_KEY".into(),
+        SecretValue::String("super-secret-value".into()),
+        &fp,
+    );
 
     let encrypted = encrypt_env(&env, &cipher, "dev").unwrap();
 

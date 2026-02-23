@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::profile::IdentityProfile;
+use super::wrapping::WrappedIdentity;
 use crate::crypto::keys::{
     KeyFingerprint, SigningKeyPair, VerifyingKeyWrapper, X25519PrivateKey, X25519PublicKey,
 };
-use crate::error::{SigynError, Result};
-use super::profile::IdentityProfile;
-use super::wrapping::WrappedIdentity;
+use crate::error::{Result, SigynError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
@@ -154,8 +154,7 @@ impl IdentityStore {
 
 fn ciborium_to_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)
-        .map_err(|e| SigynError::CborEncode(e.to_string()))?;
+    ciborium::into_writer(value, &mut buf).map_err(|e| SigynError::CborEncode(e.to_string()))?;
     Ok(buf)
 }
 

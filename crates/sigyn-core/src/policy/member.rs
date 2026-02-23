@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use crate::crypto::keys::KeyFingerprint;
 use super::constraints::Constraints;
 use super::roles::Role;
+use crate::crypto::keys::KeyFingerprint;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberPolicy {

@@ -1,9 +1,9 @@
-pub mod git;
 pub mod conflict;
-pub mod vector_clock;
 pub mod crdt;
+pub mod git;
 pub mod mdns;
 pub mod state;
+pub mod vector_clock;
 
-pub use vector_clock::VectorClock;
 pub use conflict::{Conflict, ConflictResolution};
+pub use vector_clock::VectorClock;

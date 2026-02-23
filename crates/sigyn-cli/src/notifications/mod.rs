@@ -130,7 +130,10 @@ pub fn notify_all(config: &NotificationConfig, event: &NotificationEvent) -> Res
 
 /// Convenience function: load notification config from SIGYN_HOME and
 /// send the event to all matching webhooks.
-pub fn notify_event(sigyn_home: &std::path::Path, event: &NotificationEvent) -> Result<Vec<String>> {
+pub fn notify_event(
+    sigyn_home: &std::path::Path,
+    event: &NotificationEvent,
+) -> Result<Vec<String>> {
     let config = load_notification_config(sigyn_home);
     notify_all(&config, event)
 }

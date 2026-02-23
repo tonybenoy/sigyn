@@ -138,7 +138,10 @@ fn test_audit_chain_detects_tampering() {
     {
         let log = AuditLog::open(&log_path).unwrap();
         let result = log.verify_chain();
-        assert!(result.is_err(), "Chain verification should fail after tampering");
+        assert!(
+            result.is_err(),
+            "Chain verification should fail after tampering"
+        );
     }
 }
 
@@ -156,9 +159,7 @@ fn test_audit_log_append_continues_after_reopen() {
         for _ in 0..3 {
             log.append(
                 &actor,
-                AuditAction::SecretRead {
-                    key: "KEY".into(),
-                },
+                AuditAction::SecretRead { key: "KEY".into() },
                 None,
                 AuditOutcome::Success,
                 &signing_key,

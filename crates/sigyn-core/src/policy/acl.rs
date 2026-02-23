@@ -1,5 +1,5 @@
-use globset::{Glob, GlobSetBuilder};
 use crate::error::Result;
+use globset::{Glob, GlobSetBuilder};
 
 pub fn matches_secret_pattern(key: &str, patterns: &[String]) -> Result<bool> {
     if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
@@ -9,8 +9,7 @@ pub fn matches_secret_pattern(key: &str, patterns: &[String]) -> Result<bool> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         builder.add(
-            Glob::new(pattern)
-                .map_err(|e| crate::SigynError::PolicyViolation(e.to_string()))?,
+            Glob::new(pattern).map_err(|e| crate::SigynError::PolicyViolation(e.to_string()))?,
         );
     }
     let set = builder

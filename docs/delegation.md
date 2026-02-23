@@ -1,31 +1,55 @@
-# Delegation and Invitation System
+# Delegation
 
-This document provides a deep dive into how Sigyn manages team access through
-delegation trees, signed invitations, and cascade revocation.
+This document describes how Sigyn manages vault membership through a delegation tree,
+including invitation creation, acceptance, role constraints, cascade revocation, and
+master key rotation.
 
 ## Overview
 
-Sigyn's delegation system is built around three principles:
+Sigyn uses a delegation tree to track how members were added to a vault. Every member
+(except the Owner) has a `delegated_by` field pointing to the fingerprint of the person
+who invited them. This creates a tree rooted at the vault Owner.
+
+Three governing principles:
 
 1. **Least privilege**: members can only grant roles at or below their own level.
-2. **Traceability**: every delegation is recorded, forming a tree rooted at the vault owner.
+2. **Traceability**: every delegation is recorded, forming an auditable tree.
 3. **Secure revocation**: removing a member cascades to their entire subtree and triggers master key rotation.
+
+```
+Owner (alice)
+  |-- Admin (bob)         delegated_by: alice
+  |     |-- Contributor (carol)   delegated_by: bob
+  |     |-- ReadOnly (dave)       delegated_by: bob
+  |-- Manager (eve)       delegated_by: alice
+        |-- Operator (frank)      delegated_by: eve
+```
 
 ## Invitation Flow
 
 ### Step 1: Create an Invitation
 
-A Manager, Admin, or Owner creates an invitation file specifying the invitee's
-public key fingerprint, proposed role, and allowed environments:
+A member with the Manager role or higher can create an invitation. The invitation is
+an `InvitationFile` -- a JSON document signed with the inviter's Ed25519 key.
 
 ```bash
-sigyn delegation invite create \
-  --pubkey e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 \
-  --role contributor \
-  --env dev,staging
+sigyn delegation invite create --role contributor --envs dev,staging
 ```
 
-This produces a JSON invitation file with the following structure:
+The invitation file contains:
+
+| Field | Description |
+|---|---|
+| `id` | Unique UUID for this invitation |
+| `vault_name` | Name of the vault being shared |
+| `vault_id` | UUID of the vault |
+| `inviter_fingerprint` | BLAKE3 fingerprint of the inviter |
+| `proposed_role` | Role offered to the invitee |
+| `allowed_envs` | Environments the invitee will have access to |
+| `signature` | Ed25519 signature over the canonical payload |
+| `created_at` | UTC timestamp |
+
+Example invitation file:
 
 ```json
 {
@@ -36,54 +60,66 @@ This produces a JSON invitation file with the following structure:
   "proposed_role": "contributor",
   "allowed_envs": ["dev", "staging"],
   "signature": "<Ed25519 signature bytes>",
-  "created_at": "2025-03-15T10:30:00Z"
+  "created_at": "2026-02-23T10:30:00Z"
 }
 ```
 
-The invitation is signed with the inviter's Ed25519 key over a deterministic payload
-consisting of: `id || vault_name || vault_id || inviter_fingerprint || role || envs`.
-This prevents tampering with any field of the invitation.
+### Signing Payload
 
-### Step 2: Share Out-of-Band
+The Ed25519 signature covers a deterministic concatenation of fields in a stable order:
 
-The invitation file is shared with the invitee through any channel: email, encrypted
-chat, file transfer, USB drive, etc. The file contains no secret material -- it is
-a signed offer of access, not the access itself.
+```
+id || vault_name || vault_id || inviter_fingerprint || role_string || env1 || env2 || ...
+```
+
+This is constructed by `InvitationFile::signing_payload()` and prevents field
+reordering or modification attacks.
+
+### Step 2: Out-of-Band Sharing
+
+The invitation file is shared with the invitee through any channel: email, chat,
+file transfer, USB drive, etc. The file does not contain any secret key material.
+It is safe to transmit over insecure channels -- the Ed25519 signature ensures the
+invitee can verify it was created by a legitimate vault member.
 
 ### Step 3: Accept the Invitation
 
-The invitee runs:
+The invitee accepts the invitation on their machine:
 
 ```bash
-sigyn delegation invite accept invitation-abc123.json
+sigyn delegation invite accept ./invitation-abc123.json
 ```
 
-Acceptance performs the following:
+During acceptance:
 
-1. **Signature verification**: the invitation's Ed25519 signature is verified against
-   the inviter's public key. If the signature is invalid, acceptance is rejected.
-2. **Role validation**: the system confirms the inviter has sufficient privileges to
-   delegate the proposed role.
-3. **Envelope update**: the invitee's X25519 public key is added as a new slot in
-   the vault's envelope header, allowing them to decrypt the master key.
-4. **Policy update**: a new `MemberPolicy` entry is created with the specified role,
-   allowed environments, and a `delegated_by` pointer to the inviter's fingerprint.
-5. **Audit entry**: the acceptance is recorded in the audit log.
+1. **Signature verification**: the invitation's Ed25519 signature is verified against the inviter's public key via `InvitationFile::verify()`. If invalid, acceptance is rejected.
+2. **Role validation**: the system confirms the inviter has sufficient privileges to delegate the proposed role.
+3. **Envelope update**: the invitee's X25519 public key is registered in the vault's `EnvelopeHeader` as a new `RecipientSlot`, encrypting the master key to the invitee via X25519 ECDH + HKDF + ChaCha20-Poly1305.
+4. **Policy update**: a `MemberPolicy` entry is created with the proposed role, allowed environments, and `delegated_by` set to the inviter's fingerprint.
+5. **Audit entry**: the acceptance is recorded in the hash-chained audit log.
 
-### Invitation Statuses
+### Invitation Lifecycle
 
-| Status | Description |
+Invitations have the following statuses:
+
+| Status | Meaning |
 |---|---|
-| Pending | Created but not yet accepted |
-| Accepted | Successfully accepted by the invitee |
-| Rejected | Explicitly rejected by the invitee |
-| Expired | Past the expiration time (if set) |
-| Revoked | Cancelled by the inviter before acceptance |
+| `Pending` | Created but not yet accepted |
+| `Accepted` | Successfully accepted by the invitee |
+| `Rejected` | Declined by the invitee |
+| `Expired` | Past the `expires_at` timestamp |
+| `Revoked` | Canceled by the inviter before acceptance |
+
+List pending invitations:
+
+```bash
+sigyn delegation pending
+```
 
 ## Role Constraints
 
-A member can only delegate roles at or below their own level. The role hierarchy
-(from [Security Model](security.md)):
+A member can only delegate a role at or below their own level. The role hierarchy
+(from lowest to highest):
 
 | Level | Role | Can Delegate? |
 |---|---|---|
@@ -91,45 +127,40 @@ A member can only delegate roles at or below their own level. The role hierarchy
 | 2 | Auditor | No |
 | 3 | Operator | No |
 | 4 | Contributor | No |
-| 5 | Manager | Yes (roles 1-5) |
-| 6 | Admin | Yes (roles 1-6) |
-| 7 | Owner | Yes (roles 1-7) |
+| 5 | Manager | Yes (roles 1--5) |
+| 6 | Admin | Yes (roles 1--6) |
+| 7 | Owner | Yes (roles 1--7) |
 
-Only Manager and above can delegate. A Manager can invite Contributors, Operators,
-Auditors, ReadOnly members, and other Managers. An Admin can also invite other Admins.
-Only the Owner can invite Admins with full policy management rights.
+Only Manager (level 5) and above can delegate. This is enforced by
+`Role::can_delegate()` which returns `true` only for `Role >= Manager`.
+
+Examples:
+
+- A **Manager** can invite someone as Manager, Contributor, Operator, Auditor, or ReadOnly.
+- A **Manager** cannot invite someone as Admin or Owner.
+- A **Contributor** cannot invite anyone, because delegation requires Manager or higher.
+- An **Admin** can invite other Admins, Managers, and all lower roles.
+
+Environment and secret pattern restrictions are also inherited: a delegator cannot
+grant access to environments or patterns they do not have access to themselves.
 
 ## Delegation Tree
 
-Every member (except the Owner) has a `delegated_by` field pointing to the fingerprint
-of the member who invited them. This forms a tree:
-
-```
-Owner (alice)
-  |
-  +-- Admin (bob)          [delegated_by: alice]
-  |     |
-  |     +-- Contributor (carol)  [delegated_by: bob]
-  |     +-- ReadOnly (dave)      [delegated_by: bob]
-  |
-  +-- Manager (eve)        [delegated_by: alice]
-        |
-        +-- Contributor (frank)  [delegated_by: eve]
-```
-
-The tree structure is stored in the vault's policy file (`policy.cbor`). Each
-`MemberPolicy` entry contains:
+The delegation tree is represented by `DelegationNode`:
 
 ```rust
-pub struct DelegationNode {
-    pub fingerprint: KeyFingerprint,
-    pub name: String,
-    pub role: Role,
-    pub depth: u32,
-    pub delegated_by: Option<KeyFingerprint>,
-    pub children: Vec<DelegationNode>,
+DelegationNode {
+    fingerprint: KeyFingerprint,
+    name: String,
+    role: Role,
+    depth: u32,
+    delegated_by: Option<KeyFingerprint>,
+    children: Vec<DelegationNode>,
 }
 ```
+
+The tree is constructed by walking all `MemberPolicy` entries and linking each member
+to their `delegated_by` parent. The `display_tree()` method renders it with indentation.
 
 View the tree:
 
@@ -140,182 +171,193 @@ sigyn delegation tree
 Output:
 
 ```
-alice (a1b2c3d4...) [owner]
-  bob (e5f6a7b8...) [admin]
-    carol (c9d0e1f2...) [contributor]
-    dave (1a2b3c4d...) [readonly]
-  eve (5e6f7a8b...) [manager]
-    frank (9c0d1e2f...) [contributor]
+alice (a1b2c3d4e5f6a7b8) [owner]
+  bob (e5f6a7b8c9d0e1f2) [admin]
+    carol (c9d0e1f2a3b4c5d6) [contributor]
+    dave (1a2b3c4de7f8a9b0) [readonly]
+  eve (5e6f7a8bc9d0e1f2) [manager]
+    frank (9c0d1e2fa3b4c5d6) [operator]
 ```
 
 ## Cascade Revocation
 
-When a member is revoked with `--cascade`, all members they directly or transitively
-invited are also revoked. The traversal uses BFS (breadth-first search):
-
-```bash
-sigyn delegation revoke --fingerprint e5f6a7b8... --cascade
-```
+When a member is revoked with `--cascade`, Sigyn removes the target and all members
+they transitively invited. This is implemented as a BFS (breadth-first search)
+traversal of the delegation tree in `collect_cascade()`.
 
 ### Algorithm
 
-Given the target fingerprint to revoke:
-
-1. Initialize a queue with the target fingerprint.
-2. While the queue is not empty:
-   a. Pop a fingerprint from the queue.
-   b. Find all members whose `delegated_by` matches this fingerprint.
-   c. Add those members to the revocation list and to the queue.
-3. Remove all collected fingerprints from the policy.
+```
+function collect_cascade(root, policy):
+    revoked = []
+    queue = [root]
+    while queue is not empty:
+        parent = queue.pop()
+        for member in policy.members:
+            if member.delegated_by == parent and member not in revoked:
+                revoked.append(member)
+                queue.append(member)
+    return revoked
+```
 
 ### Example
 
-Revoking Bob (with cascade) from the tree above:
+Given the tree:
 
 ```
-Before:                          After:
-alice [owner]                    alice [owner]
-  bob [admin]         <-- revoked
-    carol [contributor]  <-- cascade revoked
-    dave [readonly]      <-- cascade revoked
-  eve [manager]                    eve [manager]
-    frank [contributor]              frank [contributor]
+alice [owner]
+  bob [admin]
+    carol [contributor]
+    dave [readonly]
+  eve [manager]
 ```
 
-Bob, Carol, and Dave are all removed. Eve and Frank are unaffected because they
-were not in Bob's subtree.
+Revoking **bob** with `--cascade`:
+
+1. BFS starts from bob.
+2. Finds carol (delegated_by: bob) -- added to revoked set.
+3. Finds dave (delegated_by: bob) -- added to revoked set.
+4. Checks carol's children -- none.
+5. Checks dave's children -- none.
+6. Result: bob, carol, and dave are all revoked. Eve is unaffected.
+
+```bash
+sigyn delegation revoke <bob-fingerprint> --cascade
+```
+
+After revocation:
+
+```
+alice [owner]
+  eve [manager]
+```
 
 ### Without Cascade
 
-If `--cascade` is not specified, only the target member is revoked. Their children
-become orphans in the tree (still have access, but their `delegated_by` points to
-a removed member). This is useful when you want to remove a specific person but
-keep their invitees.
+Revoking **bob** without `--cascade` removes only bob from the policy. Carol and dave
+remain as members but their `delegated_by` still points to the now-removed bob. This
+is useful when you want to remove a specific member without disrupting their delegates.
 
 ```bash
-sigyn delegation revoke --fingerprint e5f6a7b8...
+sigyn delegation revoke <bob-fingerprint>
 ```
 
-## Master Key Rotation on Revocation
+## Master Key Rotation on Revoke
 
-Every revocation triggers a master key rotation:
+Every revocation triggers a master key rotation. This is a critical security property:
+it ensures revoked members can no longer decrypt any vault data, even if they retained
+a copy of the encrypted files.
 
-1. A new random 256-bit master key is generated.
-2. The new master key is sealed (envelope encrypted) to each remaining member's
-   X25519 public key.
-3. The old envelope header is replaced with the new one.
-4. All vault data is re-encrypted with the new master key.
+### Rotation Process
 
-This ensures that revoked members -- even if they have a copy of the encrypted vault
-files from before the revocation -- cannot decrypt any data encrypted after the
-rotation.
+1. A new 256-bit master key is generated via `VaultCipher::generate()`.
+2. The `revoke_member()` function builds the full list of fingerprints to remove (target + cascade, if applicable).
+3. All affected members are removed from the `VaultPolicy`.
+4. The `EnvelopeHeader` is rebuilt from scratch: the new master key is sealed (via X25519 ECDH + HKDF + ChaCha20-Poly1305) to each remaining member's public key.
+5. All encrypted environment files are re-encrypted with the new master key.
+6. The updated `EnvelopeHeader` and `VaultPolicy` are persisted atomically.
 
-The `RevocationResult` returned by the revocation operation:
+### RevocationResult
+
+The `revoke_member()` function returns:
 
 ```rust
-pub struct RevocationResult {
-    pub directly_revoked: KeyFingerprint,
-    pub cascade_revoked: Vec<KeyFingerprint>,
-    pub master_key_rotated: bool,  // always true
+RevocationResult {
+    directly_revoked: KeyFingerprint,     // The target member
+    cascade_revoked: Vec<KeyFingerprint>, // Transitively revoked delegates
+    master_key_rotated: bool,             // Always true
 }
 ```
 
+The `master_key_rotated` field is always `true` -- there is no code path that
+revokes a member without rotating the key.
+
 ## Constraints on Delegated Access
 
-When creating an invitation, the inviter can attach constraints that limit the
-invitee's access beyond what their role would normally allow:
+Beyond role level, delegated members can have constraints that are checked by
+`PolicyEngine::evaluate()` on every access:
 
 ### Time Windows
 
-Restrict access to specific days and hours:
+Restrict access to specific days and hours. Supports overnight ranges (e.g.,
+`start_hour: 22, end_hour: 6`).
 
-```bash
-sigyn delegation invite create \
-  --pubkey <fp> \
-  --role contributor \
-  --env dev \
-  --time-window "Mon-Fri 09:00-17:00 UTC"
+```rust
+TimeWindow {
+    days: [Mon, Tue, Wed, Thu, Fri],
+    start_hour: 9,
+    end_hour: 17,
+    timezone: "UTC",
+}
 ```
 
 ### IP Allowlists
 
-Restrict access to specific IP addresses or CIDR ranges:
+Restrict access to specific IPs or CIDR ranges. An empty list permits all IPs.
 
-```bash
-sigyn delegation invite create \
-  --pubkey <fp> \
-  --role contributor \
-  --env dev \
-  --ip-allow "192.168.1.0/24,10.0.0.0/8"
+```toml
+ip_allowlist = ["192.168.1.0/24", "10.0.0.1"]
+```
+
+### Rate Limits
+
+Maximum reads and writes per hour, tracked per member.
+
+```rust
+RateLimit {
+    max_reads_per_hour: 100,
+    max_writes_per_hour: 20,
+}
 ```
 
 ### Expiry
 
-Set an automatic expiration for the membership:
-
-```bash
-sigyn delegation invite create \
-  --pubkey <fp> \
-  --role contributor \
-  --env dev \
-  --expires "2025-12-31T23:59:59Z"
-```
-
-After expiry, the member's access is denied by the policy engine even though their
-slot remains in the envelope header. The slot should be cleaned up by running
-a rotation or explicit removal.
-
-### Secret Patterns
-
-Restrict which secrets the member can access using glob patterns:
-
-```bash
-sigyn delegation invite create \
-  --pubkey <fp> \
-  --role contributor \
-  --env dev \
-  --secret-patterns "DB_*,REDIS_*"
-```
+Members can have an `expires_at` timestamp. After expiry, all access is denied
+regardless of role.
 
 ### MFA Requirement
 
-Require multi-factor authentication for the member:
+The `require_mfa` flag requires an additional authentication factor before
+granting access.
+
+### Environment Restrictions
+
+Members are limited to the environments specified in their `allowed_envs` list. A
+wildcard `*` grants access to all environments.
+
+### Secret Patterns
+
+Members can be restricted to secrets matching specific glob patterns (e.g., `DB_*`,
+`REDIS_*`). The key is matched against the member's `secret_patterns` list via
+`matches_secret_pattern()`.
+
+## Breach Mode
+
+In an emergency, breach mode provides a one-command response that revokes all
+delegated members and rotates all secrets:
 
 ```bash
-sigyn delegation invite create \
-  --pubkey <fp> \
-  --role contributor \
-  --env prod \
-  --require-mfa
+sigyn rotate breach-mode
 ```
 
-All constraints are stored in the member's policy entry and checked by
-`PolicyEngine::evaluate()` on every access. See [Security Model](security.md)
-for details on how the policy engine works.
+This:
 
-## Viewing Pending Invitations
+1. Rotates every secret in every environment to a new random value.
+2. Removes all members with `delegated_by` set (i.e., everyone except the Owner and directly-added members).
+3. Saves the updated policy.
+4. Logs an audit entry for the breach mode activation.
 
-List invitations that have been created but not yet accepted:
-
-```bash
-sigyn delegation pending
-```
+Only members with Admin role or higher can activate breach mode
+(`AccessAction::ManagePolicy` is required).
 
 ## Operational Recommendations
 
-1. **Use cascade revocation** when removing someone who has invited others, unless
-   you specifically want to preserve their subtree.
-
-2. **Set expiry on contractor access** to ensure temporary members lose access
-   automatically.
-
+1. **Use cascade revocation** when removing someone who has invited others, unless you specifically want to preserve their subtree.
+2. **Set expiry on contractor access** to ensure temporary members lose access automatically.
 3. **Use time windows for CI/CD** to limit automated access to deployment hours.
-
-4. **Audit the delegation tree regularly** with `sigyn delegation tree` to understand
-   the access structure.
-
-5. **Prefer Contributor over Admin** when in doubt. Follow the principle of least
-   privilege.
+4. **Audit the delegation tree regularly** with `sigyn delegation tree` to understand the access structure.
+5. **Prefer Contributor over Admin** when in doubt. Follow the principle of least privilege.
+6. **Set up Shamir recovery shards** before distributing vault access widely, so that key loss does not lock out the entire team.
 
 ## Related Documentation
 

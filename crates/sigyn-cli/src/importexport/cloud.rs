@@ -90,10 +90,7 @@ pub fn parse_doppler_json(json_str: &str) -> Result<Vec<(String, String)>> {
 /// Retrieves the secret value using the `aws` CLI, extracts the `SecretString`
 /// field, and attempts to parse it as JSON key-value pairs. If the secret is
 /// not JSON, it is returned as a single entry keyed by `secret_id`.
-pub fn import_aws_secret(
-    secret_id: &str,
-    region: Option<&str>,
-) -> Result<Vec<(String, String)>> {
+pub fn import_aws_secret(secret_id: &str, region: Option<&str>) -> Result<Vec<(String, String)>> {
     let mut args = vec![
         "secretsmanager",
         "get-secret-value",
@@ -336,7 +333,10 @@ mod tests {
 
         let pairs = parse_aws_json(json, "api-key").unwrap();
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0], ("api-key".to_string(), "sk-live-abcdef123456".to_string()));
+        assert_eq!(
+            pairs[0],
+            ("api-key".to_string(), "sk-live-abcdef123456".to_string())
+        );
     }
 
     #[test]

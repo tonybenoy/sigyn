@@ -13,10 +13,7 @@ use sigyn_core::vault::PlaintextEnv;
 ///   - Special commands:
 ///     - `LIST`  — returns all key names, one per line, terminated by `.`
 ///     - `QUIT` / `EXIT` — shuts down the server
-pub fn serve_secrets(
-    env: &PlaintextEnv,
-    socket_path: &str,
-) -> Result<()> {
+pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     // Remove stale socket if it exists
     let _ = std::fs::remove_file(socket_path);
 

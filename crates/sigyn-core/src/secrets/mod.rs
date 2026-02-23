@@ -1,10 +1,10 @@
-pub mod types;
-pub mod validation;
+pub mod acl;
 pub mod generation;
 pub mod reference;
-pub mod acl;
+pub mod types;
+pub mod validation;
 
-pub use types::{SecretEntry, SecretValue, SecretMetadata};
-pub use validation::validate_key_name;
-pub use generation::GenerationTemplate;
 pub use acl::SecretAcl;
+pub use generation::GenerationTemplate;
+pub use types::{SecretEntry, SecretMetadata, SecretValue};
+pub use validation::validate_key_name;

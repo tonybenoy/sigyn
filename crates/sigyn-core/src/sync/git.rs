@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::error::{SigynError, Result};
 use super::state::{SyncState, SyncStatus};
+use crate::error::{Result, SigynError};
 
 pub struct GitSyncEngine {
     vault_path: PathBuf,
@@ -50,7 +50,8 @@ impl GitSyncEngine {
         let status = if remote_url.is_none() {
             SyncStatus::NeverSynced
         } else {
-            self.compute_sync_status(&repo).unwrap_or(SyncStatus::NeverSynced)
+            self.compute_sync_status(&repo)
+                .unwrap_or(SyncStatus::NeverSynced)
         };
 
         Ok(SyncState {
@@ -63,26 +64,32 @@ impl GitSyncEngine {
 
     pub fn stage_all(&self) -> Result<()> {
         let repo = self.open_repo()?;
-        let mut index = repo.index()
+        let mut index = repo
+            .index()
             .map_err(|e| SigynError::GitError(e.to_string()))?;
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
-        index.write()
+        index
+            .write()
             .map_err(|e| SigynError::GitError(e.to_string()))?;
         Ok(())
     }
 
     pub fn commit(&self, message: &str) -> Result<git2::Oid> {
         let repo = self.open_repo()?;
-        let mut index = repo.index()
+        let mut index = repo
+            .index()
             .map_err(|e| SigynError::GitError(e.to_string()))?;
-        let tree_oid = index.write_tree()
+        let tree_oid = index
+            .write_tree()
             .map_err(|e| SigynError::GitError(e.to_string()))?;
-        let tree = repo.find_tree(tree_oid)
+        let tree = repo
+            .find_tree(tree_oid)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
-        let sig = repo.signature()
+        let sig = repo
+            .signature()
             .or_else(|_| git2::Signature::now("sigyn", "sigyn@localhost"))
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
@@ -98,7 +105,8 @@ impl GitSyncEngine {
 
     pub fn push(&self, remote_name: &str, branch: &str) -> Result<()> {
         let repo = self.open_repo()?;
-        let mut remote = repo.find_remote(remote_name)
+        let mut remote = repo
+            .find_remote(remote_name)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
         let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
@@ -110,7 +118,8 @@ impl GitSyncEngine {
 
     pub fn pull(&self, remote_name: &str, branch: &str) -> Result<PullResult> {
         let repo = self.open_repo()?;
-        let mut remote = repo.find_remote(remote_name)
+        let mut remote = repo
+            .find_remote(remote_name)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
         remote
@@ -184,8 +193,7 @@ impl GitSyncEngine {
     }
 
     fn open_repo(&self) -> Result<git2::Repository> {
-        git2::Repository::open(&self.vault_path)
-            .map_err(|e| SigynError::GitError(e.to_string()))
+        git2::Repository::open(&self.vault_path).map_err(|e| SigynError::GitError(e.to_string()))
     }
 
     fn compute_sync_status(&self, repo: &git2::Repository) -> Result<SyncStatus> {
@@ -194,18 +202,18 @@ impl GitSyncEngine {
             Err(_) => return Ok(SyncStatus::NeverSynced),
         };
 
-        let local_oid = head.target().ok_or_else(|| {
-            SigynError::GitError("HEAD has no target".into())
-        })?;
+        let local_oid = head
+            .target()
+            .ok_or_else(|| SigynError::GitError("HEAD has no target".into()))?;
 
         let upstream = match repo.find_reference("refs/remotes/origin/main") {
             Ok(r) => r,
             Err(_) => return Ok(SyncStatus::NeverSynced),
         };
 
-        let remote_oid = upstream.target().ok_or_else(|| {
-            SigynError::GitError("upstream has no target".into())
-        })?;
+        let remote_oid = upstream
+            .target()
+            .ok_or_else(|| SigynError::GitError("upstream has no target".into()))?;
 
         if local_oid == remote_oid {
             return Ok(SyncStatus::UpToDate);

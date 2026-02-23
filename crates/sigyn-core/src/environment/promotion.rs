@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::crypto::keys::KeyFingerprint;
 use crate::vault::PlaintextEnv;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PromotionStatus {
@@ -88,9 +88,21 @@ mod tests {
     fn make_source_env() -> PlaintextEnv {
         let fp = make_fingerprint(1);
         let mut env = PlaintextEnv::new();
-        env.set("DB_URL".into(), SecretValue::String("postgres://src".into()), &fp);
-        env.set("API_KEY".into(), SecretValue::String("sk-source-123".into()), &fp);
-        env.set("CACHE_URL".into(), SecretValue::String("redis://src".into()), &fp);
+        env.set(
+            "DB_URL".into(),
+            SecretValue::String("postgres://src".into()),
+            &fp,
+        );
+        env.set(
+            "API_KEY".into(),
+            SecretValue::String("sk-source-123".into()),
+            &fp,
+        );
+        env.set(
+            "CACHE_URL".into(),
+            SecretValue::String("redis://src".into()),
+            &fp,
+        );
         env
     }
 
@@ -129,9 +141,17 @@ mod tests {
         let source = make_source_env();
         let fp = make_fingerprint(2);
         let mut target = PlaintextEnv::new();
-        target.set("DB_URL".into(), SecretValue::String("postgres://target".into()), &fp);
+        target.set(
+            "DB_URL".into(),
+            SecretValue::String("postgres://target".into()),
+            &fp,
+        );
 
-        let filter = vec!["DB_URL".to_string(), "API_KEY".to_string(), "NONEXISTENT".to_string()];
+        let filter = vec![
+            "DB_URL".to_string(),
+            "API_KEY".to_string(),
+            "NONEXISTENT".to_string(),
+        ];
         let result = promote_env(&source, &mut target, &fp, Some(&filter));
 
         assert_eq!(result.promoted_keys, vec!["DB_URL", "API_KEY"]);

@@ -1,11 +1,11 @@
-use std::path::Path;
-use serde::{Deserialize, Serialize};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-use crate::crypto::keys::KeyFingerprint;
-use crate::error::{SigynError, Result};
-use super::member::MemberPolicy;
 use super::constraints::Constraints;
+use super::member::MemberPolicy;
+use crate::crypto::keys::KeyFingerprint;
+use crate::error::{Result, SigynError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VaultPolicy {
@@ -19,8 +19,7 @@ impl VaultPolicy {
     }
 
     pub fn add_member(&mut self, policy: MemberPolicy) {
-        self.members
-            .insert(policy.fingerprint.to_hex(), policy);
+        self.members.insert(policy.fingerprint.to_hex(), policy);
     }
 
     pub fn remove_member(&mut self, fingerprint: &KeyFingerprint) -> Option<MemberPolicy> {
@@ -31,29 +30,18 @@ impl VaultPolicy {
         self.members.get(&fingerprint.to_hex())
     }
 
-    pub fn get_member_mut(
-        &mut self,
-        fingerprint: &KeyFingerprint,
-    ) -> Option<&mut MemberPolicy> {
+    pub fn get_member_mut(&mut self, fingerprint: &KeyFingerprint) -> Option<&mut MemberPolicy> {
         self.members.get_mut(&fingerprint.to_hex())
     }
 
-    pub fn save_encrypted(
-        &self,
-        path: &Path,
-        cipher: &crate::crypto::VaultCipher,
-    ) -> Result<()> {
+    pub fn save_encrypted(&self, path: &Path, cipher: &crate::crypto::VaultCipher) -> Result<()> {
         let mut buf = Vec::new();
-        ciborium::into_writer(self, &mut buf)
-            .map_err(|e| SigynError::CborEncode(e.to_string()))?;
+        ciborium::into_writer(self, &mut buf).map_err(|e| SigynError::CborEncode(e.to_string()))?;
         let encrypted = cipher.encrypt(&buf, b"policy")?;
         atomic_write(path, &encrypted)
     }
 
-    pub fn load_encrypted(
-        path: &Path,
-        cipher: &crate::crypto::VaultCipher,
-    ) -> Result<Self> {
+    pub fn load_encrypted(path: &Path, cipher: &crate::crypto::VaultCipher) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
         }

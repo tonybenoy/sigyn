@@ -106,11 +106,7 @@ fn test_all_secret_types_in_single_env() {
 
     let mut env = PlaintextEnv::new();
     env.set("S1".into(), SecretValue::String("plain".into()), &fp);
-    env.set(
-        "S2".into(),
-        SecretValue::Multiline("a\nb\nc".into()),
-        &fp,
-    );
+    env.set("S2".into(), SecretValue::Multiline("a\nb\nc".into()), &fp);
     env.set(
         "S3".into(),
         SecretValue::Json(serde_json::json!({"key": "val"})),

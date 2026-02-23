@@ -63,7 +63,10 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                     "vault": vault_name,
                 }))?;
             } else {
-                crate::output::print_success(&format!("Pushed vault '{}' to '{}'", vault_name, remote));
+                crate::output::print_success(&format!(
+                    "Pushed vault '{}' to '{}'",
+                    vault_name, remote
+                ));
             }
         }
         SyncCommands::Pull { remote, branch } => {
@@ -85,7 +88,10 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                     "vault": vault_name,
                 }))?;
             } else {
-                crate::output::print_success(&format!("Pulled vault '{}' from '{}'", vault_name, remote));
+                crate::output::print_success(&format!(
+                    "Pulled vault '{}' from '{}'",
+                    vault_name, remote
+                ));
             }
         }
         SyncCommands::Status => {
@@ -118,9 +124,15 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                 "latest" => sigyn_core::sync::ConflictResolution::TakeLatestTimestamp,
                 other => anyhow::bail!("unknown strategy: '{}'. Use: local, remote, latest", other),
             };
-            crate::output::print_success(&format!("Resolved conflict for '{}' using {:?}", key, resolution));
+            crate::output::print_success(&format!(
+                "Resolved conflict for '{}' using {:?}",
+                key, resolution
+            ));
         }
-        SyncCommands::Configure { remote_url, auto_sync } => {
+        SyncCommands::Configure {
+            remote_url,
+            auto_sync,
+        } => {
             let cfg = crate::config::load_config();
             if let Some(url) = &remote_url {
                 println!("Remote URL set to: {}", url);

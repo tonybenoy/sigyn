@@ -66,7 +66,12 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
     }
 }
 
-pub fn handle(cmd: RotateCommands, vault: Option<&str>, identity: Option<&str>, json: bool) -> Result<()> {
+pub fn handle(
+    cmd: RotateCommands,
+    vault: Option<&str>,
+    identity: Option<&str>,
+    json: bool,
+) -> Result<()> {
     match cmd {
         RotateCommands::Key { key, env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
@@ -232,11 +237,7 @@ pub fn handle(cmd: RotateCommands, vault: Option<&str>, identity: Option<&str>, 
             policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)?;
 
             // Audit
-            audit(
-                &ctx,
-                AuditAction::MasterKeyRotated,
-                AuditOutcome::Success,
-            );
+            audit(&ctx, AuditAction::MasterKeyRotated, AuditOutcome::Success);
 
             // Build breach report
             let report = BreachReport {
@@ -269,7 +270,10 @@ pub fn handle(cmd: RotateCommands, vault: Option<&str>, identity: Option<&str>, 
                         style(delegated_fps.len()).bold()
                     );
                 }
-                println!("  Master key rotation: {}", style("skipped (basic mode)").dim());
+                println!(
+                    "  Master key rotation: {}",
+                    style("skipped (basic mode)").dim()
+                );
             }
         }
         RotateCommands::DeadCheck { max_age, env } => {

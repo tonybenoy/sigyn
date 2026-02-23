@@ -4,11 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use sigyn_core::vault::PlaintextEnv;
 
-pub fn run_with_secrets(
-    env: &PlaintextEnv,
-    command: &[String],
-    inherit_env: bool,
-) -> Result<i32> {
+pub fn run_with_secrets(env: &PlaintextEnv, command: &[String], inherit_env: bool) -> Result<i32> {
     if command.is_empty() {
         anyhow::bail!("no command specified");
     }

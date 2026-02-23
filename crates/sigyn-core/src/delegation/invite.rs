@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use crate::crypto::keys::KeyFingerprint;
 #[allow(unused_imports)]
 use crate::crypto::keys::X25519PublicKey;
 use crate::policy::roles::Role;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InvitationStatus {

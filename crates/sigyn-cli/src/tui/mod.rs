@@ -4,10 +4,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use ratatui::{
-    prelude::*,
-    widgets::*,
-};
+use ratatui::{prelude::*, widgets::*};
 use std::io::stdout;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,10 +83,7 @@ impl TuiState {
             _ => 0,
         };
         if len > 0 {
-            self.selected_index = self
-                .selected_index
-                .checked_sub(1)
-                .unwrap_or(len - 1);
+            self.selected_index = self.selected_index.checked_sub(1).unwrap_or(len - 1);
         }
     }
 }
@@ -138,16 +132,13 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     let manifest = sigyn_core::vault::VaultManifest::from_toml(&manifest_content)?;
 
     // Try to unlock the vault using the default identity
-    let store = sigyn_core::identity::keygen::IdentityStore::new(
-        crate::config::sigyn_home(),
-    );
+    let store = sigyn_core::identity::keygen::IdentityStore::new(crate::config::sigyn_home());
     let loaded = crate::commands::identity::load_identity(&store, None)?;
     let fingerprint = loaded.identity.fingerprint.clone();
 
     let header_bytes = std::fs::read(paths.members_path(&state.vault_name))?;
-    let header: sigyn_core::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice())
-            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+    let header: sigyn_core::crypto::EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
     let master_key = sigyn_core::crypto::envelope::unseal_master_key(
         &header,
@@ -185,16 +176,11 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
 
     state.member_list = Vec::new();
     // Always show the owner first
-    state.member_list.push(format!(
-        "{} [owner]",
-        manifest.owner.to_hex()
-    ));
+    state
+        .member_list
+        .push(format!("{} [owner]", manifest.owner.to_hex()));
     for (_fp_hex, member) in &policy.members {
-        let line = format!(
-            "{} [{}]",
-            member.fingerprint.to_hex(),
-            member.role
-        );
+        let line = format!("{} [{}]", member.fingerprint.to_hex(), member.role);
         // Avoid duplicating the owner if they also appear in the policy
         if !state.member_list.contains(&line) {
             state.member_list.push(line);
@@ -319,7 +305,11 @@ fn draw_ui(frame: &mut Frame, state: &TuiState) {
             TuiTab::Audit => 2,
             TuiTab::Status => 3,
         })
-        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_widget(tabs, chunks[0]);
 
     // Main content
@@ -393,8 +383,7 @@ fn draw_members_tab(frame: &mut Frame, state: &TuiState, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Members "));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Members "));
 
     frame.render_widget(list, area);
 }
@@ -416,8 +405,7 @@ fn draw_audit_tab(frame: &mut Frame, state: &TuiState, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Audit Log "));
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Audit Log "));
 
     frame.render_widget(list, area);
 }
@@ -455,9 +443,7 @@ fn draw_status_tab(frame: &mut Frame, state: &TuiState, area: Rect) {
     )));
     lines.push(Line::from("  Status: not configured"));
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Status ");
+    let block = Block::default().borders(Borders::ALL).title(" Status ");
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }

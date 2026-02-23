@@ -52,7 +52,11 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
             if json {
                 crate::output::print_json(&entries)?;
             } else {
-                println!("{} {}", style("Audit Log").bold(), style(format!("(last {} entries)", entries.len())).dim());
+                println!(
+                    "{} {}",
+                    style("Audit Log").bold(),
+                    style(format!("(last {} entries)", entries.len())).dim()
+                );
                 println!("{}", style("─".repeat(80)).dim());
                 for entry in &entries {
                     println!(
@@ -94,7 +98,11 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
                             "error": err_msg,
                         }))?;
                     } else {
-                        eprintln!("{} Audit chain verification failed: {}", style("ERROR").red().bold(), err_msg);
+                        eprintln!(
+                            "{} Audit chain verification failed: {}",
+                            style("ERROR").red().bold(),
+                            err_msg
+                        );
                     }
                 }
             }
@@ -107,15 +115,22 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
 
             let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
             let all = log.tail(1000)?;
-            let filtered: Vec<_> = all.into_iter().filter(|e| {
-                if let Some(ref a) = actor {
-                    if e.actor.to_hex() != *a { return false; }
-                }
-                if let Some(ref env_filter) = env {
-                    if e.env.as_deref() != Some(env_filter.as_str()) { return false; }
-                }
-                true
-            }).collect();
+            let filtered: Vec<_> = all
+                .into_iter()
+                .filter(|e| {
+                    if let Some(ref a) = actor {
+                        if e.actor.to_hex() != *a {
+                            return false;
+                        }
+                    }
+                    if let Some(ref env_filter) = env {
+                        if e.env.as_deref() != Some(env_filter.as_str()) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
 
             if json {
                 crate::output::print_json(&filtered)?;
@@ -174,16 +189,14 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
                 crate::output::print_success(&format!(
                     "Witnessed audit entry #{} (hash: {}...)",
                     latest.sequence,
-                    &latest.entry_hash.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16],
+                    &latest
+                        .entry_hash
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()[..16],
                 ));
-                println!(
-                    "  Signed by: {}",
-                    &ctx.fingerprint.to_hex()[..12]
-                );
-                println!(
-                    "  Total witnesses for this entry: {}",
-                    witness_count
-                );
+                println!("  Signed by: {}", &ctx.fingerprint.to_hex()[..12]);
+                println!("  Total witnesses for this entry: {}", witness_count);
             }
         }
         AuditCommands::Export { output, format } => {
@@ -216,7 +229,11 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
                 other => anyhow::bail!("unknown format: '{}'. Use: json, csv", other),
             }
 
-            crate::output::print_success(&format!("Exported {} entries to '{}'", entries.len(), output));
+            crate::output::print_success(&format!(
+                "Exported {} entries to '{}'",
+                entries.len(),
+                output
+            ));
         }
     }
     Ok(())

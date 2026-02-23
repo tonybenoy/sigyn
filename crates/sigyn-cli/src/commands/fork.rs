@@ -34,7 +34,11 @@ pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> 
     let home = crate::config::sigyn_home();
 
     match cmd {
-        ForkCommands::Create { name, mode, expires_days } => {
+        ForkCommands::Create {
+            name,
+            mode,
+            expires_days,
+        } => {
             let fork_mode = match mode.as_str() {
                 "leashed" => sigyn_core::forks::ForkMode::Leashed,
                 "unleashed" => sigyn_core::forks::ForkMode::Unleashed,
@@ -84,7 +88,10 @@ pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> 
             }
         }
         ForkCommands::Sync { name } => {
-            crate::output::print_success(&format!("Synced fork '{}' with parent '{}'", name, vault_name));
+            crate::output::print_success(&format!(
+                "Synced fork '{}' with parent '{}'",
+                name, vault_name
+            ));
         }
     }
     Ok(())

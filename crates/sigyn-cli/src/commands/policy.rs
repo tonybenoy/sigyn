@@ -1,15 +1,15 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::audit::entry::AuditOutcome;
+use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::crypto::keys::KeyFingerprint;
 use sigyn_core::policy::engine::{AccessAction, AccessRequest, PolicyDecision};
 use sigyn_core::policy::member::MemberPolicy;
 use sigyn_core::policy::roles::Role;
 use sigyn_core::policy::PolicyEngine;
 
-use super::secret::{unlock_vault, check_access, UnlockedVaultContext};
+use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 
 #[derive(Subcommand)]
 pub enum PolicyCommands {
@@ -65,8 +65,7 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
 }
 
 fn parse_fingerprint(hex: &str) -> Result<KeyFingerprint> {
-    KeyFingerprint::from_hex(hex)
-        .map_err(|_| anyhow::anyhow!("invalid fingerprint hex: '{}'", hex))
+    KeyFingerprint::from_hex(hex).map_err(|_| anyhow::anyhow!("invalid fingerprint hex: '{}'", hex))
 }
 
 fn parse_action(s: &str) -> Result<AccessAction> {
@@ -110,15 +109,20 @@ pub fn handle(
             }
 
             if json {
-                let members: Vec<_> = ctx.policy.members.values().map(|m| {
-                    serde_json::json!({
-                        "fingerprint": m.fingerprint.to_hex(),
-                        "role": m.role.to_string(),
-                        "envs": m.allowed_envs,
-                        "patterns": m.secret_patterns,
-                        "delegated_by": m.delegated_by.as_ref().map(|f| f.to_hex()),
+                let members: Vec<_> = ctx
+                    .policy
+                    .members
+                    .values()
+                    .map(|m| {
+                        serde_json::json!({
+                            "fingerprint": m.fingerprint.to_hex(),
+                            "role": m.role.to_string(),
+                            "envs": m.allowed_envs,
+                            "patterns": m.secret_patterns,
+                            "delegated_by": m.delegated_by.as_ref().map(|f| f.to_hex()),
+                        })
                     })
-                }).collect();
+                    .collect();
                 crate::output::print_json(&serde_json::json!({
                     "owner": ctx.manifest.owner.to_hex(),
                     "members": members,
@@ -129,7 +133,9 @@ pub fn handle(
                 println!("{}", style("-".repeat(60)).dim());
                 for m in ctx.policy.members.values() {
                     let fp_short = &m.fingerprint.to_hex()[..16];
-                    let delegated = m.delegated_by.as_ref()
+                    let delegated = m
+                        .delegated_by
+                        .as_ref()
                         .map(|f| format!(" (via {})", &f.to_hex()[..16]))
                         .unwrap_or_default();
                     println!(
@@ -144,7 +150,12 @@ pub fn handle(
             }
         }
 
-        PolicyCommands::MemberAdd { fingerprint, role, envs, patterns } => {
+        PolicyCommands::MemberAdd {
+            fingerprint,
+            role,
+            envs,
+            patterns,
+        } => {
             let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
@@ -161,7 +172,8 @@ pub fn handle(
             }
 
             let allowed_envs: Vec<String> = envs.split(',').map(|s| s.trim().to_string()).collect();
-            let secret_patterns: Vec<String> = patterns.split(',').map(|s| s.trim().to_string()).collect();
+            let secret_patterns: Vec<String> =
+                patterns.split(',').map(|s| s.trim().to_string()).collect();
 
             let mut member = MemberPolicy::new(fp.clone(), role);
             member.allowed_envs = allowed_envs;
@@ -202,7 +214,11 @@ pub fn handle(
 
             policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)?;
 
-            audit(&ctx, AuditAction::MemberRevoked { fingerprint: fp }, AuditOutcome::Success);
+            audit(
+                &ctx,
+                AuditAction::MemberRevoked { fingerprint: fp },
+                AuditOutcome::Success,
+            );
 
             crate::output::print_success(&format!(
                 "Removed member {} from policy",
@@ -210,7 +226,12 @@ pub fn handle(
             ));
         }
 
-        PolicyCommands::Check { fingerprint, action, env, key } => {
+        PolicyCommands::Check {
+            fingerprint,
+            action,
+            env,
+            key,
+        } => {
             let ctx = unlock_vault(identity, vault, None)?;
 
             let fp = parse_fingerprint(&fingerprint)?;
@@ -234,14 +255,18 @@ pub fn handle(
                 }
                 PolicyDecision::AllowWithWarning(msg) => {
                     if json {
-                        crate::output::print_json(&serde_json::json!({"decision": "allow", "warning": msg}))?;
+                        crate::output::print_json(
+                            &serde_json::json!({"decision": "allow", "warning": msg}),
+                        )?;
                     } else {
                         crate::output::print_success(&format!("Access: ALLOW (warning: {})", msg));
                     }
                 }
                 PolicyDecision::Deny(reason) => {
                     if json {
-                        crate::output::print_json(&serde_json::json!({"decision": "deny", "reason": reason}))?;
+                        crate::output::print_json(
+                            &serde_json::json!({"decision": "deny", "reason": reason}),
+                        )?;
                     } else {
                         println!("{} Access: DENY ({})", style("X").red().bold(), reason);
                     }

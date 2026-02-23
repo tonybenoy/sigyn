@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::audit::entry::AuditOutcome;
+use sigyn_core::audit::{AuditAction, AuditLog};
 use sigyn_core::environment::promotion::promote_env;
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
 
-use super::secret::{unlock_vault, check_access};
+use super::secret::{check_access, unlock_vault};
 use crate::config::sigyn_home;
 
 #[derive(Subcommand)]
@@ -56,11 +56,7 @@ pub fn handle(
             if json {
                 crate::output::print_json(&manifest.environments)?;
             } else {
-                println!(
-                    "{} (vault: {})",
-                    style("Environments").bold(),
-                    vault_name
-                );
+                println!("{} (vault: {})", style("Environments").bold(), vault_name);
                 for env in &manifest.environments {
                     let env_path = paths.env_path(&vault_name, env);
                     let status = if env_path.exists() { "active" } else { "empty" };

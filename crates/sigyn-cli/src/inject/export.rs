@@ -18,7 +18,10 @@ impl ExportFormat {
             "shell" | "shell-eval" => Ok(Self::ShellEval),
             "docker" | "docker-env" => Ok(Self::DockerEnv),
             "k8s" | "k8s-secret" | "kubernetes" => Ok(Self::K8sSecret),
-            other => anyhow::bail!("unknown format: '{}'. Use: dotenv, json, shell, docker, k8s", other),
+            other => anyhow::bail!(
+                "unknown format: '{}'. Use: dotenv, json, shell, docker, k8s",
+                other
+            ),
         }
     }
 }
@@ -33,7 +36,9 @@ pub fn export_secrets(env: &PlaintextEnv, format: ExportFormat, name: &str) -> R
                 .entries
                 .iter()
                 .filter_map(|(k, e)| {
-                    e.value.as_str().map(|v| (k.clone(), serde_json::Value::String(v.to_string())))
+                    e.value
+                        .as_str()
+                        .map(|v| (k.clone(), serde_json::Value::String(v.to_string())))
                 })
                 .collect();
             Ok(serde_json::to_string_pretty(&map)?)
@@ -71,8 +76,16 @@ mod tests {
     fn test_env() -> PlaintextEnv {
         let fp = KeyFingerprint([0u8; 16]);
         let mut env = PlaintextEnv::new();
-        env.set("DB_URL".into(), SecretValue::String("postgres://localhost".into()), &fp);
-        env.set("API_KEY".into(), SecretValue::String("sk-test-123".into()), &fp);
+        env.set(
+            "DB_URL".into(),
+            SecretValue::String("postgres://localhost".into()),
+            &fp,
+        );
+        env.set(
+            "API_KEY".into(),
+            SecretValue::String("sk-test-123".into()),
+            &fp,
+        );
         env
     }
 

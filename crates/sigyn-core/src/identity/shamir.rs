@@ -1,7 +1,7 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 /// A single Shamir shard
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,14 +30,18 @@ pub fn split_secret(secret: &[u8], threshold: u8, total: u8) -> Result<RecoveryS
         return Err(SigynError::ShamirInvalid("threshold must be >= 2".into()));
     }
     if total < threshold {
-        return Err(SigynError::ShamirInvalid("total must be >= threshold".into()));
+        return Err(SigynError::ShamirInvalid(
+            "total must be >= threshold".into(),
+        ));
     }
     if secret.is_empty() {
         return Err(SigynError::ShamirInvalid("secret must not be empty".into()));
     }
 
     let mut rng = rand::thread_rng();
-    let mut shards: Vec<Vec<u8>> = (0..total).map(|_| Vec::with_capacity(secret.len())).collect();
+    let mut shards: Vec<Vec<u8>> = (0..total)
+        .map(|_| Vec::with_capacity(secret.len()))
+        .collect();
 
     // For each byte of the secret, create a random polynomial and evaluate at each x
     for &secret_byte in secret {
@@ -88,7 +92,9 @@ pub fn reconstruct_secret(shards: &[Shard]) -> Result<Vec<u8>> {
 
     let secret_len = shards[0].data.len();
     if shards.iter().any(|s| s.data.len() != secret_len) {
-        return Err(SigynError::ShamirInvalid("shards have different lengths".into()));
+        return Err(SigynError::ShamirInvalid(
+            "shards have different lengths".into(),
+        ));
     }
 
     let shards_to_use = &shards[..threshold];

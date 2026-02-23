@@ -1,7 +1,7 @@
-use crate::crypto::keys::{KeyFingerprint, X25519PublicKey};
 use crate::crypto::envelope::{self, EnvelopeHeader};
+use crate::crypto::keys::{KeyFingerprint, X25519PublicKey};
 use crate::crypto::vault_cipher::VaultCipher;
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 use crate::policy::storage::VaultPolicy;
 
 #[derive(Debug)]
@@ -97,7 +97,11 @@ mod tests {
     use crate::policy::roles::Role;
 
     /// Helper: create a member policy with a delegated_by field set.
-    fn make_member(fp: KeyFingerprint, role: Role, delegated_by: Option<KeyFingerprint>) -> MemberPolicy {
+    fn make_member(
+        fp: KeyFingerprint,
+        role: Role,
+        delegated_by: Option<KeyFingerprint>,
+    ) -> MemberPolicy {
         let mut m = MemberPolicy::new(fp, role);
         m.delegated_by = delegated_by;
         m
@@ -120,8 +124,16 @@ mod tests {
         let unrelated = KeyFingerprint([4u8; 16]);
 
         policy.add_member(make_member(root.clone(), Role::Manager, None));
-        policy.add_member(make_member(child1.clone(), Role::Contributor, Some(root.clone())));
-        policy.add_member(make_member(child2.clone(), Role::ReadOnly, Some(root.clone())));
+        policy.add_member(make_member(
+            child1.clone(),
+            Role::Contributor,
+            Some(root.clone()),
+        ));
+        policy.add_member(make_member(
+            child2.clone(),
+            Role::ReadOnly,
+            Some(root.clone()),
+        ));
         policy.add_member(make_member(unrelated.clone(), Role::Contributor, None));
 
         let result = collect_cascade(&root, &policy);
@@ -139,8 +151,16 @@ mod tests {
         let grandchild = KeyFingerprint([3u8; 16]);
 
         policy.add_member(make_member(root.clone(), Role::Manager, None));
-        policy.add_member(make_member(child.clone(), Role::Manager, Some(root.clone())));
-        policy.add_member(make_member(grandchild.clone(), Role::ReadOnly, Some(child.clone())));
+        policy.add_member(make_member(
+            child.clone(),
+            Role::Manager,
+            Some(root.clone()),
+        ));
+        policy.add_member(make_member(
+            grandchild.clone(),
+            Role::ReadOnly,
+            Some(child.clone()),
+        ));
 
         let result = collect_cascade(&root, &policy);
         assert_eq!(result.len(), 2);
@@ -161,11 +181,19 @@ mod tests {
 
         let mut policy = VaultPolicy::new();
         policy.add_member(make_member(member_fp.clone(), Role::Manager, None));
-        policy.add_member(make_member(child_fp.clone(), Role::ReadOnly, Some(member_fp.clone())));
+        policy.add_member(make_member(
+            child_fp.clone(),
+            Role::ReadOnly,
+            Some(member_fp.clone()),
+        ));
 
         let mut header = envelope::seal_master_key(
             &[0xABu8; 32],
-            &[owner_key.public_key(), member_key.public_key(), child_key.public_key()],
+            &[
+                owner_key.public_key(),
+                member_key.public_key(),
+                child_key.public_key(),
+            ],
             vault_id,
         )
         .unwrap();
@@ -219,8 +247,16 @@ mod tests {
 
         let mut policy = VaultPolicy::new();
         policy.add_member(make_member(member_fp.clone(), Role::Manager, None));
-        policy.add_member(make_member(child_fp.clone(), Role::Contributor, Some(member_fp.clone())));
-        policy.add_member(make_member(grandchild_fp.clone(), Role::ReadOnly, Some(child_fp.clone())));
+        policy.add_member(make_member(
+            child_fp.clone(),
+            Role::Contributor,
+            Some(member_fp.clone()),
+        ));
+        policy.add_member(make_member(
+            grandchild_fp.clone(),
+            Role::ReadOnly,
+            Some(child_fp.clone()),
+        ));
 
         let mut header = envelope::seal_master_key(
             &[0xCDu8; 32],

@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::vault_cipher::VaultCipher;
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 use crate::secrets::types::{SecretEntry, SecretMetadata, SecretValue};
 
 #[derive(Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 #[derive(Debug)]
 pub struct HookResult {
@@ -9,7 +9,11 @@ pub struct HookResult {
     pub output: String,
 }
 
-pub fn execute_rotation_hooks(hooks: &[String], key: &str, env_name: &str) -> Result<Vec<HookResult>> {
+pub fn execute_rotation_hooks(
+    hooks: &[String],
+    key: &str,
+    env_name: &str,
+) -> Result<Vec<HookResult>> {
     let mut results = Vec::new();
 
     for hook in hooks {

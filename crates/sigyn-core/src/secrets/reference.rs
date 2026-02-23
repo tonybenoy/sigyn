@@ -1,5 +1,5 @@
-use crate::error::{SigynError, Result};
 use super::types::SecretValue;
+use crate::error::{Result, SigynError};
 
 pub struct SecretReference {
     pub vault: String,
@@ -9,9 +9,9 @@ pub struct SecretReference {
 
 impl SecretReference {
     pub fn parse(s: &str) -> Result<Self> {
-        let s = s
-            .strip_prefix("@ref:")
-            .ok_or_else(|| SigynError::ValidationFailed("reference must start with @ref:".into()))?;
+        let s = s.strip_prefix("@ref:").ok_or_else(|| {
+            SigynError::ValidationFailed("reference must start with @ref:".into())
+        })?;
 
         let (vault_env, key) = s.rsplit_once(':').ok_or_else(|| {
             SigynError::ValidationFailed("reference must contain vault/env:key".into())

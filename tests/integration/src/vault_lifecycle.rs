@@ -20,7 +20,9 @@ fn test_full_vault_lifecycle() {
     let store = IdentityStore::new(tmp.path().to_path_buf());
     let profile = IdentityProfile::new("owner".into(), Some("owner@example.com".into()));
     let identity = store.generate(profile, "test-passphrase").unwrap();
-    let loaded = store.load(&identity.fingerprint, "test-passphrase").unwrap();
+    let loaded = store
+        .load(&identity.fingerprint, "test-passphrase")
+        .unwrap();
 
     // 2. Create a vault manifest
     let manifest = VaultManifest::new("my-vault".into(), identity.fingerprint.clone());

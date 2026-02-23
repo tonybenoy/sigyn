@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
 use hkdf::Hkdf;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::error::{SigynError, Result};
-use super::keys::{X25519PrivateKey, X25519PublicKey, KeyFingerprint};
+use super::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
+use crate::error::{Result, SigynError};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RecipientSlot {
@@ -27,7 +27,7 @@ fn derive_slot_key(shared_secret: &[u8; 32], vault_id: &Uuid) -> Result<[u8; 32]
 }
 
 fn encrypt_slot(master_key: &[u8; 32], slot_key: &[u8; 32]) -> Result<Vec<u8>> {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadCore, aead::Aead};
+    use chacha20poly1305::{aead::Aead, AeadCore, ChaCha20Poly1305, KeyInit};
 
     let cipher = ChaCha20Poly1305::new_from_slice(slot_key)
         .map_err(|e| SigynError::Encryption(e.to_string()))?;
@@ -43,8 +43,8 @@ fn encrypt_slot(master_key: &[u8; 32], slot_key: &[u8; 32]) -> Result<Vec<u8>> {
 }
 
 fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32]) -> Result<[u8; 32]> {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
     use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 
     if encrypted.len() < 12 {
         return Err(SigynError::Decryption("slot data too short".into()));
@@ -60,7 +60,9 @@ fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32]) -> Result<[u8; 32]> {
 
     let mut key = [0u8; 32];
     if plaintext.len() != 32 {
-        return Err(SigynError::Decryption("unexpected master key length".into()));
+        return Err(SigynError::Decryption(
+            "unexpected master key length".into(),
+        ));
     }
     key.copy_from_slice(&plaintext);
     Ok(key)

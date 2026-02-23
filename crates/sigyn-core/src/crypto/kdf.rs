@@ -1,7 +1,7 @@
-use argon2::{Argon2, Algorithm, Version, Params};
+use argon2::{Algorithm, Argon2, Params, Version};
 use zeroize::Zeroize;
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 const ARGON2_M_COST: u32 = 65536;
 const ARGON2_T_COST: u32 = 3;
@@ -14,7 +14,7 @@ fn argon2_instance() -> Argon2<'static> {
 }
 
 pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Result<Vec<u8>> {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadCore, aead::Aead};
+    use chacha20poly1305::{aead::Aead, AeadCore, ChaCha20Poly1305, KeyInit};
 
     let mut derived = [0u8; 32];
     let argon2 = argon2_instance();
@@ -38,8 +38,8 @@ pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Re
 }
 
 pub fn unwrap_private_key(wrapped: &[u8], passphrase: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
-    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
     use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 
     if wrapped.len() < 12 {
         return Err(SigynError::Decryption("wrapped key too short".into()));

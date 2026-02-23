@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::error::{SigynError, Result};
+use crate::error::{Result, SigynError};
 
 static KEY_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-/]*$").unwrap());
