@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sigyn-core",
+    "crates/sigyn-cli",
+    "crates/sigyn-recovery",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Crypto
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+argon2 = "0.5"
+blake3 = "1.5"
+zeroize = { version = "1.8", features = ["derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
+rand = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"
+toml = "0.8"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "color"] }
+clap_complete = "4.5"
+ratatui = "0.29"
+crossterm = "0.28"
+dialoguer = "0.11"
+indicatif = "0.17"
+console = "0.15"
+tabled = "0.16"
+rpassword = "7.3"
+
+# Storage + System
+uuid = { version = "1.11", features = ["v4", "serde"] }
+directories = "5"
+tempfile = "3.14"
+fd-lock = "4.0"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async
+tokio = { version = "1.42", features = ["full"] }
+
+# Scheduling
+cron = "0.15"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# Other
+indexmap = { version = "2.7", features = ["serde"] }
+globset = "0.4"
+base64 = "0.22"
+regex = "1.11"
+
+# Testing
+proptest = "1.5"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

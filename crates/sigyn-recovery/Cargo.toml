@@ -1,0 +1,32 @@
+[package]
+name = "sigyn-recovery"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sigyn-recovery"
+path = "src/main.rs"
+
+[dependencies]
+sigyn-core = { path = "../sigyn-core" }
+
+# CLI
+clap.workspace = true
+rpassword.workspace = true
+dialoguer.workspace = true
+console.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Other
+chrono.workspace = true
+directories.workspace = true
+git2 = "0.19"
+
+[dev-dependencies]
+tempfile.workspace = true

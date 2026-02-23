@@ -1,0 +1,13 @@
+[package]
+name = "sigyn-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sigyn-core = { path = "../../crates/sigyn-core" }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }

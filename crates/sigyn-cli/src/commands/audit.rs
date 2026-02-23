@@ -1,0 +1,223 @@
+use anyhow::Result;
+use clap::Subcommand;
+use console::style;
+
+#[derive(Subcommand)]
+pub enum AuditCommands {
+    /// Show recent audit entries
+    Tail {
+        /// Number of entries to show
+        #[arg(short, long, default_value = "20")]
+        n: usize,
+    },
+    /// Verify audit chain integrity
+    Verify,
+    /// Query audit log
+    Query {
+        /// Filter by actor fingerprint
+        #[arg(long)]
+        actor: Option<String>,
+        /// Filter by environment
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Export audit log
+    Export {
+        /// Output file path
+        #[arg(long)]
+        output: String,
+        /// Format: json, csv
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+    /// Sign the latest audit entry as a witness
+    Witness,
+}
+
+pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()> {
+    let vault_name = vault.unwrap_or("default");
+    let home = crate::config::sigyn_home();
+    let audit_path = home.join("vaults").join(vault_name).join("audit.log.json");
+
+    match cmd {
+        AuditCommands::Tail { n } => {
+            if !audit_path.exists() {
+                println!("No audit log found for vault '{}'", vault_name);
+                return Ok(());
+            }
+
+            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let entries = log.tail(n)?;
+
+            if json {
+                crate::output::print_json(&entries)?;
+            } else {
+                println!("{} {}", style("Audit Log").bold(), style(format!("(last {} entries)", entries.len())).dim());
+                println!("{}", style("─".repeat(80)).dim());
+                for entry in &entries {
+                    println!(
+                        "  {} {} {} {}",
+                        style(format!("#{}", entry.sequence)).dim(),
+                        style(entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()).cyan(),
+                        style(format!("{:?}", entry.action)).yellow(),
+                        entry.env.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+        AuditCommands::Verify => {
+            if !audit_path.exists() {
+                println!("No audit log found for vault '{}'", vault_name);
+                return Ok(());
+            }
+
+            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            match log.verify_chain() {
+                Ok(count) => {
+                    if json {
+                        crate::output::print_json(&serde_json::json!({
+                            "valid": true,
+                            "entries_verified": count,
+                        }))?;
+                    } else {
+                        crate::output::print_success(&format!(
+                            "Audit chain verified: {} entries, all hashes valid",
+                            count
+                        ));
+                    }
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if json {
+                        crate::output::print_json(&serde_json::json!({
+                            "valid": false,
+                            "error": err_msg,
+                        }))?;
+                    } else {
+                        eprintln!("{} Audit chain verification failed: {}", style("ERROR").red().bold(), err_msg);
+                    }
+                }
+            }
+        }
+        AuditCommands::Query { actor, env } => {
+            if !audit_path.exists() {
+                println!("No audit log found for vault '{}'", vault_name);
+                return Ok(());
+            }
+
+            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let all = log.tail(1000)?;
+            let filtered: Vec<_> = all.into_iter().filter(|e| {
+                if let Some(ref a) = actor {
+                    if e.actor.to_hex() != *a { return false; }
+                }
+                if let Some(ref env_filter) = env {
+                    if e.env.as_deref() != Some(env_filter.as_str()) { return false; }
+                }
+                true
+            }).collect();
+
+            if json {
+                crate::output::print_json(&filtered)?;
+            } else {
+                println!("Found {} matching entries", filtered.len());
+                for entry in &filtered {
+                    println!(
+                        "  #{} {} {:?} {}",
+                        entry.sequence,
+                        entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                        entry.action,
+                        entry.env.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+        AuditCommands::Witness => {
+            // Unlock the vault to obtain the current identity and signing key
+            let ctx = super::secret::unlock_vault(None, Some(vault_name), None)?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if !audit_path.exists() {
+                anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
+            }
+
+            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let entries = log.tail(1)?;
+            let latest = entries.last().ok_or_else(|| {
+                anyhow::anyhow!("audit log is empty for vault '{}'", ctx.vault_name)
+            })?;
+
+            // Sign the entry hash with the current identity's signing key
+            let signature = ctx.loaded_identity.signing_key().sign(&latest.entry_hash);
+            let witness_sig = sigyn_core::audit::WitnessSignature {
+                witness: ctx.fingerprint.clone(),
+                signature,
+                timestamp: chrono::Utc::now(),
+            };
+
+            // Persist to the witnesses file next to the audit log
+            let witnesses_path = ctx.paths.witnesses_path(&ctx.vault_name);
+            let mut witness_log = sigyn_core::audit::WitnessLog::open(&witnesses_path)?;
+            witness_log.add_witness(latest.entry_hash, witness_sig)?;
+
+            let witness_count = witness_log.witnesses_for(&latest.entry_hash).len();
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "witnessed",
+                    "entry_sequence": latest.sequence,
+                    "entry_hash": latest.entry_hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    "witness": ctx.fingerprint.to_hex(),
+                    "total_witnesses": witness_count,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Witnessed audit entry #{} (hash: {}...)",
+                    latest.sequence,
+                    &latest.entry_hash.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16],
+                ));
+                println!(
+                    "  Signed by: {}",
+                    &ctx.fingerprint.to_hex()[..12]
+                );
+                println!(
+                    "  Total witnesses for this entry: {}",
+                    witness_count
+                );
+            }
+        }
+        AuditCommands::Export { output, format } => {
+            if !audit_path.exists() {
+                anyhow::bail!("no audit log found for vault '{}'", vault_name);
+            }
+
+            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let entries = log.tail(usize::MAX)?;
+
+            match format.as_str() {
+                "json" => {
+                    let content = serde_json::to_string_pretty(&entries)?;
+                    std::fs::write(&output, content)?;
+                }
+                "csv" => {
+                    let mut content = String::from("sequence,timestamp,action,env,actor\n");
+                    for e in &entries {
+                        content.push_str(&format!(
+                            "{},{},{:?},{},{}\n",
+                            e.sequence,
+                            e.timestamp.to_rfc3339(),
+                            e.action,
+                            e.env.as_deref().unwrap_or(""),
+                            e.actor.to_hex(),
+                        ));
+                    }
+                    std::fs::write(&output, content)?;
+                }
+                other => anyhow::bail!("unknown format: '{}'. Use: json, csv", other),
+            }
+
+            crate::output::print_success(&format!("Exported {} entries to '{}'", entries.len(), output));
+        }
+    }
+    Ok(())
+}

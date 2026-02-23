@@ -1,0 +1,179 @@
+use crate::crypto::keys::KeyFingerprint;
+use crate::error::Result;
+use super::acl::matches_secret_pattern;
+use super::storage::VaultPolicy;
+
+#[derive(Debug, Clone)]
+pub struct AccessRequest {
+    pub actor: KeyFingerprint,
+    pub action: AccessAction,
+    pub env: String,
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AccessAction {
+    Read,
+    Write,
+    Delete,
+    ManageMembers,
+    ManagePolicy,
+    CreateEnv,
+    Promote,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PolicyDecision {
+    Allow,
+    Deny(String),
+    AllowWithWarning(String),
+}
+
+pub struct PolicyEngine<'a> {
+    policy: &'a VaultPolicy,
+    owner: &'a KeyFingerprint,
+}
+
+impl<'a> PolicyEngine<'a> {
+    pub fn new(policy: &'a VaultPolicy, owner: &'a KeyFingerprint) -> Self {
+        Self { policy, owner }
+    }
+
+    pub fn evaluate(&self, request: &AccessRequest) -> Result<PolicyDecision> {
+        if &request.actor == self.owner {
+            return Ok(PolicyDecision::Allow);
+        }
+
+        let member = match self.policy.get_member(&request.actor) {
+            Some(m) => m,
+            None => return Ok(PolicyDecision::Deny("not a vault member".into())),
+        };
+
+        if let Some(constraints) = &member.constraints {
+            if let Err(reason) = constraints.check(chrono::Utc::now()) {
+                return Ok(PolicyDecision::Deny(reason));
+            }
+        }
+
+        if !member
+            .allowed_envs
+            .iter()
+            .any(|e| e == "*" || e == &request.env)
+        {
+            return Ok(PolicyDecision::Deny(format!(
+                "no access to env '{}'",
+                request.env
+            )));
+        }
+
+        match &request.action {
+            AccessAction::Read => {
+                if !member.role.can_read() {
+                    return Ok(PolicyDecision::Deny("role cannot read".into()));
+                }
+            }
+            AccessAction::Write | AccessAction::Delete => {
+                if !member.role.can_write() {
+                    return Ok(PolicyDecision::Deny("role cannot write".into()));
+                }
+            }
+            AccessAction::ManageMembers => {
+                if !member.role.can_manage_members() {
+                    return Ok(PolicyDecision::Deny("role cannot manage members".into()));
+                }
+            }
+            AccessAction::ManagePolicy => {
+                if !member.role.can_manage_policy() {
+                    return Ok(PolicyDecision::Deny("role cannot manage policy".into()));
+                }
+            }
+            AccessAction::CreateEnv | AccessAction::Promote => {
+                if !member.role.can_manage_members() {
+                    return Ok(PolicyDecision::Deny(
+                        "role cannot manage environments".into(),
+                    ));
+                }
+            }
+        }
+
+        if let Some(key) = &request.key {
+            if !matches_secret_pattern(key, &member.secret_patterns)? {
+                return Ok(PolicyDecision::Deny(format!(
+                    "no access to key '{}'",
+                    key
+                )));
+            }
+        }
+
+        Ok(PolicyDecision::Allow)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::member::MemberPolicy;
+    use crate::policy::roles::Role;
+
+    #[test]
+    fn test_owner_always_allowed() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let policy = VaultPolicy::new();
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let request = AccessRequest {
+            actor: owner.clone(),
+            action: AccessAction::ManagePolicy,
+            env: "prod".into(),
+            key: None,
+        };
+        assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_non_member_denied() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let stranger = KeyFingerprint([1u8; 16]);
+        let policy = VaultPolicy::new();
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let request = AccessRequest {
+            actor: stranger,
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+        };
+        assert!(matches!(
+            engine.evaluate(&request).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_readonly_cannot_write() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let reader = KeyFingerprint([2u8; 16]);
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(reader.clone(), Role::ReadOnly));
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let read_req = AccessRequest {
+            actor: reader.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: Some("DB_URL".into()),
+        };
+        assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
+
+        let write_req = AccessRequest {
+            actor: reader,
+            action: AccessAction::Write,
+            env: "dev".into(),
+            key: Some("DB_URL".into()),
+        };
+        assert!(matches!(
+            engine.evaluate(&write_req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+}

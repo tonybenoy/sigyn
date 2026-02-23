@@ -1,0 +1,51 @@
+[package]
+name = "sigyn-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Crypto
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+argon2.workspace = true
+blake3.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+rand.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+toml.workspace = true
+
+# Storage
+uuid.workspace = true
+directories.workspace = true
+tempfile.workspace = true
+fd-lock.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Sync
+git2 = "0.19"
+
+# Scheduling
+cron.workspace = true
+
+# Other
+indexmap.workspace = true
+globset.workspace = true
+base64.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

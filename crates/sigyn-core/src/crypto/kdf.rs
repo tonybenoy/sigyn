@@ -1,0 +1,96 @@
+use argon2::{Argon2, Algorithm, Version, Params};
+use zeroize::Zeroize;
+
+use crate::error::{SigynError, Result};
+
+const ARGON2_M_COST: u32 = 65536;
+const ARGON2_T_COST: u32 = 3;
+const ARGON2_P_COST: u32 = 4;
+
+fn argon2_instance() -> Argon2<'static> {
+    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
+        .expect("valid argon2 params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Result<Vec<u8>> {
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, AeadCore, aead::Aead};
+
+    let mut derived = [0u8; 32];
+    let argon2 = argon2_instance();
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, &mut derived)
+        .map_err(|e| SigynError::KeyDerivation(e.to_string()))?;
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&derived)
+        .map_err(|e| SigynError::Encryption(e.to_string()))?;
+    derived.zeroize();
+
+    let nonce = ChaCha20Poly1305::generate_nonce(&mut rand::rngs::OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, key.as_slice())
+        .map_err(|e| SigynError::Encryption(e.to_string()))?;
+
+    let mut result = Vec::with_capacity(12 + ciphertext.len());
+    result.extend_from_slice(&nonce);
+    result.extend_from_slice(&ciphertext);
+    Ok(result)
+}
+
+pub fn unwrap_private_key(wrapped: &[u8], passphrase: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+    use chacha20poly1305::aead::generic_array::GenericArray;
+
+    if wrapped.len() < 12 {
+        return Err(SigynError::Decryption("wrapped key too short".into()));
+    }
+
+    let (nonce_bytes, ciphertext) = wrapped.split_at(12);
+    let nonce = GenericArray::from_slice(nonce_bytes);
+
+    let mut derived = [0u8; 32];
+    let argon2 = argon2_instance();
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, &mut derived)
+        .map_err(|e| SigynError::KeyDerivation(e.to_string()))?;
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&derived)
+        .map_err(|e| SigynError::Decryption(e.to_string()))?;
+    derived.zeroize();
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| SigynError::InvalidPassphrase)?;
+
+    let mut key = [0u8; 32];
+    if plaintext.len() != 32 {
+        return Err(SigynError::Decryption("unexpected key length".into()));
+    }
+    key.copy_from_slice(&plaintext);
+    Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::nonce::generate_salt;
+
+    #[test]
+    fn test_wrap_unwrap_roundtrip() {
+        let key = [42u8; 32];
+        let passphrase = "test-passphrase";
+        let salt = generate_salt();
+        let wrapped = wrap_private_key(&key, passphrase, &salt).unwrap();
+        let unwrapped = unwrap_private_key(&wrapped, passphrase, &salt).unwrap();
+        assert_eq!(key, unwrapped);
+    }
+
+    #[test]
+    fn test_wrong_passphrase() {
+        let key = [42u8; 32];
+        let salt = generate_salt();
+        let wrapped = wrap_private_key(&key, "correct", &salt).unwrap();
+        let result = unwrap_private_key(&wrapped, "wrong", &salt);
+        assert!(result.is_err());
+    }
+}

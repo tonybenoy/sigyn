@@ -1,0 +1,21 @@
+[book]
+title = "Sigyn Documentation"
+authors = ["Sigyn Contributors"]
+description = "Serverless encrypted P2P secret manager"
+src = "src"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/sigyn/sigyn"
+edit-url-template = "https://github.com/sigyn/sigyn/edit/main/docs-site/src/{path}"
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-hierarchical-headings = true
