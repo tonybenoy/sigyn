@@ -20,6 +20,7 @@ pub enum AccessAction {
     ManagePolicy,
     CreateEnv,
     Promote,
+    Audit,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +95,11 @@ impl<'a> PolicyEngine<'a> {
                     ));
                 }
             }
+            AccessAction::Audit => {
+                if !member.role.can_audit() {
+                    return Ok(PolicyDecision::Deny("role cannot access audit logs".into()));
+                }
+            }
         }
 
         if let Some(key) = &request.key {
@@ -142,6 +148,58 @@ mod tests {
         };
         assert!(matches!(
             engine.evaluate(&request).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_operator_cannot_read() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let operator = KeyFingerprint([3u8; 16]);
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(operator.clone(), Role::Operator));
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let read_req = AccessRequest {
+            actor: operator,
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: Some("DB_URL".into()),
+        };
+        assert!(matches!(
+            engine.evaluate(&read_req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_auditor_can_audit() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let auditor = KeyFingerprint([4u8; 16]);
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(auditor.clone(), Role::Auditor));
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let audit_req = AccessRequest {
+            actor: auditor.clone(),
+            action: AccessAction::Audit,
+            env: "dev".into(),
+            key: None,
+        };
+        assert_eq!(engine.evaluate(&audit_req).unwrap(), PolicyDecision::Allow);
+
+        // ReadOnly cannot audit
+        let readonly = KeyFingerprint([5u8; 16]);
+        policy.add_member(MemberPolicy::new(readonly.clone(), Role::ReadOnly));
+        let engine = PolicyEngine::new(&policy, &owner);
+        let audit_req = AccessRequest {
+            actor: readonly,
+            action: AccessAction::Audit,
+            env: "dev".into(),
+            key: None,
+        };
+        assert!(matches!(
+            engine.evaluate(&audit_req).unwrap(),
             PolicyDecision::Deny(_)
         ));
     }

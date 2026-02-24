@@ -93,12 +93,30 @@ pub fn unlock_vault(
     let project_settings = project.as_ref().and_then(|p| p.project.as_ref());
 
     // Priority: CLI flags > project config > global config > defaults
+    if vault_name.is_none() {
+        if let Some(pv) = project_settings.and_then(|p| p.vault.as_deref()) {
+            eprintln!(
+                "{} using vault '{}' from .sigyn.toml",
+                style("note:").cyan().bold(),
+                pv
+            );
+        }
+    }
     let vault_name = vault_name
         .map(String::from)
         .or_else(|| project_settings.and_then(|p| p.vault.clone()))
         .or(config.default_vault)
         .ok_or_else(|| anyhow::anyhow!("no vault specified; use --vault or set default"))?;
 
+    if env_name.is_none() {
+        if let Some(pe) = project_settings.and_then(|p| p.env.as_deref()) {
+            eprintln!(
+                "{} using env '{}' from .sigyn.toml",
+                style("note:").cyan().bold(),
+                pe
+            );
+        }
+    }
     let env_name = env_name
         .map(String::from)
         .or_else(|| project_settings.and_then(|p| p.env.clone()))
@@ -106,6 +124,15 @@ pub fn unlock_vault(
         .unwrap_or_else(|| "dev".into());
 
     let identity_from_project = project_settings.and_then(|p| p.identity.clone());
+    if identity_name.is_none() {
+        if let Some(ref pi) = identity_from_project {
+            eprintln!(
+                "{} using identity '{}' from .sigyn.toml",
+                style("note:").cyan().bold(),
+                pi
+            );
+        }
+    }
     let effective_identity = identity_name.or(identity_from_project.as_deref());
     let loaded = load_identity(&store, effective_identity)?;
     let fingerprint = loaded.identity.fingerprint.clone();

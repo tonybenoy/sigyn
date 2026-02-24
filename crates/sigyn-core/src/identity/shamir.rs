@@ -110,45 +110,63 @@ pub fn reconstruct_secret(shards: &[Shard]) -> Result<Vec<u8>> {
     Ok(secret)
 }
 
-// --- GF(256) arithmetic ---
+// --- GF(256) arithmetic (constant-time via lookup tables) ---
 
-/// GF(256) with irreducible polynomial x^8 + x^4 + x^3 + x + 1 (0x11B)
-fn gf256_mul(a: u8, b: u8) -> u8 {
-    let mut result: u8 = 0;
-    let mut a = a as u16;
-    let mut b = b;
+/// GF(256) with irreducible polynomial x^8 + x^4 + x^3 + x + 1 (0x11B).
+/// Precomputed exp and log tables for constant-time multiplication and inversion.
+///
+/// Generate both tables at compile time. We use a single function returning
+/// a tuple so the two tables stay consistent.
+const fn generate_gf256_tables() -> ([u8; 512], [u8; 256]) {
+    // EXP_TABLE has 512 entries (doubled to avoid modular reduction at runtime)
+    let mut exp = [0u8; 512];
+    let mut log = [0u8; 256];
 
-    while b > 0 {
-        if b & 1 != 0 {
-            result ^= a as u8;
-        }
-        a <<= 1;
-        if a & 0x100 != 0 {
-            a ^= 0x11B;
-        }
-        b >>= 1;
+    let mut val: u16 = 1;
+    let mut i = 0;
+    while i < 255 {
+        exp[i] = val as u8;
+        exp[i + 255] = val as u8; // duplicate for easy wrap-around
+        log[val as usize] = i as u8;
+        // Multiply by generator 3 (primitive root for polynomial 0x11B)
+        // val * 3 = val * (2 + 1) = (val << 1) ^ val
+        let doubled = val << 1;
+        let doubled = if doubled & 0x100 != 0 {
+            doubled ^ 0x11B
+        } else {
+            doubled
+        };
+        val = doubled ^ val;
+        i += 1;
     }
 
-    result
+    (exp, log)
+}
+
+static TABLES: ([u8; 512], [u8; 256]) = generate_gf256_tables();
+
+#[inline]
+fn exp_table() -> &'static [u8; 512] {
+    &TABLES.0
+}
+
+#[inline]
+fn log_table() -> &'static [u8; 256] {
+    &TABLES.1
+}
+
+fn gf256_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    exp_table()[log_table()[a as usize] as usize + log_table()[b as usize] as usize]
 }
 
 fn gf256_inv(a: u8) -> u8 {
     if a == 0 {
-        return 0; // undefined, but we avoid this case
+        return 0;
     }
-    // Use Fermat's little theorem: a^(-1) = a^(254) in GF(256)
-    // Compute a^254 via repeated squaring
-    let mut result = 1u8;
-    let mut base = a;
-    let mut exp = 254u32;
-    while exp > 0 {
-        if exp & 1 != 0 {
-            result = gf256_mul(result, base);
-        }
-        base = gf256_mul(base, base);
-        exp >>= 1;
-    }
-    result
+    exp_table()[255 - log_table()[a as usize] as usize]
 }
 
 fn evaluate_polynomial(coeffs: &[u8], x: u8) -> u8 {

@@ -21,7 +21,9 @@ impl EnvDiff {
         for key in source.keys() {
             match target.get(key) {
                 Some(target_entry) => {
-                    let source_entry = source.get(key).unwrap();
+                    let Some(source_entry) = source.get(key) else {
+                        continue;
+                    };
                     if source_entry.value == target_entry.value {
                         unchanged.push(key.clone());
                     } else {

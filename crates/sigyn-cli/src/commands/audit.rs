@@ -34,15 +34,26 @@ pub enum AuditCommands {
     Witness,
 }
 
-pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()> {
+pub fn handle(
+    cmd: AuditCommands,
+    vault: Option<&str>,
+    identity: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let vault_name = vault.unwrap_or("default");
-    let home = crate::config::sigyn_home();
-    let audit_path = home.join("vaults").join(vault_name).join("audit.log.json");
 
     match cmd {
         AuditCommands::Tail { n } => {
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_core::policy::engine::AccessAction::Audit,
+                None,
+            )?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
             if !audit_path.exists() {
-                println!("No audit log found for vault '{}'", vault_name);
+                println!("No audit log found for vault '{}'", ctx.vault_name);
                 return Ok(());
             }
 
@@ -70,8 +81,16 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
             }
         }
         AuditCommands::Verify => {
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_core::policy::engine::AccessAction::Audit,
+                None,
+            )?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
             if !audit_path.exists() {
-                println!("No audit log found for vault '{}'", vault_name);
+                println!("No audit log found for vault '{}'", ctx.vault_name);
                 return Ok(());
             }
 
@@ -108,8 +127,16 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
             }
         }
         AuditCommands::Query { actor, env } => {
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_core::policy::engine::AccessAction::Audit,
+                None,
+            )?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
             if !audit_path.exists() {
-                println!("No audit log found for vault '{}'", vault_name);
+                println!("No audit log found for vault '{}'", ctx.vault_name);
                 return Ok(());
             }
 
@@ -149,7 +176,7 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
         }
         AuditCommands::Witness => {
             // Unlock the vault to obtain the current identity and signing key
-            let ctx = super::secret::unlock_vault(None, Some(vault_name), None)?;
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
 
             let audit_path = ctx.paths.audit_path(&ctx.vault_name);
             if !audit_path.exists() {
@@ -200,8 +227,16 @@ pub fn handle(cmd: AuditCommands, vault: Option<&str>, json: bool) -> Result<()>
             }
         }
         AuditCommands::Export { output, format } => {
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_core::policy::engine::AccessAction::ManagePolicy,
+                None,
+            )?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
             if !audit_path.exists() {
-                anyhow::bail!("no audit log found for vault '{}'", vault_name);
+                anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
             }
 
             let log = sigyn_core::audit::AuditLog::open(&audit_path)?;

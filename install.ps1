@@ -72,6 +72,27 @@ try {
     exit 0
 }
 
+# Verify checksum if available
+$ChecksumUrl = "https://github.com/$Repo/releases/download/$Version/checksums.sha256"
+try {
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile "$TmpDir\checksums.sha256" -UseBasicParsing
+    Say "verify" "checking SHA-256 checksum"
+    $Checksums = Get-Content "$TmpDir\checksums.sha256"
+    $ExpectedLine = $Checksums | Where-Object { $_ -match [regex]::Escape($Archive) }
+    if ($ExpectedLine) {
+        $ExpectedHash = ($ExpectedLine -split '\s+')[0]
+        $ActualHash = (Get-FileHash -Path "$TmpDir\$Archive" -Algorithm SHA256).Hash.ToLower()
+        if ($ActualHash -ne $ExpectedHash) {
+            Err "checksum verification failed: expected $ExpectedHash, got $ActualHash"
+        }
+        Say "ok" "checksum verified"
+    } else {
+        Say "warn" "archive not found in checksums file, skipping verification"
+    }
+} catch {
+    Say "warn" "checksums not available for this release, skipping verification"
+}
+
 Expand-Archive -Path "$TmpDir\$Archive" -DestinationPath $TmpDir -Force
 
 if (-not (Test-Path $InstallDir)) {

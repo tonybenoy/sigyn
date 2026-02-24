@@ -146,6 +146,11 @@ jobs:
           git tag "${{ needs.check-version.outputs.tag }}"
           git push origin "${{ needs.check-version.outputs.tag }}"
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum sigyn-* > checksums.sha256
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

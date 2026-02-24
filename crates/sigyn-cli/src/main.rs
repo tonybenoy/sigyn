@@ -197,7 +197,7 @@ fn main() -> Result<()> {
             commands::sync::handle(command, cli.vault.as_deref(), json)?;
         }
         Commands::Audit { command } => {
-            commands::audit::handle(command, cli.vault.as_deref(), json)?;
+            commands::audit::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Fork { command } => {
             commands::fork::handle(command, cli.vault.as_deref(), json)?;

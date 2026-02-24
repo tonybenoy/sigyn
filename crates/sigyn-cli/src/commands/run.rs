@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use console::style;
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::vault::env_file;
 
@@ -84,6 +85,12 @@ fn resolve_named_command(args: &[String]) -> Option<Vec<String>> {
     }
     let project = load_project_config()?;
     let cmd_str = project.commands.get(&args[0])?;
+    eprintln!(
+        "{} resolved command '{}' from .sigyn.toml: {}",
+        style("note:").cyan().bold(),
+        args[0],
+        cmd_str
+    );
     // Split the command string and append any extra args
     let mut parts: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
     parts.extend_from_slice(&args[1..]);

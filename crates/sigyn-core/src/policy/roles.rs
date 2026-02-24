@@ -18,7 +18,11 @@ impl Role {
     }
 
     pub fn can_read(&self) -> bool {
-        true
+        !matches!(self, Role::Operator)
+    }
+
+    pub fn can_audit(&self) -> bool {
+        *self >= Role::Auditor
     }
 
     pub fn can_write(&self) -> bool {

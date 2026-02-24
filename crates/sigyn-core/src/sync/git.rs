@@ -3,6 +3,21 @@ use std::path::PathBuf;
 use super::state::{SyncState, SyncStatus};
 use crate::error::{Result, SigynError};
 
+fn make_callbacks() -> git2::RemoteCallbacks<'static> {
+    let mut cb = git2::RemoteCallbacks::new();
+    cb.credentials(|_url, username, allowed| {
+        if allowed.contains(git2::CredentialType::SSH_KEY) {
+            git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+        } else if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+            let config = git2::Config::open_default()?;
+            git2::Cred::credential_helper(&config, _url, username)
+        } else {
+            Err(git2::Error::from_str("no suitable credential type"))
+        }
+    });
+    cb
+}
+
 pub struct GitSyncEngine {
     vault_path: PathBuf,
 }
@@ -110,8 +125,10 @@ impl GitSyncEngine {
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
         let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
+        let mut push_opts = git2::PushOptions::new();
+        push_opts.remote_callbacks(make_callbacks());
         remote
-            .push(&[&refspec], None)
+            .push(&[&refspec], Some(&mut push_opts))
             .map_err(|e| SigynError::GitError(e.to_string()))?;
         Ok(())
     }
@@ -122,8 +139,10 @@ impl GitSyncEngine {
             .find_remote(remote_name)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
+        let mut fetch_opts = git2::FetchOptions::new();
+        fetch_opts.remote_callbacks(make_callbacks());
         remote
-            .fetch(&[branch], None, None)
+            .fetch(&[branch], Some(&mut fetch_opts), None)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
 
         let fetch_head = repo

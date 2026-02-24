@@ -79,6 +79,24 @@ download_and_install() {
         return
     fi
 
+    # Verify checksum if available
+    checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.sha256"
+    if curl -fsSL -o "${tmpdir}/checksums.sha256" "$checksum_url" 2>/dev/null; then
+        say "verify" "checking SHA-256 checksum"
+        cd "$tmpdir"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c checksums.sha256 --ignore-missing 2>/dev/null || err "checksum verification failed"
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 -c checksums.sha256 --ignore-missing 2>/dev/null || err "checksum verification failed"
+        else
+            say "warn" "no sha256sum or shasum found, skipping checksum verification"
+        fi
+        cd - >/dev/null
+        say "ok" "checksum verified"
+    else
+        say "warn" "checksums not available for this release, skipping verification"
+    fi
+
     tar -xzf "${tmpdir}/${archive}" -C "$tmpdir"
 
     mkdir -p "$INSTALL_DIR"

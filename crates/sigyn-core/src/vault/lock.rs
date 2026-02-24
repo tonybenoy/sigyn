@@ -24,10 +24,20 @@ impl VaultLock {
             .map_err(|e| SigynError::LockFailed(e.to_string()))?;
 
         let mut lock = RwLock::new(file);
-        let _ = lock
-            .try_write()
-            .map_err(|e| SigynError::LockFailed(e.to_string()))?;
+        let _ = lock.try_write().map_err(|_| {
+            SigynError::LockFailed(format!(
+                "vault is locked by another process ({}). If stale, delete the lock file or use force-unlock.",
+                lock_path.display()
+            ))
+        })?;
 
         Ok(Self { _lock: lock })
+    }
+
+    pub fn force_acquire(lock_path: &Path) -> Result<Self> {
+        if lock_path.exists() {
+            std::fs::remove_file(lock_path)?;
+        }
+        Self::acquire(lock_path)
     }
 }

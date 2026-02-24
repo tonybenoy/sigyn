@@ -62,6 +62,10 @@ pub struct PeerInfo {
     pub hostname: String,
     pub vault_name: String,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+    /// Optional Ed25519 signature over the peer info (hex-encoded).
+    /// Unsigned peers are still discovered but flagged with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// Advertise this peer by writing a JSON file into `shared_dir`.
@@ -81,6 +85,7 @@ pub fn advertise_peer(
         hostname: hostname.to_string(),
         vault_name: vault_name.to_string(),
         last_seen: chrono::Utc::now(),
+        signature: None, // TODO: sign with identity signing key when available
     };
 
     let filename = format!("{}.peer.json", fingerprint.to_hex());
@@ -137,6 +142,12 @@ pub fn discover_peers(shared_dir: &Path, vault_name: &str) -> Result<Vec<PeerInf
         }
 
         if info.vault_name == vault_name {
+            if info.signature.is_none() {
+                eprintln!(
+                    "warning: discovered unsigned peer {} ({})",
+                    info.fingerprint, info.hostname
+                );
+            }
             peers.push(info);
         }
     }
