@@ -70,7 +70,8 @@ cargo fmt --all
 
 ## Project Structure
 
-- `crates/sigyn-core`: The core library containing all business logic, cryptography, and data models. It is I/O-free.
+- `crates/sigyn-core`: Pure library (publishable) -- cryptography, policy, CRDT, types. Zero I/O dependencies.
+- `crates/sigyn-engine`: I/O layer -- filesystem, git sync, audit persistence. Depends on and re-exports `sigyn-core`.
 - `crates/sigyn-cli`: The main CLI application.
 - `crates/sigyn-recovery`: A standalone recovery tool.
 - `tests/integration`: Integration tests that exercise the full CLI.

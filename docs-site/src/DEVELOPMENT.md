@@ -4,7 +4,7 @@ This guide is for developers who want to hack on Sigyn's codebase.
 
 ## Technical Principles
 
-1.  **I/O Separation**: `sigyn-core` MUST NOT perform any I/O (filesystem, network). It should take readers/writers or data buffers as input. This makes it highly testable and portable.
+1.  **I/O Separation**: `sigyn-core` MUST NOT perform any I/O (filesystem, network). All I/O lives in `sigyn-engine`. This makes the core library publishable, testable, and portable.
 2.  **Safety First**: Always use `secrecy::Secret<T>` for sensitive data. Ensure zeroization on drop.
 3.  **Atomic Operations**: Filesystem operations in the CLI should be atomic. Use `tempfile` and `persist()`.
 4.  **Typed Errors**: Use `thiserror` in the core library for precise error handling. Use `anyhow` in the CLI for context-rich error reporting.
@@ -12,14 +12,26 @@ This guide is for developers who want to hack on Sigyn's codebase.
 
 ## Codebase Walkthrough
 
-### `sigyn-core`
+### `sigyn-core` (Pure Library)
 
-The core is divided into several key modules:
+Zero I/O dependencies. Publishable to crates.io. Contains:
 
 - **`crypto/`**: Low-level cryptographic primitives. We use `x25519-dalek` for key exchange and `chacha20poly1305` for symmetric encryption.
 - **`policy/`**: The RBAC and ACL engine. This is the "brain" that decides if an operation is allowed.
 - **`sync/`**: CRDT-based synchronization logic. It uses vector clocks to detect conflicts.
-- **`vault/`**: Management of the vault structure and environment files.
+- **`vault/`**: Vault manifest types and env file encryption/decryption (pure computation only).
+- **`secrets/`**, **`identity/`**, **`delegation/`**, **`forks/`**, **`rotation/`**, **`audit/`**, **`hierarchy/`**, **`environment/`**: Types, algorithms, and pure logic.
+
+### `sigyn-engine` (I/O Layer)
+
+Depends on and re-exports `sigyn-core`. Contains all filesystem and git operations:
+
+- **`vault/`**: Env file read/write, vault locking (`fd-lock`), vault path resolution.
+- **`sync/`**: Git-based sync engine (`git2`).
+- **`audit/`**: File-based audit log, git anchoring, witness log persistence.
+- **`identity/`**: Identity store, MFA store, session store (all filesystem).
+- **`hierarchy/`**: Hierarchy paths, slot management, git remote resolution.
+- **`forks/`**: Fork creation with filesystem operations.
 
 ### `sigyn-cli`
 

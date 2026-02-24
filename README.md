@@ -145,11 +145,12 @@ sigyn sync pull
 
 ## Architecture
 
-Sigyn is a Cargo workspace with three crates:
+Sigyn is a Cargo workspace with four crates:
 
 | Crate | Purpose |
 |-------|---------|
-| `sigyn-core` | Library: crypto, vault, RBAC, sync, audit, CRDT engine |
+| `sigyn-core` | Pure library (publishable): crypto, policy, CRDT, types -- zero I/O dependencies |
+| `sigyn-engine` | I/O layer: filesystem, git sync, audit persistence -- depends on and re-exports `sigyn-core` |
 | `sigyn-cli` | Binary (`sigyn`): CLI interface, TUI, process injection, import/export |
 | `sigyn-recovery` | Standalone binary (`sigyn-recovery`): Shamir shard management and vault recovery |
 

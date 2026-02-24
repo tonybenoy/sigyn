@@ -38,12 +38,32 @@ default_vault = "myapp"
 
 ## Project Config (`.sigyn.toml`)
 
-For per-project defaults, create a `.sigyn.toml` file in your project root. Sigyn
-searches for this file in the current directory and walks up to parent directories.
+For per-project defaults, create a `.sigyn.toml` file in your project root. This
+eliminates the need to pass `--vault`, `--env`, and `--identity` flags on every command.
+
+Sigyn searches for this file starting in the current directory and walking up to parent
+directories, so it works from any subdirectory of your project.
 
 You can also place the same file at `~/.sigyn/project.toml` as a user-level fallback
 (useful for defaults you don't want to commit to a repo). The project-local file
 takes precedence over the user-level one.
+
+### Creating a project config
+
+The easiest way is to use `sigyn project init`:
+
+```bash
+# Interactive — prompts for vault and identity
+sigyn project init
+
+# Non-interactive
+sigyn project init -v myapp -e dev -i alice
+
+# Write to ~/.sigyn/project.toml instead (user-level fallback)
+sigyn project init --global
+```
+
+Or create `.sigyn.toml` by hand:
 
 ```toml
 [project]
@@ -57,34 +77,98 @@ app = "./start-server"
 migrate = "python manage.py migrate"
 ```
 
+This file is safe to commit to git — it contains no secrets, only references to vault
+and identity names.
+
 ### `[project]` table
 
-| Key | Description |
-|-----|-------------|
-| `vault` | Default vault for this project |
-| `env` | Default environment for this project |
-| `identity` | Default identity for this project |
+| Key | Type | Description |
+|-----|------|-------------|
+| `vault` | string | Default vault for this project |
+| `env` | string | Default environment for this project |
+| `identity` | string | Default identity for this project |
+
+All fields are optional. You can specify just the ones you want as defaults. For example,
+if everyone on your team uses the same vault but different identities:
+
+```toml
+[project]
+vault = "myapp"
+env = "dev"
+```
 
 ### `[commands]` table
 
 Named commands that can be invoked with `sigyn run <name>`. The value is the command
-string to execute with secrets injected. Extra arguments are appended.
+string to execute with secrets injected as environment variables. Extra arguments
+passed after the command name are appended to the command string.
+
+```toml
+[commands]
+dev = "npm run dev"
+app = "./start-server"
+migrate = "python manage.py migrate"
+test = "cargo test"
+db = "psql"
+```
 
 ```bash
 sigyn run dev              # runs 'npm run dev' with secrets
-sigyn run app --prod       # runs './start-server' with prod env
+sigyn run app --prod       # runs './start-server' with prod env secrets
 sigyn run migrate          # runs 'python manage.py migrate' with secrets
+sigyn run test -- --lib    # runs 'cargo test --lib' with secrets
+```
+
+The `--prod` and `--staging` flags are shorthand for `--env prod` and `--env staging`:
+
+```bash
+sigyn run dev --prod       # overrides the default env to prod
 ```
 
 ### Resolution priority
 
 Settings are resolved in this order (highest to lowest):
 
-1. CLI flags (`--vault`, `-v`, `--env`, `-e`, etc.)
-2. Project config (`.sigyn.toml` in project directory)
+1. CLI flags (`--vault`, `-v`, `--env`, `-e`, `--identity`, `-i`)
+2. Project config (`.sigyn.toml` in current or parent directory)
 3. User project config (`~/.sigyn/project.toml`)
 4. Global config (`~/.sigyn/config.toml`)
 5. Hardcoded defaults
+
+### Example workflows
+
+**Zero-flag daily usage:**
+
+```bash
+# With .sigyn.toml in your project root, just:
+sigyn secret list              # lists secrets in default vault/env
+sigyn secret get DATABASE_URL  # gets a secret from default vault/env
+sigyn run dev                  # starts dev server with secrets injected
+```
+
+**Multiple environments:**
+
+```bash
+# .sigyn.toml defaults to dev, override per-command:
+sigyn secret list --prod
+sigyn run app --staging
+sigyn secret get API_KEY -e prod
+```
+
+**Monorepo with multiple services:**
+
+```
+monorepo/
+├── .sigyn.toml          # vault = "shared", env = "dev"
+├── services/
+│   ├── api/
+│   │   └── .sigyn.toml  # vault = "api-service", env = "dev"
+│   └── web/
+│       └── .sigyn.toml  # vault = "web-app", env = "dev"
+```
+
+Each service can have its own `.sigyn.toml` pointing to a different vault. Sigyn finds
+the nearest config file by walking up from the current directory.
 
 ## Global CLI Flags
 

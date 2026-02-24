@@ -15,12 +15,18 @@ graph TD
         Output["Formatting (Table, JSON)"]
     end
 
-    subgraph Core ["sigyn-core (Library)"]
+    subgraph Engine ["sigyn-engine (I/O Layer)"]
+        VaultIO["Vault I/O / Lock"]
+        GitSync["Git Sync"]
+        AuditIO["Audit Log Persistence"]
+        IdentityIO["Identity Store"]
+    end
+
+    subgraph Core ["sigyn-core (Pure Library)"]
         Crypto["Crypto (X25519, ChaCha20)"]
-        Vault["Vault / Storage"]
         Policy["Policy Engine (RBAC)"]
-        Sync["Sync (CRDT, Git)"]
-        Audit["Audit Log"]
+        CRDT["CRDT / Vector Clocks"]
+        Types["Types / Errors"]
     end
 
     subgraph Storage ["Filesystem (~/.sigyn)"]
@@ -29,9 +35,9 @@ graph TD
         Vaults["Vaults (CBOR, JSONL)"]
     end
 
-    CLI --> Core
-    CLI --> Storage
-    Core -.-> Storage
+    CLI --> Engine
+    Engine --> Core
+    Engine --> Storage
 ```
 
 ## Data Flow
@@ -42,32 +48,35 @@ A typical secret read follows this path:
 sequenceDiagram
     participant User
     participant CLI as sigyn-cli
+    participant Engine as sigyn-engine
     participant Core as sigyn-core
     participant Disk as Filesystem
 
     User->>CLI: sigyn secret get KEY --env dev
-    CLI->>Disk: Load config.toml
+    CLI->>Engine: Load config, identity, vault files
+    Engine->>Disk: Read Identity & Vault Files
     CLI->>User: Prompt for Passphrase
-    CLI->>Disk: Read Identity & Vault Files
     CLI->>Core: PolicyEngine::evaluate()
     Core-->>CLI: Access Granted
     CLI->>Core: unseal_master_key(envelope)
     Core-->>CLI: Master Key
     CLI->>Core: decrypt_env(vault_file, master_key)
     Core-->>CLI: Plaintext Secrets
-    CLI->>Disk: Append Audit Entry
+    CLI->>Engine: Append Audit Entry
+    Engine->>Disk: Write audit log
     CLI->>User: Display Secret Value
 ```
 
 ## Cargo Workspace
 
-Sigyn is organized as a Cargo workspace with three crates and an integration test suite:
+Sigyn is organized as a Cargo workspace with four crates and an integration test suite:
 
 ```
 sigyn/
   Cargo.toml              # Workspace root (resolver = "2")
   crates/
-    sigyn-core/           # Business logic library (no I/O side effects)
+    sigyn-core/           # Pure library (publishable, zero I/O)
+    sigyn-engine/         # I/O layer (filesystem, git, persistence)
     sigyn-cli/            # CLI binary (clap-based)
     sigyn-recovery/       # Standalone recovery binary
   tests/
@@ -76,19 +85,24 @@ sigyn/
 
 | Crate | Role | Key Trait |
 |---|---|---|
-| **sigyn-core** | Pure business logic: cryptography, policy evaluation, CRDT merge, audit chain verification. Has zero I/O side effects -- no network calls, no filesystem writes. All I/O is driven by the caller. | `thiserror` for typed errors |
-| **sigyn-cli** | The `sigyn` binary. Parses arguments (clap 4), performs filesystem and network I/O, renders output (tables, JSON, TUI). | `anyhow` for ergonomic CLI errors |
+| **sigyn-core** | Pure business logic: cryptography, policy evaluation, CRDT merge, types, and errors. Has zero I/O side effects -- no `git2`, `tempfile`, `fd-lock`, or `directories` dependencies. Publishable to crates.io. | `thiserror` for typed errors |
+| **sigyn-engine** | I/O layer: filesystem operations, git sync, audit log persistence, identity storage, vault locking. Depends on and re-exports `sigyn-core`. | `thiserror` for typed errors |
+| **sigyn-cli** | The `sigyn` binary. Parses arguments (clap 4), performs network I/O, renders output (tables, JSON, TUI). | `anyhow` for ergonomic CLI errors |
 | **sigyn-recovery** | A standalone binary for disaster recovery using Shamir secret sharing. Intentionally minimal so it can be distributed independently of the main CLI. | `thiserror` in shared code |
 
 ### Dependency Boundary
 
 ```
-sigyn-cli ──depends-on──> sigyn-core
-sigyn-recovery ──depends-on──> sigyn-core
+sigyn-core  (pure, publishable)
+     ↑
+sigyn-engine  (I/O layer, re-exports sigyn-core)
+     ↑
+sigyn-cli / sigyn-recovery
 ```
 
-`sigyn-core` never depends on `sigyn-cli` or `sigyn-recovery`. This ensures the core
-logic can be tested in isolation without any I/O mocking.
+`sigyn-core` has no I/O dependencies and can be tested in complete isolation.
+`sigyn-engine` re-exports everything from `sigyn-core`, so downstream crates only need
+to depend on `sigyn-engine` to access both pure logic and I/O operations.
 
 ## On-Disk Layout
 
@@ -150,7 +164,7 @@ When a `Secret` is dropped, its memory is securely zeroed. This applies to:
 
 ### Atomic File Writes via tempfile::persist()
 
-All file writes in the CLI go through a write-to-temp-then-persist pattern using
+All file writes in `sigyn-engine` go through a write-to-temp-then-persist pattern using
 `tempfile::NamedTempFile` and its `persist()` method. This prevents partial writes
 from corrupting vault data if the process is interrupted. The `fd-lock` crate provides
 advisory file locking for concurrent access safety.
@@ -172,23 +186,36 @@ codegen-units = 1
 
 ## Module Overview
 
-Sigyn is organized into 16 logical modules spanning the core library and CLI:
+Sigyn is organized into logical modules split across the core library, engine, and CLI:
 
-### sigyn-core Modules
+### sigyn-core Modules (Pure, No I/O)
 
-| Module | Files | Responsibility |
-|---|---|---|
-| **crypto** | `keys.rs`, `envelope.rs`, `vault_cipher.rs`, `kdf.rs`, `nonce.rs` | Key generation, X25519 Diffie-Hellman, envelope encryption/decryption, ChaCha20-Poly1305 AEAD, Argon2id KDF, HKDF key derivation, nonce management |
-| **vault** | `mod.rs`, `manifest.rs`, `env_file.rs`, `lock.rs`, `path.rs` | Vault creation, opening, locking, path resolution, manifest serialization |
-| **secrets** | `mod.rs`, `types.rs`, `validation.rs`, `reference.rs`, `generation.rs`, `acl.rs` | Secret value types, validation rules, cross-references between secrets, random secret generation, per-key ACLs |
-| **identity** | `mod.rs`, `profile.rs`, `wrapping.rs`, `keygen.rs`, `shamir.rs`, `mfa.rs`, `session.rs` | Identity creation, passphrase wrapping/unwrapping, keypair generation, Shamir secret sharing for recovery, TOTP-based MFA state and sessions |
-| **environment** | `mod.rs`, `policy.rs`, `diff.rs`, `promotion.rs` | Environment management, per-env policy, diffing between environments, secret promotion across envs |
-| **policy** | `mod.rs`, `roles.rs`, `member.rs`, `acl.rs`, `engine.rs`, `storage.rs`, `constraints.rs` | 7-level RBAC, member policy, secret ACLs, `PolicyEngine::evaluate()`, constraint checking (time windows, expiry, MFA) |
-| **delegation** | `mod.rs`, `tree.rs`, `invite.rs`, `revoke.rs` | Delegation tree structure, Ed25519-signed invitation files, cascade revocation with master key rotation |
-| **forks** | `mod.rs`, `types.rs`, `approval.rs`, `leash.rs`, `expiry.rs` | Fork creation (leashed/unleashed), approval workflows, leash management, fork expiry |
-| **audit** | `mod.rs`, `entry.rs`, `chain.rs`, `anchor.rs`, `witness.rs` | Hash-chained audit entries, Ed25519 signed entries, chain verification, external anchoring, witness countersigning |
-| **sync** | `mod.rs`, `vector_clock.rs`, `crdt.rs`, `conflict.rs`, `state.rs`, `git.rs` | Vector clocks, LWW-Map CRDT, conflict detection and resolution, git-based sync |
-| **rotation** | `mod.rs`, `schedule.rs`, `history.rs`, `hooks.rs`, `breach.rs`, `dead.rs` | Key rotation, cron-based scheduling, rotation history, pre/post-rotation hooks, breach mode, dead-check detection |
+| Module | Responsibility |
+|---|---|
+| **crypto** | Key generation, X25519 Diffie-Hellman, envelope encryption/decryption, ChaCha20-Poly1305 AEAD, Argon2id KDF, HKDF key derivation, nonce management |
+| **vault** | Vault manifest types, env file encryption/decryption (pure computation) |
+| **secrets** | Secret value types, validation rules, cross-references, random secret generation, per-key ACLs |
+| **identity** | Identity/LoadedIdentity types, passphrase wrapping, Shamir secret sharing, MFA types and sessions |
+| **environment** | Environment management, per-env policy, diffing, secret promotion |
+| **policy** | 7-level RBAC, member policy, secret ACLs, `PolicyEngine::evaluate()`, constraint checking, policy serialization |
+| **delegation** | Delegation tree structure, Ed25519-signed invitations, cascade revocation |
+| **forks** | Fork types, approval workflows, fork expiry |
+| **audit** | Audit entry and witness types |
+| **sync** | Vector clocks, LWW-Map CRDT, conflict detection and resolution |
+| **rotation** | Key rotation, cron-based scheduling, rotation history, hooks, breach mode, dead-check |
+| **hierarchy** | Hierarchical policy engine, node manifests, OrgPath type |
+
+### sigyn-engine Modules (I/O Layer)
+
+| Module | Responsibility |
+|---|---|
+| **vault** | Env file read/write, vault locking (fd-lock), vault path resolution and directory scanning |
+| **identity** | Identity store (filesystem), MFA store, MFA session store |
+| **audit** | Hash-chained audit log (file-based), git anchoring, witness log persistence |
+| **sync** | Git-based sync engine (git2) |
+| **hierarchy** | Hierarchy paths (filesystem), slot management (CBOR read/write), git remote resolution |
+| **forks** | Fork creation with filesystem operations (leashed/unleashed) |
+| **policy** | `VaultPolicyExt` trait for filesystem-based policy save/load |
 
 ### sigyn-cli Modules
 
@@ -210,18 +237,24 @@ User runs: sigyn secret get DATABASE_URL --env dev
 
   sigyn-cli
     1. Parse CLI args (clap)
-    2. Load config.toml, resolve vault + identity
-    3. Read identity secret key, prompt for passphrase, unwrap via Argon2id
-    4. Read vault files: members.cbor, policy.cbor, envs/dev.vault
 
-  sigyn-core
+  sigyn-engine (I/O)
+    2. Load config.toml, resolve vault + identity
+    3. Read identity secret key, read vault files (members.cbor, policy.cbor, envs/dev.vault)
+
+  sigyn-cli
+    4. Prompt for passphrase, unwrap via Argon2id
+
+  sigyn-core (pure)
     5. PolicyEngine::evaluate() -- check RBAC, constraints, ACLs
     6. unseal_master_key() -- X25519 DH to recover master key from envelope
     7. VaultCipher::decrypt() -- ChaCha20-Poly1305 decrypt the env file
     8. Extract the requested key from the decrypted map
 
-  sigyn-cli
+  sigyn-engine (I/O)
     9. Append audit entry (hash-chained, Ed25519 signed)
+
+  sigyn-cli
    10. Output the secret value (plaintext to stdout, or JSON if --json)
 ```
 
