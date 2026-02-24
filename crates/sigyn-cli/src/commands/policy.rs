@@ -53,18 +53,39 @@ pub enum PolicyCommands {
 
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    if let Ok(mut log) = AuditLog::open(&audit_path) {
-        let _ = log.append(
-            &ctx.fingerprint,
-            action,
-            Some(ctx.env_name.clone()),
-            outcome,
-            ctx.loaded_identity.signing_key(),
-        );
+    match AuditLog::open(&audit_path) {
+        Ok(mut log) => {
+            if let Err(e) = log.append(
+                &ctx.fingerprint,
+                action,
+                Some(ctx.env_name.clone()),
+                outcome,
+                ctx.loaded_identity.signing_key(),
+            ) {
+                eprintln!(
+                    "{} failed to write audit entry: {}",
+                    style("warning:").yellow().bold(),
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{} failed to open audit log: {}",
+                style("warning:").yellow().bold(),
+                e
+            );
+        }
     }
 }
 
 fn parse_fingerprint(hex: &str) -> Result<KeyFingerprint> {
+    if hex.len() != 32 {
+        anyhow::bail!(
+            "invalid fingerprint length: expected 32 hex chars (16 bytes), got {}",
+            hex.len()
+        );
+    }
     KeyFingerprint::from_hex(hex).map_err(|_| anyhow::anyhow!("invalid fingerprint hex: '{}'", hex))
 }
 
@@ -243,6 +264,7 @@ pub fn handle(
                 action,
                 env,
                 key,
+                ip: None,
             };
 
             match engine.evaluate(&request)? {

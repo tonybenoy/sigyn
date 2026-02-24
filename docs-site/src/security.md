@@ -164,26 +164,10 @@ ip_allowlist = ["192.168.1.0/24", "10.0.0.1"]
 
 Supports exact IP matching and CIDR notation. An empty allowlist permits all IPs.
 
-### Rate Limits
-
-```rust
-RateLimit {
-    max_reads_per_hour: 100,
-    max_writes_per_hour: 20,
-}
-```
-
-Enforced per member, tracked in the sync state.
-
 ### Expiry
 
 Members can have an `expires_at` timestamp. After expiry, all access is denied
 regardless of role.
-
-### MFA Requirement
-
-The `require_mfa` flag can be set per member. When enabled, the CLI will require
-an additional authentication factor before granting access.
 
 ## Per-Key ACLs
 

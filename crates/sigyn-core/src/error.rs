@@ -19,11 +19,11 @@ pub enum SigynError {
     SignatureVerification,
 
     // Vault errors
-    #[error("vault not found: {0}")]
+    #[error("vault not accessible: {0}")]
     VaultNotFound(String),
     #[error("vault already exists: {0}")]
     VaultAlreadyExists(String),
-    #[error("environment not found: {0}")]
+    #[error("environment not accessible: {0}")]
     EnvironmentNotFound(String),
     #[error("environment already exists: {0}")]
     EnvironmentAlreadyExists(String),

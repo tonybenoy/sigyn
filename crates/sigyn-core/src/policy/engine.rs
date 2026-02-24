@@ -9,6 +9,7 @@ pub struct AccessRequest {
     pub action: AccessAction,
     pub env: String,
     pub key: Option<String>,
+    pub ip: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,9 +51,27 @@ impl<'a> PolicyEngine<'a> {
             None => return Ok(PolicyDecision::Deny("not a vault member".into())),
         };
 
+        // Check global constraints first
+        if let Some(global) = &self.policy.global_constraints {
+            if let Err(reason) = global.check(chrono::Utc::now()) {
+                return Ok(PolicyDecision::Deny(reason));
+            }
+            if let Some(ip) = &request.ip {
+                if let Err(reason) = global.check_ip(ip) {
+                    return Ok(PolicyDecision::Deny(reason));
+                }
+            }
+        }
+
+        // Check member-specific constraints
         if let Some(constraints) = &member.constraints {
             if let Err(reason) = constraints.check(chrono::Utc::now()) {
                 return Ok(PolicyDecision::Deny(reason));
+            }
+            if let Some(ip) = &request.ip {
+                if let Err(reason) = constraints.check_ip(ip) {
+                    return Ok(PolicyDecision::Deny(reason));
+                }
             }
         }
 
@@ -129,6 +148,7 @@ mod tests {
             action: AccessAction::ManagePolicy,
             env: "prod".into(),
             key: None,
+            ip: None,
         };
         assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
     }
@@ -145,6 +165,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: None,
+            ip: None,
         };
         assert!(matches!(
             engine.evaluate(&request).unwrap(),
@@ -165,6 +186,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: Some("DB_URL".into()),
+            ip: None,
         };
         assert!(matches!(
             engine.evaluate(&read_req).unwrap(),
@@ -185,6 +207,7 @@ mod tests {
             action: AccessAction::Audit,
             env: "dev".into(),
             key: None,
+            ip: None,
         };
         assert_eq!(engine.evaluate(&audit_req).unwrap(), PolicyDecision::Allow);
 
@@ -197,6 +220,7 @@ mod tests {
             action: AccessAction::Audit,
             env: "dev".into(),
             key: None,
+            ip: None,
         };
         assert!(matches!(
             engine.evaluate(&audit_req).unwrap(),
@@ -217,6 +241,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: Some("DB_URL".into()),
+            ip: None,
         };
         assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
 
@@ -225,6 +250,7 @@ mod tests {
             action: AccessAction::Write,
             env: "dev".into(),
             key: Some("DB_URL".into()),
+            ip: None,
         };
         assert!(matches!(
             engine.evaluate(&write_req).unwrap(),

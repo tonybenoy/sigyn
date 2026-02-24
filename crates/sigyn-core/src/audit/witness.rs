@@ -109,14 +109,19 @@ impl WitnessLog {
         &self.entries
     }
 
-    /// Persist the witness log to disk.
+    /// Persist the witness log to disk atomically.
     fn save(&self) -> Result<()> {
+        use std::io::Write;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.entries)
             .map_err(|e| SigynError::Serialization(e.to_string()))?;
-        std::fs::write(&self.path, json)?;
+        let dir = self.path.parent().unwrap_or(std::path::Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(json.as_bytes())?;
+        tmp.persist(&self.path)
+            .map_err(|e| SigynError::Io(e.error))?;
         Ok(())
     }
 }

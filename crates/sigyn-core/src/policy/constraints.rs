@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct Constraints {
     pub time_windows: Vec<TimeWindow>,
     pub ip_allowlist: Vec<String>,
-    pub rate_limit: Option<RateLimit>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub require_mfa: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,17 +12,10 @@ pub struct TimeWindow {
     pub days: Vec<chrono::Weekday>,
     pub start_hour: u8,
     pub end_hour: u8,
-    pub timezone: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RateLimit {
-    pub max_reads_per_hour: u32,
-    pub max_writes_per_hour: u32,
 }
 
 impl Constraints {
-    /// Check all constraints except rate limiting (which requires state tracking).
+    /// Check all constraints.
     /// Returns Ok(()) if all constraints pass, or Err with a reason string.
     pub fn check(&self, now: chrono::DateTime<chrono::Utc>) -> Result<(), String> {
         // Expiry check
@@ -73,6 +64,23 @@ impl Constraints {
 }
 
 impl TimeWindow {
+    /// Validate that the time window values are sane.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.start_hour > 23 {
+            return Err(format!(
+                "start_hour {} is out of range (0-23)",
+                self.start_hour
+            ));
+        }
+        if self.end_hour > 23 {
+            return Err(format!("end_hour {} is out of range (0-23)", self.end_hour));
+        }
+        if self.days.is_empty() {
+            return Err("time window must specify at least one day".into());
+        }
+        Ok(())
+    }
+
     /// Check if the given UTC time falls within this window.
     pub fn is_active(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
         use chrono::Datelike;
@@ -144,9 +152,7 @@ mod tests {
         Constraints {
             time_windows: vec![],
             ip_allowlist: vec![],
-            rate_limit: None,
             expires_at: None,
-            require_mfa: false,
         }
     }
 
@@ -169,7 +175,6 @@ mod tests {
             days: vec![chrono::Weekday::Mon],
             start_hour: 9,
             end_hour: 17,
-            timezone: "UTC".into(),
         }];
         assert!(c.check(now).is_ok());
 
@@ -188,7 +193,6 @@ mod tests {
             days: vec![chrono::Weekday::Fri],
             start_hour: 22,
             end_hour: 6,
-            timezone: "UTC".into(),
         };
         let late_friday = Utc.with_ymd_and_hms(2025, 3, 14, 23, 0, 0).unwrap();
         assert!(window.is_active(late_friday));

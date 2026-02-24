@@ -30,6 +30,10 @@ if ($Version -eq "latest") {
     }
 }
 
+if ($Version -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$') {
+    Err "invalid version format: $Version"
+}
+
 # ---------- detect target ----------------------------------------------------
 
 $Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
@@ -56,20 +60,24 @@ try {
     Say "fetch" $Url
     Invoke-WebRequest -Uri $Url -OutFile "$TmpDir\$Archive" -UseBasicParsing
 } catch {
-    Say "warn" "pre-built binary not found -- falling back to cargo install"
+    if ($env:SIGYN_ALLOW_BUILD -eq "1") {
+        Say "warn" "pre-built binary not found -- falling back to cargo install"
 
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Err "cargo not found. Install Rust from https://rustup.rs then retry."
+        if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            Err "cargo not found. Install Rust from https://rustup.rs then retry."
+        }
+
+        Say "build" "compiling from source (this may take a few minutes)..."
+        cargo install --git "https://github.com/$Repo.git" --tag $Version --bin sigyn  sigyn-cli
+        cargo install --git "https://github.com/$Repo.git" --tag $Version --bin sigyn-recovery sigyn-recovery
+        Say "ok" "installed via cargo"
+        Write-Host ""
+        Write-Host "  Binaries are in $env:USERPROFILE\.cargo\bin"
+        Remove-Item -Recurse -Force $TmpDir
+        exit 0
+    } else {
+        Err "pre-built binary not found for $Target. Set SIGYN_ALLOW_BUILD=1 to compile from source."
     }
-
-    Say "build" "compiling from source (this may take a few minutes)..."
-    cargo install --git "https://github.com/$Repo.git" --bin sigyn  sigyn-cli
-    cargo install --git "https://github.com/$Repo.git" --bin sigyn-recovery sigyn-recovery
-    Say "ok" "installed via cargo"
-    Write-Host ""
-    Write-Host "  Binaries are in $env:USERPROFILE\.cargo\bin"
-    Remove-Item -Recurse -Force $TmpDir
-    exit 0
 }
 
 # Verify checksum if available

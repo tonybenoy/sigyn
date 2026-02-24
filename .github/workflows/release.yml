@@ -29,6 +29,10 @@ jobs:
         id: version
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid version string: $version"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Detected version: $version"
@@ -95,7 +99,7 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --locked
+        run: cargo install cross --locked --version 0.2.5
 
       - name: Build
         run: |
@@ -152,7 +156,7 @@ jobs:
           sha256sum sigyn-* > checksums.sha256
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@c062e08bd532815e2082a407cebd703cd6272953 # v2.2.1
         with:
           tag_name: ${{ needs.check-version.outputs.tag }}
           name: Sigyn ${{ needs.check-version.outputs.tag }}

@@ -68,6 +68,9 @@ impl AuditLog {
             &entry.sequence,
             &entry.timestamp,
             &entry.actor,
+            &entry.action,
+            &entry.env,
+            &entry.outcome,
             &entry.nonce,
             &entry.prev_hash,
         ))
@@ -79,13 +82,16 @@ impl AuditLog {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Write to a temp file first, then append atomically to avoid partial writes
+        let json =
+            serde_json::to_string(&entry).map_err(|e| SigynError::Serialization(e.to_string()))?;
+        let line = format!("{}\n", json);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let json =
-            serde_json::to_string(&entry).map_err(|e| SigynError::Serialization(e.to_string()))?;
-        writeln!(file, "{}", json)?;
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
 
         self.last_hash = Some(entry.entry_hash);
         self.next_sequence += 1;
@@ -111,6 +117,23 @@ impl AuditLog {
                 .map_err(|e| SigynError::Deserialization(e.to_string()))?;
 
             if entry.prev_hash != prev_hash {
+                return Err(SigynError::AuditChainBroken(entry.sequence));
+            }
+
+            // Recompute hash to verify integrity
+            let hash_input = serde_json::to_vec(&(
+                &entry.sequence,
+                &entry.timestamp,
+                &entry.actor,
+                &entry.action,
+                &entry.env,
+                &entry.outcome,
+                &entry.nonce,
+                &entry.prev_hash,
+            ))
+            .map_err(|e| SigynError::Serialization(e.to_string()))?;
+            let computed_hash = *blake3::hash(&hash_input).as_bytes();
+            if computed_hash != entry.entry_hash {
                 return Err(SigynError::AuditChainBroken(entry.sequence));
             }
 

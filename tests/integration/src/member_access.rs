@@ -51,6 +51,7 @@ fn test_multi_member_access() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
+        ip: None,
     };
     assert_eq!(
         engine.evaluate(&read_request).unwrap(),
@@ -63,6 +64,7 @@ fn test_multi_member_access() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
+        ip: None,
     };
     assert!(matches!(
         engine.evaluate(&write_request).unwrap(),
@@ -75,6 +77,7 @@ fn test_multi_member_access() {
         action: AccessAction::Delete,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
+        ip: None,
     };
     assert!(matches!(
         engine.evaluate(&delete_request).unwrap(),
@@ -87,6 +90,7 @@ fn test_multi_member_access() {
         action: AccessAction::ManageMembers,
         env: "dev".into(),
         key: None,
+        ip: None,
     };
     assert!(matches!(
         engine.evaluate(&manage_request).unwrap(),
@@ -108,6 +112,7 @@ fn test_multi_member_access() {
             action,
             env: "prod".into(),
             key: Some("ANYTHING".into()),
+            ip: None,
         };
         assert_eq!(
             engine.evaluate(&owner_request).unwrap(),
@@ -132,6 +137,7 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("API_KEY".into()),
+        ip: None,
     };
     assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
 
@@ -141,6 +147,7 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("API_KEY".into()),
+        ip: None,
     };
     assert_eq!(engine.evaluate(&write_req).unwrap(), PolicyDecision::Allow);
 
@@ -150,6 +157,7 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::ManageMembers,
         env: "dev".into(),
         key: None,
+        ip: None,
     };
     assert!(matches!(
         engine.evaluate(&manage_req).unwrap(),
@@ -176,6 +184,7 @@ fn test_env_restriction() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: None,
+        ip: None,
     };
     assert_eq!(engine.evaluate(&dev_req).unwrap(), PolicyDecision::Allow);
 
@@ -185,6 +194,7 @@ fn test_env_restriction() {
         action: AccessAction::Read,
         env: "prod".into(),
         key: None,
+        ip: None,
     };
     assert!(matches!(
         engine.evaluate(&prod_req).unwrap(),

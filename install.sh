@@ -50,6 +50,8 @@ resolve_version() {
             | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')"
         [ -n "$VERSION" ] || err "could not determine latest release"
     fi
+    echo "$VERSION" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+        || err "invalid version format: $VERSION"
 }
 
 # ---------- download & install -----------------------------------------------
@@ -74,9 +76,13 @@ download_and_install() {
     http_code="$(curl -fsSL -o "${tmpdir}/${archive}" -w '%{http_code}' "$url" 2>/dev/null)" || true
 
     if [ "$http_code" != "200" ] || [ ! -s "${tmpdir}/${archive}" ]; then
-        say "warn" "pre-built binary not found — falling back to cargo install"
-        install_from_source
-        return
+        if [ "${SIGYN_ALLOW_BUILD:-0}" = "1" ]; then
+            say "warn" "pre-built binary not found — falling back to cargo install"
+            install_from_source
+            return
+        else
+            err "pre-built binary not found for ${target}. Set SIGYN_ALLOW_BUILD=1 to compile from source."
+        fi
     fi
 
     # Verify checksum if available
@@ -89,7 +95,7 @@ download_and_install() {
         elif command -v shasum >/dev/null 2>&1; then
             shasum -a 256 -c checksums.sha256 --ignore-missing 2>/dev/null || err "checksum verification failed"
         else
-            say "warn" "no sha256sum or shasum found, skipping checksum verification"
+            err "no sha256sum or shasum found — cannot verify download integrity"
         fi
         cd - >/dev/null
         say "ok" "checksum verified"
@@ -115,8 +121,8 @@ download_and_install() {
 install_from_source() {
     need cargo
     say "build" "compiling from source (this may take a few minutes)..."
-    cargo install --git "https://github.com/${REPO}.git" --bin sigyn  sigyn-cli
-    cargo install --git "https://github.com/${REPO}.git" --bin sigyn-recovery sigyn-recovery
+    cargo install --git "https://github.com/${REPO}.git" --tag "${VERSION}" --bin sigyn  sigyn-cli
+    cargo install --git "https://github.com/${REPO}.git" --tag "${VERSION}" --bin sigyn-recovery sigyn-recovery
     say "ok" "installed via cargo"
     printf '\n  Binaries are in %s\n' "$(dirname "$(command -v sigyn 2>/dev/null || echo "$HOME/.cargo/bin/sigyn")")"
 }

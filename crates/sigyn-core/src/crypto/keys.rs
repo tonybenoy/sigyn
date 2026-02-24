@@ -117,6 +117,13 @@ pub struct SigningKeyPair {
     signing_key: SigningKey,
 }
 
+impl Drop for SigningKeyPair {
+    fn drop(&mut self) {
+        // Overwrite private key material with zeros on drop
+        self.signing_key = SigningKey::from_bytes(&[0u8; 32]);
+    }
+}
+
 impl SigningKeyPair {
     pub fn generate() -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);

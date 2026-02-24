@@ -137,7 +137,12 @@ pub fn discover_peers(shared_dir: &Path, vault_name: &str) -> Result<Vec<PeerInf
 
         // Prune stale entries
         if info.last_seen < cutoff {
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!(
+                    "warning: failed to remove stale peer file {:?}: {}",
+                    path, e
+                );
+            }
             continue;
         }
 

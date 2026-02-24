@@ -135,8 +135,11 @@ fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<I
 pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<LoadedIdentity> {
     let identity = resolve_identity(store, name_or_fp)?;
 
-    let passphrase =
-        rpassword::prompt_password(format!("Passphrase for '{}': ", identity.profile.name))?;
+    let fp_hex = identity.fingerprint.to_hex();
+    let passphrase = rpassword::prompt_password(format!(
+        "Passphrase for [{}...]: ",
+        &fp_hex[..8.min(fp_hex.len())]
+    ))?;
 
     store
         .load(&identity.fingerprint, &passphrase)

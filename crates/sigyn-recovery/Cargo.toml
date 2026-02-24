@@ -2,6 +2,7 @@
 name = "sigyn-recovery"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "sigyn-recovery"

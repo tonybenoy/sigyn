@@ -62,8 +62,8 @@ pub enum RunCommands {
         #[arg(long, short)]
         env: Option<String>,
         /// Path for the Unix socket
-        #[arg(long, default_value = "/tmp/sigyn.sock")]
-        socket: String,
+        #[arg(long)]
+        socket: Option<String>,
     },
 }
 
@@ -164,7 +164,11 @@ pub fn handle(
             let encrypted = env_file::read_encrypted_env(&env_path)?;
             let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
 
-            crate::inject::serve_secrets(&plaintext, &socket)?;
+            let socket_path = socket.unwrap_or_else(|| {
+                let sigyn_dir = crate::config::sigyn_home();
+                format!("{}/sigyn.sock", sigyn_dir.display())
+            });
+            crate::inject::serve_secrets(&plaintext, &socket_path)?;
             Ok(())
         }
         None => {

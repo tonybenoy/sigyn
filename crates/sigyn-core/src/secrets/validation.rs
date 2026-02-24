@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use crate::error::{Result, SigynError};
 
 static KEY_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-/]*$").unwrap());
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_.\-/]*$").expect("hardcoded regex"));
 
 pub fn validate_key_name(key: &str) -> Result<()> {
     if key.is_empty() {

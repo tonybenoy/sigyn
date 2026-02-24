@@ -18,10 +18,12 @@ impl VaultPolicy {
         Self::default()
     }
 
+    /// Add a member policy. Callers must enforce RBAC checks before calling this.
     pub fn add_member(&mut self, policy: MemberPolicy) {
         self.members.insert(policy.fingerprint.to_hex(), policy);
     }
 
+    /// Remove a member by fingerprint. Callers must enforce RBAC checks before calling this.
     pub fn remove_member(&mut self, fingerprint: &KeyFingerprint) -> Option<MemberPolicy> {
         self.members.shift_remove(&fingerprint.to_hex())
     }
@@ -32,6 +34,10 @@ impl VaultPolicy {
 
     pub fn get_member_mut(&mut self, fingerprint: &KeyFingerprint) -> Option<&mut MemberPolicy> {
         self.members.get_mut(&fingerprint.to_hex())
+    }
+
+    pub fn members(&self) -> impl Iterator<Item = &MemberPolicy> {
+        self.members.values()
     }
 
     pub fn save_encrypted(&self, path: &Path, cipher: &crate::crypto::VaultCipher) -> Result<()> {
@@ -58,6 +64,12 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
-    tmp.persist(path).map_err(|e| SigynError::Io(e.error))?;
+    let file = tmp.persist(path).map_err(|e| SigynError::Io(e.error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    let _ = file;
     Ok(())
 }

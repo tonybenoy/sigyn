@@ -187,10 +187,32 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
 
             let allowed_envs: Vec<String> = envs.split(',').map(|s| s.trim().to_string()).collect();
 
+            // Enforce delegation depth and delegatee limits
+            if let Some(delegator) = ctx.policy.get_member(&ctx.fingerprint) {
+                if delegator.max_delegation_depth == 0 {
+                    anyhow::bail!("you have reached the maximum delegation depth (0 remaining)");
+                }
+                let current_delegatees = ctx
+                    .policy
+                    .members()
+                    .filter(|m| m.delegated_by.as_ref() == Some(&ctx.fingerprint))
+                    .count();
+                if current_delegatees as u32 >= delegator.max_delegatees {
+                    anyhow::bail!(
+                        "you have reached the maximum number of delegatees ({})",
+                        delegator.max_delegatees
+                    );
+                }
+            }
+
             // Build the member policy
             let mut member = MemberPolicy::new(invitee_fp.clone(), role_enum);
             member.allowed_envs = allowed_envs.clone();
             member.delegated_by = Some(ctx.fingerprint.clone());
+            // Inherit reduced delegation depth from delegator
+            if let Some(delegator) = ctx.policy.get_member(&ctx.fingerprint) {
+                member.max_delegation_depth = delegator.max_delegation_depth.saturating_sub(1);
+            }
 
             // Look up the invitee's public key from the identity store
             let home = sigyn_home();
@@ -235,6 +257,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
 
             // Write invitation file to ~/.sigyn/invitations/<uuid>.json
             let invitation_id = uuid::Uuid::new_v4();
+            let secret_patterns = vec!["*".into()];
+            let max_delegation_depth = 0u32;
             let signing_payload = InvitationFile::signing_payload(
                 invitation_id,
                 &ctx.vault_name,
@@ -242,6 +266,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 &ctx.fingerprint,
                 role_enum,
                 &allowed_envs,
+                &secret_patterns,
+                max_delegation_depth,
             );
             let invitation_sig = ctx.loaded_identity.signing_key().sign(&signing_payload);
 
@@ -252,6 +278,8 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
                 inviter_fingerprint: ctx.fingerprint.clone(),
                 proposed_role: role_enum,
                 allowed_envs: allowed_envs.clone(),
+                secret_patterns,
+                max_delegation_depth,
                 signature: invitation_sig,
                 created_at: chrono::Utc::now(),
             };

@@ -3,17 +3,18 @@ use zeroize::Zeroize;
 
 use crate::error::{Result, SigynError};
 
-const ARGON2_M_COST: u32 = 65536;
-const ARGON2_T_COST: u32 = 3;
+const ARGON2_M_COST: u32 = 131072; // 128 MB
+const ARGON2_T_COST: u32 = 4;
 const ARGON2_P_COST: u32 = 4;
 
 fn argon2_instance() -> Argon2<'static> {
     let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
-        .expect("valid argon2 params");
+        .expect("hardcoded argon2 params are valid");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
 pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::Payload;
     use chacha20poly1305::{aead::Aead, AeadCore, ChaCha20Poly1305, KeyInit};
 
     let mut derived = [0u8; 32];
@@ -28,7 +29,13 @@ pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Re
 
     let nonce = ChaCha20Poly1305::generate_nonce(&mut rand::rngs::OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, key.as_slice())
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: key.as_slice(),
+                aad: salt,
+            },
+        )
         .map_err(|e| SigynError::Encryption(e.to_string()))?;
 
     let mut result = Vec::with_capacity(12 + ciphertext.len());
@@ -58,15 +65,23 @@ pub fn unwrap_private_key(wrapped: &[u8], passphrase: &str, salt: &[u8; 32]) -> 
         .map_err(|e| SigynError::Decryption(e.to_string()))?;
     derived.zeroize();
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+    let mut plaintext = cipher
+        .decrypt(
+            nonce,
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad: salt,
+            },
+        )
         .map_err(|_| SigynError::InvalidPassphrase)?;
 
     let mut key = [0u8; 32];
     if plaintext.len() != 32 {
+        plaintext.zeroize();
         return Err(SigynError::Decryption("unexpected key length".into()));
     }
     key.copy_from_slice(&plaintext);
+    plaintext.zeroize();
     Ok(key)
 }
 

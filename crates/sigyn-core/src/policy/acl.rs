@@ -2,7 +2,10 @@ use crate::error::Result;
 use globset::{Glob, GlobSetBuilder};
 
 pub fn matches_secret_pattern(key: &str, patterns: &[String]) -> Result<bool> {
-    if patterns.is_empty() || patterns.iter().any(|p| p == "*") {
+    if patterns.is_empty() {
+        return Ok(false);
+    }
+    if patterns.iter().any(|p| p == "*") {
         return Ok(true);
     }
 
@@ -26,7 +29,11 @@ mod tests {
     #[test]
     fn test_wildcard_pattern() {
         assert!(matches_secret_pattern("ANY_KEY", &["*".into()]).unwrap());
-        assert!(matches_secret_pattern("ANY_KEY", &[]).unwrap());
+    }
+
+    #[test]
+    fn test_empty_patterns_deny() {
+        assert!(!matches_secret_pattern("ANY_KEY", &[]).unwrap());
     }
 
     #[test]

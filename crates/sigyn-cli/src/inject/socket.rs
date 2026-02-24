@@ -14,10 +14,22 @@ use sigyn_core::vault::PlaintextEnv;
 ///     - `LIST`  — returns all key names, one per line, terminated by `.`
 ///     - `QUIT` / `EXIT` — shuts down the server
 pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
-    // Remove stale socket if it exists
-    let _ = std::fs::remove_file(socket_path);
+    // Try to bind first; if EADDRINUSE, remove stale socket and retry (H11: avoid TOCTOU)
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            std::fs::remove_file(socket_path)?;
+            UnixListener::bind(socket_path)?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
-    let listener = UnixListener::bind(socket_path)?;
+    // H10: Restrict socket permissions to owner only
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     println!("Listening on {}", socket_path);
 
     for stream in listener.incoming() {

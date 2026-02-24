@@ -180,6 +180,7 @@ pub fn check_access(
         action,
         env: ctx.env_name.clone(),
         key: key.map(String::from),
+        ip: None,
     };
     match engine.evaluate(&request)? {
         PolicyDecision::Allow => Ok(()),
@@ -193,17 +194,32 @@ pub fn check_access(
     }
 }
 
-/// Append an audit entry (best-effort — don't fail the operation on audit error)
+/// Append an audit entry (best-effort — warn on stderr but don't fail the operation)
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    if let Ok(mut log) = AuditLog::open(&audit_path) {
-        let _ = log.append(
-            &ctx.fingerprint,
-            action,
-            Some(ctx.env_name.clone()),
-            outcome,
-            ctx.loaded_identity.signing_key(),
-        );
+    match AuditLog::open(&audit_path) {
+        Ok(mut log) => {
+            if let Err(e) = log.append(
+                &ctx.fingerprint,
+                action,
+                Some(ctx.env_name.clone()),
+                outcome,
+                ctx.loaded_identity.signing_key(),
+            ) {
+                eprintln!(
+                    "{} failed to write audit entry: {}",
+                    style("warning:").yellow().bold(),
+                    e
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{} failed to open audit log: {}",
+                style("warning:").yellow().bold(),
+                e
+            );
+        }
     }
 }
 

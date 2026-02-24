@@ -299,26 +299,10 @@ Restrict access to specific IPs or CIDR ranges. An empty list permits all IPs.
 ip_allowlist = ["192.168.1.0/24", "10.0.0.1"]
 ```
 
-### Rate Limits
-
-Maximum reads and writes per hour, tracked per member.
-
-```rust
-RateLimit {
-    max_reads_per_hour: 100,
-    max_writes_per_hour: 20,
-}
-```
-
 ### Expiry
 
 Members can have an `expires_at` timestamp. After expiry, all access is denied
 regardless of role.
-
-### MFA Requirement
-
-The `require_mfa` flag requires an additional authentication factor before
-granting access.
 
 ### Environment Restrictions
 

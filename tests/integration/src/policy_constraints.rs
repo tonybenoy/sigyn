@@ -10,9 +10,7 @@ fn make_constraints() -> Constraints {
     Constraints {
         time_windows: vec![],
         ip_allowlist: vec![],
-        rate_limit: None,
         expires_at: None,
-        require_mfa: false,
     }
 }
 
@@ -37,6 +35,7 @@ fn test_expired_member_denied() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DB_URL".into()),
+        ip: None,
     };
 
     let decision = engine.evaluate(&request).unwrap();
@@ -68,6 +67,7 @@ fn test_non_expired_member_allowed() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DB_URL".into()),
+        ip: None,
     };
 
     assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
@@ -83,7 +83,6 @@ fn test_time_window_enforcement() {
         days: vec![chrono::Weekday::Mon],
         start_hour: 9,
         end_hour: 17,
-        timezone: "UTC".into(),
     }];
 
     // Monday 14:00 UTC -> should be allowed
@@ -125,7 +124,6 @@ fn test_time_window_with_policy_engine() {
         ],
         start_hour: 0,
         end_hour: 0, // 0-0 means overnight range: always active
-        timezone: "UTC".into(),
     }];
     member.constraints = Some(constraints);
     policy.add_member(member);
@@ -137,6 +135,7 @@ fn test_time_window_with_policy_engine() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: None,
+        ip: None,
     };
 
     // Should be allowed since the time window covers all hours
@@ -153,13 +152,11 @@ fn test_multiple_time_windows() {
             days: vec![chrono::Weekday::Mon],
             start_hour: 9,
             end_hour: 17,
-            timezone: "UTC".into(),
         },
         TimeWindow {
             days: vec![chrono::Weekday::Fri],
             start_hour: 9,
             end_hour: 17,
-            timezone: "UTC".into(),
         },
     ];
 
@@ -193,6 +190,7 @@ fn test_no_constraints_allows_access() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("ANY_KEY".into()),
+        ip: None,
     };
 
     assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
@@ -226,7 +224,6 @@ fn test_combined_expiry_and_time_window() {
         days: vec![chrono::Weekday::Mon],
         start_hour: 9,
         end_hour: 17,
-        timezone: "UTC".into(),
     }];
 
     // Monday 10:00, not expired -> allowed

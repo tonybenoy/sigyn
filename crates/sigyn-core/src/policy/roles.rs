@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Role hierarchy. Note: Operator (level 3) is above Auditor (level 2) in the
+/// hierarchy but intentionally cannot read secrets — it is designed for CI/CD
+/// pipelines that need write access without exposing secret values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Role {
     ReadOnly = 1,

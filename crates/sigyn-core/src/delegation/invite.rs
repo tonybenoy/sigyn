@@ -39,6 +39,8 @@ pub struct InvitationFile {
     pub inviter_fingerprint: KeyFingerprint,
     pub proposed_role: Role,
     pub allowed_envs: Vec<String>,
+    pub secret_patterns: Vec<String>,
+    pub max_delegation_depth: u32,
     /// Ed25519 signature from the inviter over the canonical invitation payload.
     pub signature: Vec<u8>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -46,6 +48,7 @@ pub struct InvitationFile {
 
 impl InvitationFile {
     /// Build the canonical bytes that are signed by the inviter.
+    #[allow(clippy::too_many_arguments)]
     pub fn signing_payload(
         id: uuid::Uuid,
         vault_name: &str,
@@ -53,6 +56,8 @@ impl InvitationFile {
         inviter_fingerprint: &KeyFingerprint,
         proposed_role: Role,
         allowed_envs: &[String],
+        secret_patterns: &[String],
+        max_delegation_depth: u32,
     ) -> Vec<u8> {
         // Deterministic payload: concatenate fields in a stable order.
         let mut payload = Vec::new();
@@ -64,6 +69,10 @@ impl InvitationFile {
         for env in allowed_envs {
             payload.extend_from_slice(env.as_bytes());
         }
+        for pattern in secret_patterns {
+            payload.extend_from_slice(pattern.as_bytes());
+        }
+        payload.extend_from_slice(&max_delegation_depth.to_le_bytes());
         payload
     }
 
@@ -79,6 +88,8 @@ impl InvitationFile {
             &self.inviter_fingerprint,
             self.proposed_role,
             &self.allowed_envs,
+            &self.secret_patterns,
+            self.max_delegation_depth,
         );
         verifying_key.verify(&payload, &self.signature)
     }

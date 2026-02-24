@@ -2,9 +2,18 @@ use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use super::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
 use crate::error::{Result, SigynError};
+
+/// Build AAD bytes binding ciphertext to a specific recipient and vault.
+fn slot_aad(fingerprint: &KeyFingerprint, vault_id: &Uuid) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(32);
+    aad.extend_from_slice(&fingerprint.0);
+    aad.extend_from_slice(vault_id.as_bytes());
+    aad
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RecipientSlot {
@@ -26,14 +35,21 @@ fn derive_slot_key(shared_secret: &[u8; 32], vault_id: &Uuid) -> Result<[u8; 32]
     Ok(okm)
 }
 
-fn encrypt_slot(master_key: &[u8; 32], slot_key: &[u8; 32]) -> Result<Vec<u8>> {
+fn encrypt_slot(master_key: &[u8; 32], slot_key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::Payload;
     use chacha20poly1305::{aead::Aead, AeadCore, ChaCha20Poly1305, KeyInit};
 
     let cipher = ChaCha20Poly1305::new_from_slice(slot_key)
         .map_err(|e| SigynError::Encryption(e.to_string()))?;
     let nonce = ChaCha20Poly1305::generate_nonce(&mut rand::rngs::OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, master_key.as_slice())
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: master_key.as_slice(),
+                aad,
+            },
+        )
         .map_err(|e| SigynError::Encryption(e.to_string()))?;
 
     let mut result = Vec::with_capacity(12 + ciphertext.len());
@@ -42,8 +58,9 @@ fn encrypt_slot(master_key: &[u8; 32], slot_key: &[u8; 32]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
-fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32]) -> Result<[u8; 32]> {
+fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32], aad: &[u8]) -> Result<[u8; 32]> {
     use chacha20poly1305::aead::generic_array::GenericArray;
+    use chacha20poly1305::aead::Payload;
     use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
 
     if encrypted.len() < 12 {
@@ -54,17 +71,25 @@ fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32]) -> Result<[u8; 32]> {
 
     let cipher = ChaCha20Poly1305::new_from_slice(slot_key)
         .map_err(|e| SigynError::Decryption(e.to_string()))?;
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+    let mut plaintext = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| SigynError::Decryption("failed to decrypt master key slot".into()))?;
 
     let mut key = [0u8; 32];
     if plaintext.len() != 32 {
+        plaintext.zeroize();
         return Err(SigynError::Decryption(
             "unexpected master key length".into(),
         ));
     }
     key.copy_from_slice(&plaintext);
+    plaintext.zeroize();
     Ok(key)
 }
 
@@ -78,12 +103,15 @@ pub fn seal_master_key(
     for recipient_pubkey in recipients {
         let ephemeral = X25519PrivateKey::generate();
         let ephemeral_pub = ephemeral.public_key();
-        let shared = ephemeral.diffie_hellman(recipient_pubkey);
+        let mut shared = ephemeral.diffie_hellman(recipient_pubkey);
         let slot_key = derive_slot_key(&shared, &vault_id)?;
-        let encrypted = encrypt_slot(master_key, &slot_key)?;
+        shared.zeroize();
+        let fp = recipient_pubkey.fingerprint();
+        let aad = slot_aad(&fp, &vault_id);
+        let encrypted = encrypt_slot(master_key, &slot_key, &aad)?;
 
         slots.push(RecipientSlot {
-            fingerprint: recipient_pubkey.fingerprint(),
+            fingerprint: fp,
             ephemeral_pubkey: ephemeral_pub,
             encrypted_master_key: encrypted,
         });
@@ -101,9 +129,11 @@ pub fn unseal_master_key(
 
     for slot in &header.slots {
         if slot.fingerprint == my_fingerprint {
-            let shared = private_key.diffie_hellman(&slot.ephemeral_pubkey);
+            let mut shared = private_key.diffie_hellman(&slot.ephemeral_pubkey);
             let slot_key = derive_slot_key(&shared, &vault_id)?;
-            return decrypt_slot(&slot.encrypted_master_key, &slot_key);
+            shared.zeroize();
+            let aad = slot_aad(&slot.fingerprint, &vault_id);
+            return decrypt_slot(&slot.encrypted_master_key, &slot_key, &aad);
         }
     }
 
@@ -118,12 +148,15 @@ pub fn add_recipient(
 ) -> Result<()> {
     let ephemeral = X25519PrivateKey::generate();
     let ephemeral_pub = ephemeral.public_key();
-    let shared = ephemeral.diffie_hellman(pubkey);
+    let mut shared = ephemeral.diffie_hellman(pubkey);
     let slot_key = derive_slot_key(&shared, &vault_id)?;
-    let encrypted = encrypt_slot(master_key, &slot_key)?;
+    shared.zeroize();
+    let fp = pubkey.fingerprint();
+    let aad = slot_aad(&fp, &vault_id);
+    let encrypted = encrypt_slot(master_key, &slot_key, &aad)?;
 
     header.slots.push(RecipientSlot {
-        fingerprint: pubkey.fingerprint(),
+        fingerprint: fp,
         ephemeral_pubkey: ephemeral_pub,
         encrypted_master_key: encrypted,
     });
