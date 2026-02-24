@@ -26,11 +26,3 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --all
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]

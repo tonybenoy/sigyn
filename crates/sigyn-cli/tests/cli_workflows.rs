@@ -1120,3 +1120,1697 @@ fn test_completions_zsh() {
     let home = fresh_home();
     sigyn(&home).args(["completions", "zsh"]).assert().success();
 }
+
+// ─── Fork commands ──────────────────────────────────────────────
+
+#[test]
+fn test_fork_create_leashed() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "fork", "create", "my-fork", "--mode", "leashed", "-v", "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created leashed fork 'my-fork'"));
+}
+
+#[test]
+fn test_fork_create_unleashed() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "fork",
+            "create",
+            "my-fork",
+            "--mode",
+            "unleashed",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created unleashed fork"));
+}
+
+#[test]
+fn test_fork_create_with_expiry() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "fork",
+            "create",
+            "temp-fork",
+            "--mode",
+            "leashed",
+            "--expires-days",
+            "7",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Created leashed fork")
+                .and(predicate::str::contains("Expires in: 7 days")),
+        );
+}
+
+#[test]
+fn test_fork_create_invalid_mode() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "fork", "create", "bad-fork", "--mode", "invalid", "-v", "myapp",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown fork mode"));
+}
+
+#[test]
+fn test_fork_create_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "--json", "fork", "create", "j-fork", "--mode", "leashed", "-v", "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"action\"").and(predicate::str::contains("fork_created")),
+        );
+}
+
+#[test]
+fn test_fork_list_empty() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["fork", "list", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No forks found"));
+}
+
+#[test]
+fn test_fork_status() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["fork", "status", "my-fork", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status: active"));
+}
+
+#[test]
+fn test_fork_status_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["--json", "fork", "status", "my-fork", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\"").and(predicate::str::contains("active")));
+}
+
+#[test]
+fn test_fork_sync() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["fork", "sync", "my-fork", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Synced fork"));
+}
+
+// ─── Sync commands ──────────────────────────────────────────────
+
+#[test]
+fn test_sync_resolve_local() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "sync",
+            "resolve",
+            "MY_KEY",
+            "--strategy",
+            "local",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resolved conflict"));
+}
+
+#[test]
+fn test_sync_resolve_remote() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "sync",
+            "resolve",
+            "MY_KEY",
+            "--strategy",
+            "remote",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resolved conflict"));
+}
+
+#[test]
+fn test_sync_resolve_latest() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "sync",
+            "resolve",
+            "MY_KEY",
+            "--strategy",
+            "latest",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Resolved conflict"));
+}
+
+#[test]
+fn test_sync_resolve_invalid_strategy() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "sync",
+            "resolve",
+            "MY_KEY",
+            "--strategy",
+            "bad",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown strategy"));
+}
+
+#[test]
+fn test_sync_configure() {
+    let home = fresh_home();
+
+    sigyn(&home)
+        .args([
+            "sync",
+            "configure",
+            "--remote-url",
+            "https://example.com/repo.git",
+            "-v",
+            "myapp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Sync configuration updated"));
+}
+
+#[test]
+fn test_sync_configure_auto_sync() {
+    let home = fresh_home();
+
+    sigyn(&home)
+        .args(["sync", "configure", "--auto-sync", "true", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Sync configuration updated"));
+}
+
+#[test]
+fn test_sync_push_no_vault() {
+    let home = fresh_home();
+
+    sigyn(&home)
+        .args(["sync", "push", "-v", "ghost"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_sync_pull_no_vault() {
+    let home = fresh_home();
+
+    sigyn(&home)
+        .args(["sync", "pull", "-v", "ghost"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+// ─── Rotate commands ─────────────────────────────────────────────
+
+#[test]
+fn test_rotate_schedule() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["rotate", "schedule", "-v", "myapp"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rotation Schedules"));
+}
+
+#[test]
+fn test_rotate_key() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Set a secret first
+    sigyn(&home)
+        .args([
+            "secret",
+            "set",
+            "ROTATE_ME",
+            "old-value",
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "rotate",
+            "key",
+            "ROTATE_ME",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rotated 'ROTATE_ME'"));
+}
+
+#[test]
+fn test_rotate_key_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "RK", "val", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "--json", "rotate", "key", "RK", "-e", "dev", "-v", "myapp", "-i", "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"action\"").and(predicate::str::contains("rotated")));
+}
+
+#[test]
+fn test_rotate_key_not_found() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Set at least one secret so env file exists
+    sigyn(&home)
+        .args([
+            "secret", "set", "X", "x", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "rotate",
+            "key",
+            "NONEXISTENT",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_rotate_key_no_env() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Create custom env but don't put secrets in it
+    sigyn(&home)
+        .args([
+            "env",
+            "create",
+            "empty-env",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "rotate",
+            "key",
+            "ANY_KEY",
+            "-e",
+            "empty-env",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no secrets"));
+}
+
+#[test]
+fn test_rotate_due() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Set a secret
+    sigyn(&home)
+        .args([
+            "secret", "set", "OLD_KEY", "val", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    // With max_age=0, everything should be "due"
+    sigyn(&home)
+        .args([
+            "rotate",
+            "due",
+            "--max-age",
+            "0",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("due for rotation"));
+}
+
+#[test]
+fn test_rotate_due_nothing() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "FRESH", "new", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    // With max_age=999999, nothing should be due
+    sigyn(&home)
+        .args([
+            "rotate",
+            "due",
+            "--max-age",
+            "999999",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No secrets due"));
+}
+
+#[test]
+fn test_rotate_due_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "K", "v", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "rotate",
+            "due",
+            "--max-age",
+            "0",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"due_count\""));
+}
+
+#[test]
+fn test_rotate_dead_check() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "STALE", "data", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    // With max_age=0, everything is "dead"
+    sigyn(&home)
+        .args([
+            "rotate",
+            "dead-check",
+            "--max-age",
+            "0",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dead secrets found"));
+}
+
+#[test]
+fn test_rotate_dead_check_clean() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "ALIVE", "ok", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "rotate",
+            "dead-check",
+            "--max-age",
+            "999999",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No dead secrets found"));
+}
+
+#[test]
+fn test_rotate_dead_check_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "K", "v", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "rotate",
+            "dead-check",
+            "--max-age",
+            "0",
+            "-e",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"dead_count\""));
+}
+
+#[test]
+fn test_rotate_breach_mode_force() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Add some secrets
+    sigyn(&home)
+        .args([
+            "secret", "set", "A", "1", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+    sigyn(&home)
+        .args([
+            "secret", "set", "B", "2", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "rotate",
+            "breach-mode",
+            "--force",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Breach mode activated"));
+}
+
+#[test]
+fn test_rotate_breach_mode_force_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "S", "v", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "rotate",
+            "breach-mode",
+            "--force",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"action\"").and(predicate::str::contains("breach_mode")),
+        );
+}
+
+// ─── Delegation commands ─────────────────────────────────────────
+
+#[test]
+fn test_delegation_tree() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["delegation", "tree", "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Delegation Tree"));
+}
+
+#[test]
+fn test_delegation_tree_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "delegation",
+            "tree",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"vault\"")
+                .and(predicate::str::contains("\"owner\""))
+                .and(predicate::str::contains("\"members\"")),
+        );
+}
+
+#[test]
+fn test_delegation_pending_empty() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    sigyn(&home)
+        .args(["delegation", "pending"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no pending invitations"));
+}
+
+#[test]
+fn test_delegation_pending_json() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    sigyn(&home)
+        .args(["--json", "delegation", "pending"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
+}
+
+#[test]
+fn test_delegation_accept_missing_file() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    sigyn(&home)
+        .args(["delegation", "accept", "/nonexistent/invitation.json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invitation file not found"));
+}
+
+#[test]
+fn test_delegation_invite_bad_fingerprint() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "delegation",
+            "invite",
+            "--pubkey",
+            "not-hex",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid fingerprint"));
+}
+
+#[test]
+fn test_delegation_invite_bad_role() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "delegation",
+            "invite",
+            "--pubkey",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "superadmin",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown role"));
+}
+
+#[test]
+fn test_delegation_revoke_bad_fingerprint() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "delegation",
+            "revoke",
+            "not-a-fingerprint",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid fingerprint"));
+}
+
+#[test]
+fn test_delegation_member_alias() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    // "member" is an alias for "delegation"
+    sigyn(&home)
+        .args(["member", "pending"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no pending invitations"));
+}
+
+// ─── MFA commands ───────────────────────────────────────────────
+
+#[test]
+fn test_mfa_status_not_enrolled() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    sigyn(&home)
+        .args(["mfa", "status", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MFA Status").and(predicate::str::contains("Enrolled:")));
+}
+
+#[test]
+fn test_mfa_status_json() {
+    let home = fresh_home();
+    setup_identity(&home);
+
+    sigyn(&home)
+        .args(["--json", "mfa", "status", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"enrolled\"")
+                .and(predicate::str::contains("\"session_active\"")),
+        );
+}
+
+// ─── Project commands ───────────────────────────────────────────
+
+#[test]
+fn test_project_init_global() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "project",
+            "init",
+            "--global",
+            "--vault",
+            "myapp",
+            "--identity",
+            "testuser",
+            "--env",
+            "dev",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created"));
+
+    // Verify the file was created
+    let project_path = home.path().join("project.toml");
+    assert!(project_path.exists());
+    let content = std::fs::read_to_string(&project_path).unwrap();
+    assert!(content.contains("vault = \"myapp\""));
+    assert!(content.contains("identity = \"testuser\""));
+    assert!(content.contains("env = \"dev\""));
+}
+
+#[test]
+fn test_project_init_global_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "project",
+            "init",
+            "--global",
+            "--vault",
+            "myapp",
+            "--identity",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"path\"").and(predicate::str::contains("\"project\"")));
+}
+
+#[test]
+fn test_project_init_duplicate() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "project",
+            "init",
+            "--global",
+            "--vault",
+            "myapp",
+            "--identity",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    // Second time should fail
+    sigyn(&home)
+        .args([
+            "project",
+            "init",
+            "--global",
+            "--vault",
+            "myapp",
+            "--identity",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+// ─── Policy member management ───────────────────────────────────
+
+#[test]
+fn test_policy_member_add() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "readonly",
+            "--envs",
+            "dev,staging",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added member"));
+}
+
+#[test]
+fn test_policy_member_add_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "policy",
+            "member-add",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "contributor",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"action\"").and(predicate::str::contains("member_added")),
+        );
+}
+
+#[test]
+fn test_policy_member_add_duplicate() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let fp = "aabbccddaabbccddaabbccddaabbccdd";
+
+    sigyn(&home)
+        .args(["policy", "member-add", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args(["policy", "member-add", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already in the policy"));
+}
+
+#[test]
+fn test_policy_member_add_bad_role() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "superuser",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown role"));
+}
+
+#[test]
+fn test_policy_member_add_bad_fingerprint() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            "tooshort",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid fingerprint"));
+}
+
+#[test]
+fn test_policy_member_remove() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let fp = "aabbccddaabbccddaabbccddaabbccdd";
+
+    // Add first
+    sigyn(&home)
+        .args(["policy", "member-add", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success();
+
+    // Remove
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-remove",
+            fp,
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed member"));
+}
+
+#[test]
+fn test_policy_member_remove_not_found() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-remove",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found in policy"));
+}
+
+#[test]
+fn test_policy_show_with_members() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Add a member
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "contributor",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    // Show should now list the member
+    sigyn(&home)
+        .args(["policy", "show", "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Vault Policy")
+                .and(predicate::str::contains("aabbccddaabbccdd"))
+                .and(predicate::str::contains("Contributor")),
+        );
+}
+
+#[test]
+fn test_policy_show_with_members_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "--role",
+            "auditor",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args(["--json", "policy", "show", "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"members\"")
+                .and(predicate::str::contains("\"fingerprint\"")),
+        );
+}
+
+#[test]
+fn test_policy_check_owner_allow() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Get the owner fingerprint from identity show
+    let output = sigyn(&home)
+        .args(["--json", "identity", "show", "testuser"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fp = json["fingerprint"].as_str().unwrap().to_string();
+
+    sigyn(&home)
+        .args([
+            "policy", "check", &fp, "read", "--env", "dev", "-v", "myapp", "-i", "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ALLOW"));
+}
+
+#[test]
+fn test_policy_check_unknown_deny() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "check",
+            "11223344556677881122334455667788",
+            "write",
+            "--env",
+            "dev",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DENY"));
+}
+
+#[test]
+fn test_policy_check_bad_action() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "policy",
+            "check",
+            "aabbccddaabbccddaabbccddaabbccdd",
+            "fly",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown action"));
+}
+
+#[test]
+fn test_policy_check_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let output = sigyn(&home)
+        .args(["--json", "identity", "show", "testuser"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fp = json["fingerprint"].as_str().unwrap().to_string();
+
+    sigyn(&home)
+        .args([
+            "--json", "policy", "check", &fp, "read", "-v", "myapp", "-i", "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"decision\""));
+}
+
+// ─── Run export formats ─────────────────────────────────────────
+
+#[test]
+fn test_run_export_docker() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "KEY", "val", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "run", "export", "--format", "docker", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("KEY"));
+}
+
+#[test]
+fn test_run_export_k8s() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "KEY", "val", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "run",
+            "export",
+            "--format",
+            "k8s",
+            "--name",
+            "my-k8s-secret",
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"kind\": \"Secret\"")
+                .and(predicate::str::contains("my-k8s-secret")),
+        );
+}
+
+#[test]
+fn test_run_export_invalid_format() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "KEY", "val", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "run", "export", "--format", "yaml", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown format"));
+}
+
+#[test]
+fn test_run_export_no_secrets() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Try to export from an env with no secrets
+    sigyn(&home)
+        .args([
+            "run", "export", "--format", "dotenv", "-v", "myapp", "-e", "staging", "-i", "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no secrets"));
+}
+
+#[test]
+fn test_run_exec_no_command() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "secret", "set", "X", "y", "-v", "myapp", "-e", "dev", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args(["run", "exec", "-v", "myapp", "-e", "dev", "-i", "testuser"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no command specified"));
+}
+
+// ─── Import edge cases ──────────────────────────────────────────
+
+#[test]
+fn test_import_dotenv_with_comments() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let env_file = sigyn_home_path(&home).join("commented.env");
+    std::fs::write(
+        &env_file,
+        "# This is a comment\nVALID_KEY=value\n  # another comment\nSECOND=two\n",
+    )
+    .unwrap();
+
+    sigyn(&home)
+        .args([
+            "import",
+            "dotenv",
+            env_file.to_str().unwrap(),
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported"));
+
+    sigyn(&home)
+        .args([
+            "secret",
+            "get",
+            "VALID_KEY",
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("value"));
+}
+
+#[test]
+fn test_import_dotenv_missing_file() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args([
+            "import",
+            "dotenv",
+            "/tmp/does-not-exist.env",
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to read"));
+}
+
+#[test]
+fn test_import_json_nested() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Nested JSON values should be flattened or handled
+    let json_file = sigyn_home_path(&home).join("nested.json");
+    std::fs::write(&json_file, r#"{"SIMPLE": "yes", "NUM": "42"}"#).unwrap();
+
+    sigyn(&home)
+        .args([
+            "import",
+            "json",
+            json_file.to_str().unwrap(),
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported"));
+}
+
+#[test]
+fn test_import_json_invalid() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let json_file = sigyn_home_path(&home).join("bad.json");
+    std::fs::write(&json_file, "not json at all").unwrap();
+
+    sigyn(&home)
+        .args([
+            "import",
+            "json",
+            json_file.to_str().unwrap(),
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_import_dotenv_json_output() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let env_file = sigyn_home_path(&home).join("j.env");
+    std::fs::write(&env_file, "A=1\n").unwrap();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "import",
+            "dotenv",
+            env_file.to_str().unwrap(),
+            "-v",
+            "myapp",
+            "-e",
+            "dev",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"imported\"").and(predicate::str::contains("\"provider\"")),
+        );
+}
+
+// ─── Delegation invite + accept workflow ─────────────────────────
+
+#[test]
+fn test_delegation_invite_and_accept() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Create a second identity (the invitee)
+    sigyn(&home)
+        .args(["identity", "create", "-n", "bob", "-E", "bob@example.com"])
+        .assert()
+        .success();
+
+    // Get bob's fingerprint
+    let output = sigyn(&home)
+        .args(["--json", "identity", "show", "bob"])
+        .output()
+        .unwrap();
+    let bob_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let bob_fp = bob_json["fingerprint"].as_str().unwrap().to_string();
+
+    // Invite bob
+    let invite_output = sigyn(&home)
+        .args([
+            "delegation",
+            "invite",
+            "--pubkey",
+            &bob_fp,
+            "--role",
+            "readonly",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .output()
+        .unwrap();
+    assert!(invite_output.status.success());
+    let invite_stdout = String::from_utf8_lossy(&invite_output.stdout);
+    assert!(invite_stdout.contains("Invited"));
+
+    // Extract invitation file path from output
+    let inv_line = invite_stdout
+        .lines()
+        .find(|l| l.contains("Invitation file:"))
+        .unwrap();
+    let inv_path = inv_line.split("Invitation file: ").nth(1).unwrap().trim();
+
+    // Pending should show it
+    sigyn(&home)
+        .args(["delegation", "pending"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("myapp"));
+
+    // Accept the invitation
+    sigyn(&home)
+        .args(["delegation", "accept", inv_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Invitation accepted"));
+}
+
+#[test]
+fn test_delegation_invite_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    sigyn(&home)
+        .args(["identity", "create", "-n", "charlie"])
+        .assert()
+        .success();
+
+    let output = sigyn(&home)
+        .args(["--json", "identity", "show", "charlie"])
+        .output()
+        .unwrap();
+    let charlie_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let charlie_fp = charlie_json["fingerprint"].as_str().unwrap().to_string();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "delegation",
+            "invite",
+            "--pubkey",
+            &charlie_fp,
+            "--role",
+            "contributor",
+            "--envs",
+            "dev,staging",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"invitation_created\"")
+                .and(predicate::str::contains("\"invitation_id\"")),
+        );
+}
+
+// ─── Delegation revoke workflow ──────────────────────────────────
+
+#[test]
+fn test_delegation_revoke_member() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    // Add a member via policy first (simpler than invite flow for this test)
+    let fp = "aabbccddaabbccddaabbccddaabbccdd";
+    sigyn(&home)
+        .args([
+            "policy",
+            "member-add",
+            fp,
+            "--role",
+            "readonly",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+
+    // Revoke via delegation revoke
+    sigyn(&home)
+        .args(["delegation", "revoke", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Revoked access"));
+}
+
+#[test]
+fn test_delegation_revoke_cascade() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let fp = "aabbccddaabbccddaabbccddaabbccdd";
+    sigyn(&home)
+        .args(["policy", "member-add", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "delegation",
+            "revoke",
+            fp,
+            "--cascade",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Revoked access").and(predicate::str::contains("cascade")),
+        );
+}
+
+#[test]
+fn test_delegation_revoke_json() {
+    let home = fresh_home();
+    setup_vault(&home);
+
+    let fp = "aabbccddaabbccddaabbccddaabbccdd";
+    sigyn(&home)
+        .args(["policy", "member-add", fp, "-v", "myapp", "-i", "testuser"])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args([
+            "--json",
+            "delegation",
+            "revoke",
+            fp,
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("\"action\"").and(predicate::str::contains("\"revoked\"")),
+        );
+}
