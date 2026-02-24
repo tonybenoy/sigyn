@@ -52,3 +52,42 @@ impl ForkApproval {
         matches!(self.status, ForkApprovalStatus::Approved)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_fork_approval_logic() {
+        let fork_id = Uuid::new_v4();
+        let requester = KeyFingerprint([1u8; 16]);
+        let approver1 = KeyFingerprint([2u8; 16]);
+        let approver2 = KeyFingerprint([3u8; 16]);
+
+        let mut approval = ForkApproval::new(fork_id, requester, 2);
+        assert!(!approval.is_approved());
+
+        // First approval
+        approval.approve(approver1.clone());
+        assert!(!approval.is_approved());
+        assert_eq!(approval.approved_by.len(), 1);
+
+        // Duplicate approval should be idempotent
+        approval.approve(approver1);
+        assert_eq!(approval.approved_by.len(), 1);
+
+        // Second approval reaches threshold
+        approval.approve(approver2);
+        assert!(approval.is_approved());
+        assert!(matches!(approval.status, ForkApprovalStatus::Approved));
+    }
+
+    #[test]
+    fn test_fork_rejection() {
+        let mut approval = ForkApproval::new(Uuid::new_v4(), KeyFingerprint([1u8; 16]), 1);
+        approval.reject(KeyFingerprint([2u8; 16]));
+        assert!(!approval.is_approved());
+        assert!(matches!(approval.status, ForkApprovalStatus::Rejected));
+    }
+}

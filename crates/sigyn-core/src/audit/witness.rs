@@ -125,3 +125,63 @@ impl WitnessLog {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::SigningKeyPair;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_witness_entry_logic() {
+        let entry_hash = [0xAAu8; 32];
+        let mut entry = WitnessedEntry::new(entry_hash, 2);
+        assert!(!entry.is_fully_witnessed());
+
+        let witness1_kp = SigningKeyPair::generate();
+        let witness1_fp = KeyFingerprint([1u8; 16]);
+        let witness2_kp = SigningKeyPair::generate();
+        let witness2_fp = KeyFingerprint([2u8; 16]);
+
+        entry.add_witness(witness1_fp.clone(), &witness1_kp);
+        assert!(!entry.is_fully_witnessed());
+        assert_eq!(entry.signatures.len(), 1);
+
+        entry.add_witness(witness2_fp.clone(), &witness2_kp);
+        assert!(entry.is_fully_witnessed());
+
+        // Verify witnesses
+        let vks = vec![
+            (witness1_fp, witness1_kp.verifying_key()),
+            (witness2_fp, witness2_kp.verifying_key()),
+        ];
+        let verified_count = entry.verify_witnesses(&vks).unwrap();
+        assert_eq!(verified_count, 2);
+    }
+
+    #[test]
+    fn test_witness_log_persistence() {
+        let tmp = tempdir().unwrap();
+        let log_path = tmp.path().join("witness.json");
+        let entry_hash = [0xBBu8; 32];
+        let witness_fp = KeyFingerprint([3u8; 16]);
+
+        {
+            let mut log = WitnessLog::open(&log_path).unwrap();
+            let sig = WitnessSignature {
+                witness: witness_fp.clone(),
+                signature: vec![0u8; 64],
+                timestamp: chrono::Utc::now(),
+            };
+            log.add_witness(entry_hash, sig).unwrap();
+        }
+
+        // Reopen and check
+        {
+            let log = WitnessLog::open(&log_path).unwrap();
+            let witnesses = log.witnesses_for(&entry_hash);
+            assert_eq!(witnesses.len(), 1);
+            assert_eq!(witnesses[0].witness, witness_fp);
+        }
+    }
+}

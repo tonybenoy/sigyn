@@ -41,3 +41,37 @@ impl VaultLock {
         Self::acquire(lock_path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_vault_lock_acquisition() {
+        let tmp = tempdir().unwrap();
+        let lock_path = tmp.path().join("vault.lock");
+
+        // 1. Acquire lock
+        {
+            let _lock1 = VaultLock::acquire(&lock_path).unwrap();
+            assert!(lock_path.exists());
+        }
+
+        // 2. Lock should be released (though file remains)
+        let _lock2 = VaultLock::acquire(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn test_force_acquire() {
+        let tmp = tempdir().unwrap();
+        let lock_path = tmp.path().join("vault.lock");
+
+        // Create a stale lock file (simulated by just existing)
+        std::fs::write(&lock_path, "stale").unwrap();
+
+        // Force acquire should work
+        let _lock = VaultLock::force_acquire(&lock_path).unwrap();
+        assert!(lock_path.exists());
+    }
+}

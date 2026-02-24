@@ -7,7 +7,11 @@ all-features = true
 
 [advisories]
 # Ignore specific advisories by ID
-ignore = []
+ignore = [
+    # proc-macro-error is unmaintained but only used transitively by tabled_derive.
+    # No replacement available that tabled has adopted yet.
+    "RUSTSEC-2024-0370",
+]
 
 [licenses]
 allow = [
