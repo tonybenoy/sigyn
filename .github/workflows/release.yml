@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "Cargo.toml"          # workspace version lives here
+      - "Cargo.toml"
       - "crates/*/Cargo.toml"
 
 permissions:
@@ -12,6 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
   check-version:
@@ -46,10 +47,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
-    name: Build ${{ matrix.target }}
+  ci:
+    name: CI Gate
     needs: check-version
     if: needs.check-version.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all
+      - run: cargo clippy --all -- -D warnings
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [check-version, ci]
     strategy:
       matrix:
         include:
@@ -127,10 +141,10 @@ jobs:
 
       - name: Create tag
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "${{ needs.check-version.outputs.tag }}"
           git push origin "${{ needs.check-version.outputs.tag }}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create release
         uses: softprops/action-gh-release@v2
