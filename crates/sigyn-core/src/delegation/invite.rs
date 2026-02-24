@@ -94,3 +94,137 @@ impl InvitationFile {
         verifying_key.verify(&payload, &self.signature)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::SigningKeyPair;
+
+    #[test]
+    fn test_signing_payload_determinism() {
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xAA; 16]);
+        let envs = vec!["dev".to_string(), "prod".to_string()];
+        let patterns = vec!["*".to_string()];
+
+        let p1 = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+        );
+        let p2 = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+        );
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_signing_payload_varies_with_input() {
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xAA; 16]);
+        let envs = vec!["dev".to_string()];
+        let patterns = vec![];
+
+        let p1 = InvitationFile::signing_payload(
+            id,
+            "vault-a",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+        );
+        let p2 = InvitationFile::signing_payload(
+            id,
+            "vault-b",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+        );
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        let kp = SigningKeyPair::generate();
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xBB; 16]);
+        let envs = vec!["dev".to_string()];
+        let patterns = vec!["DB_*".to_string()];
+
+        let payload = InvitationFile::signing_payload(
+            id,
+            "myvault",
+            vault_id,
+            &fp,
+            Role::Admin,
+            &envs,
+            &patterns,
+            3,
+        );
+        let signature = kp.sign(&payload);
+
+        let invite = InvitationFile {
+            id,
+            vault_name: "myvault".to_string(),
+            vault_id,
+            inviter_fingerprint: fp,
+            proposed_role: Role::Admin,
+            allowed_envs: envs,
+            secret_patterns: patterns,
+            max_delegation_depth: 3,
+            signature,
+            created_at: chrono::Utc::now(),
+        };
+
+        assert!(invite.verify(&kp.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn test_verify_rejects_tampered_signature() {
+        let kp = SigningKeyPair::generate();
+        let other_kp = SigningKeyPair::generate();
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xCC; 16]);
+
+        let payload =
+            InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::ReadOnly, &[], &[], 0);
+        let signature = kp.sign(&payload);
+
+        let invite = InvitationFile {
+            id,
+            vault_name: "v".to_string(),
+            vault_id,
+            inviter_fingerprint: fp,
+            proposed_role: Role::ReadOnly,
+            allowed_envs: vec![],
+            secret_patterns: vec![],
+            max_delegation_depth: 0,
+            signature,
+            created_at: chrono::Utc::now(),
+        };
+
+        // Verify with wrong key should fail
+        assert!(invite.verify(&other_kp.verifying_key()).is_err());
+    }
+}

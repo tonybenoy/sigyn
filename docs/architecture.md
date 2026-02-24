@@ -181,9 +181,9 @@ Sigyn is organized into 16 logical modules spanning the core library and CLI:
 | **crypto** | `keys.rs`, `envelope.rs`, `vault_cipher.rs`, `kdf.rs`, `nonce.rs` | Key generation, X25519 Diffie-Hellman, envelope encryption/decryption, ChaCha20-Poly1305 AEAD, Argon2id KDF, HKDF key derivation, nonce management |
 | **vault** | `mod.rs`, `manifest.rs`, `env_file.rs`, `lock.rs`, `path.rs` | Vault creation, opening, locking, path resolution, manifest serialization |
 | **secrets** | `mod.rs`, `types.rs`, `validation.rs`, `reference.rs`, `generation.rs`, `acl.rs` | Secret value types, validation rules, cross-references between secrets, random secret generation, per-key ACLs |
-| **identity** | `mod.rs`, `profile.rs`, `wrapping.rs`, `keygen.rs`, `shamir.rs` | Identity creation, passphrase wrapping/unwrapping, keypair generation, Shamir secret sharing for recovery |
+| **identity** | `mod.rs`, `profile.rs`, `wrapping.rs`, `keygen.rs`, `shamir.rs`, `mfa.rs`, `session.rs` | Identity creation, passphrase wrapping/unwrapping, keypair generation, Shamir secret sharing for recovery, TOTP-based MFA state and sessions |
 | **environment** | `mod.rs`, `policy.rs`, `diff.rs`, `promotion.rs` | Environment management, per-env policy, diffing between environments, secret promotion across envs |
-| **policy** | `mod.rs`, `roles.rs`, `member.rs`, `acl.rs`, `engine.rs`, `storage.rs`, `constraints.rs` | 7-level RBAC, member policy, secret ACLs, `PolicyEngine::evaluate()`, constraint checking (time windows, IP, rate limits, expiry, MFA) |
+| **policy** | `mod.rs`, `roles.rs`, `member.rs`, `acl.rs`, `engine.rs`, `storage.rs`, `constraints.rs` | 7-level RBAC, member policy, secret ACLs, `PolicyEngine::evaluate()`, constraint checking (time windows, expiry, MFA) |
 | **delegation** | `mod.rs`, `tree.rs`, `invite.rs`, `revoke.rs` | Delegation tree structure, Ed25519-signed invitation files, cascade revocation with master key rotation |
 | **forks** | `mod.rs`, `types.rs`, `approval.rs`, `leash.rs`, `expiry.rs` | Fork creation (leashed/unleashed), approval workflows, leash management, fork expiry |
 | **audit** | `mod.rs`, `entry.rs`, `chain.rs`, `anchor.rs`, `witness.rs` | Hash-chained audit entries, Ed25519 signed entries, chain verification, external anchoring, witness countersigning |

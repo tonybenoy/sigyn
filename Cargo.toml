@@ -30,22 +30,20 @@ rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ciborium = "0.2"
-toml = "0.8"
+toml = "1.0"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env", "color"] }
 clap_complete = "4.5"
-ratatui = "0.29"
-crossterm = "0.28"
-dialoguer = "0.11"
-indicatif = "0.17"
-console = "0.15"
-tabled = "0.16"
+ratatui = "0.30"
+crossterm = "0.29"
+dialoguer = "0.12"
+console = "0.16"
 rpassword = "7.3"
 
 # Storage + System
 uuid = { version = "1.11", features = ["v4", "serde"] }
-directories = "5"
+directories = "6"
 tempfile = "3.14"
 fd-lock = "4.0"
 
@@ -63,13 +61,15 @@ tokio = { version = "1.42", features = ["full"] }
 cron = "0.15"
 
 # HTTP
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 
 # Other
 indexmap = { version = "2.7", features = ["serde"] }
 globset = "0.4"
 base64 = "0.22"
 regex = "1.11"
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+qr2term = "0.3"
 
 # Testing
 proptest = "1.5"

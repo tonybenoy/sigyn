@@ -33,7 +33,8 @@ what Sigyn is about.
 - **Role-based access control** -- seven-level hierarchy: ReadOnly, Auditor, Operator, Contributor, Manager, Admin, Owner.
 - **Delegation trees** -- delegate permissions to peers with automatic cascade revocation.
 - **Per-environment secrets** -- first-class support for dev, staging, production, and custom environments.
-- **Per-key ACLs** -- granular constraints including time windows, IP allowlists, rate limits, and expiry.
+- **Per-key ACLs** -- granular constraints including time windows, expiry, and MFA enforcement.
+- **TOTP-based MFA** -- optional multi-factor authentication per identity with session-based grace periods and backup codes.
 - **Signed audit trail** -- hash-chained, Ed25519-signed log of every secret operation.
 - **Disaster recovery** -- Shamir secret sharing splits the master key into K-of-N shards.
 - **Fork system** -- leashed and unleashed forks for team branches and experimentation.
@@ -164,6 +165,7 @@ sigyn <command>
 | `secret` | Store, retrieve, list, and delete secrets |
 | `env` | Manage environments (create, list, promote) |
 | `policy` | Configure RBAC policies and constraints |
+| `mfa` | Manage TOTP-based multi-factor authentication |
 | `delegation` | Invite members, revoke access, view delegation tree |
 | `audit` | View and verify the signed audit trail |
 | `sync` | Push, pull, and resolve sync conflicts |
@@ -187,7 +189,7 @@ Run `sigyn <command> --help` for detailed usage of any command.
 - **Encryption at rest**: every secret value is encrypted with ChaCha20-Poly1305. A unique data encryption key (DEK) is generated per secret and sealed under the recipient's X25519 public key (envelope encryption).
 - **Key derivation**: the user passphrase is processed through Argon2id to derive the master secret.
 - **Signing**: all audit log entries are signed with Ed25519. The log is hash-chained so any tampering is detectable.
-- **Access control**: a seven-level RBAC hierarchy combined with per-key ACL constraints (time windows, IP allowlists, rate limits, expiry) governs who can read, write, or administer secrets.
+- **Access control**: a seven-level RBAC hierarchy combined with per-key ACL constraints (time windows, expiry, MFA) governs who can read, write, or administer secrets.
 - **Recovery**: the master key can be split into Shamir shards (K-of-N) and distributed to trusted parties for disaster recovery.
 
 For a full threat model and cryptographic details, see [`docs/security.md`](docs/security.md).

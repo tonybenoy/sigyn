@@ -11,6 +11,7 @@ fn make_constraints() -> Constraints {
         time_windows: vec![],
         ip_allowlist: vec![],
         expires_at: None,
+        require_mfa: false,
     }
 }
 
@@ -36,6 +37,7 @@ fn test_expired_member_denied() {
         env: "dev".into(),
         key: Some("DB_URL".into()),
         ip: None,
+        mfa_verified: false,
     };
 
     let decision = engine.evaluate(&request).unwrap();
@@ -68,6 +70,7 @@ fn test_non_expired_member_allowed() {
         env: "dev".into(),
         key: Some("DB_URL".into()),
         ip: None,
+        mfa_verified: false,
     };
 
     assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
@@ -136,6 +139,7 @@ fn test_time_window_with_policy_engine() {
         env: "dev".into(),
         key: None,
         ip: None,
+        mfa_verified: false,
     };
 
     // Should be allowed since the time window covers all hours
@@ -191,6 +195,7 @@ fn test_no_constraints_allows_access() {
         env: "dev".into(),
         key: Some("ANY_KEY".into()),
         ip: None,
+        mfa_verified: false,
     };
 
     assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);

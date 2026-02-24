@@ -23,6 +23,7 @@
 # Security
 
 - [Security Model](./security.md)
+- [MFA](./mfa.md)
 - [Audit & Rotation](./audit.md)
 - [Disaster Recovery](./recovery.md)
 

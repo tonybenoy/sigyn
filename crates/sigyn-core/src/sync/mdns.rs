@@ -159,3 +159,132 @@ pub fn discover_peers(shared_dir: &Path, vault_name: &str) -> Result<Vec<PeerInf
 
     Ok(peers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_peer(name: &str, fingerprint: &str, vaults: &[&str]) -> LanPeer {
+        LanPeer {
+            name: name.to_string(),
+            addr: "127.0.0.1:8080".to_string(),
+            vault_names: vaults.iter().map(|s| s.to_string()).collect(),
+            fingerprint: fingerprint.to_string(),
+            last_seen: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_peer_registry_add_and_list() {
+        let mut reg = PeerRegistry::new();
+        assert!(reg.list_peers().is_empty());
+
+        reg.add_peer(make_peer("alice", "fp1", &["vault-a"]));
+        assert_eq!(reg.list_peers().len(), 1);
+
+        reg.add_peer(make_peer("bob", "fp2", &["vault-b"]));
+        assert_eq!(reg.list_peers().len(), 2);
+    }
+
+    #[test]
+    fn test_peer_registry_remove() {
+        let mut reg = PeerRegistry::new();
+        reg.add_peer(make_peer("alice", "fp1", &["v"]));
+        reg.remove_peer("fp1");
+        assert!(reg.list_peers().is_empty());
+    }
+
+    #[test]
+    fn test_peer_registry_overwrite_same_fingerprint() {
+        let mut reg = PeerRegistry::new();
+        reg.add_peer(make_peer("alice-old", "fp1", &["v"]));
+        reg.add_peer(make_peer("alice-new", "fp1", &["v"]));
+        assert_eq!(reg.list_peers().len(), 1);
+        assert_eq!(reg.list_peers()[0].name, "alice-new");
+    }
+
+    #[test]
+    fn test_find_peers_for_vault() {
+        let mut reg = PeerRegistry::new();
+        reg.add_peer(make_peer("alice", "fp1", &["vault-a", "vault-b"]));
+        reg.add_peer(make_peer("bob", "fp2", &["vault-b"]));
+        reg.add_peer(make_peer("charlie", "fp3", &["vault-c"]));
+
+        let found = reg.find_peers_for_vault("vault-b");
+        assert_eq!(found.len(), 2);
+
+        let found = reg.find_peers_for_vault("vault-a");
+        assert_eq!(found.len(), 1);
+
+        let found = reg.find_peers_for_vault("nonexistent");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn test_prune_stale() {
+        let mut reg = PeerRegistry::new();
+        let mut stale = make_peer("old", "fp1", &["v"]);
+        stale.last_seen = chrono::Utc::now() - chrono::Duration::minutes(10);
+        reg.add_peer(stale);
+        reg.add_peer(make_peer("fresh", "fp2", &["v"]));
+
+        reg.prune_stale(chrono::Duration::minutes(5));
+        assert_eq!(reg.list_peers().len(), 1);
+        assert_eq!(reg.list_peers()[0].name, "fresh");
+    }
+
+    #[test]
+    fn test_advertise_and_discover() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = KeyFingerprint([0xAA; 16]);
+
+        advertise_peer(dir.path(), "my-vault", &fp, "host1").unwrap();
+
+        let peers = discover_peers(dir.path(), "my-vault").unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].hostname, "host1");
+        assert_eq!(peers[0].vault_name, "my-vault");
+    }
+
+    #[test]
+    fn test_discover_filters_by_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = KeyFingerprint([0xBB; 16]);
+        advertise_peer(dir.path(), "other-vault", &fp, "host2").unwrap();
+
+        let peers = discover_peers(dir.path(), "my-vault").unwrap();
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn test_discover_nonexistent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let peers = discover_peers(&missing, "v").unwrap();
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn test_discover_prunes_stale_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = KeyFingerprint([0xCC; 16]);
+
+        // Write a stale peer file manually
+        let info = PeerInfo {
+            fingerprint: fp.to_hex(),
+            hostname: "stale-host".to_string(),
+            vault_name: "v".to_string(),
+            last_seen: chrono::Utc::now() - chrono::Duration::minutes(10),
+            signature: None,
+        };
+        let filename = format!("{}.peer.json", fp.to_hex());
+        let json = serde_json::to_string(&info).unwrap();
+        std::fs::write(dir.path().join(&filename), json).unwrap();
+
+        let peers = discover_peers(dir.path(), "v").unwrap();
+        assert!(peers.is_empty());
+
+        // File should have been deleted
+        assert!(!dir.path().join(&filename).exists());
+    }
+}

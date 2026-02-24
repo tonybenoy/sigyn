@@ -69,3 +69,114 @@ pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sigyn_core::crypto::keys::KeyFingerprint;
+    use sigyn_core::secrets::types::SecretValue;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    fn make_env(pairs: &[(&str, &str)]) -> PlaintextEnv {
+        let fp = KeyFingerprint([0u8; 16]);
+        let mut env = PlaintextEnv::new();
+        for (k, v) in pairs {
+            env.set(k.to_string(), SecretValue::String(v.to_string()), &fp);
+        }
+        env
+    }
+
+    #[test]
+    fn test_socket_get_and_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        let sock_str = sock.to_str().unwrap().to_string();
+
+        let env = make_env(&[("DB_URL", "postgres://localhost"), ("API_KEY", "sk-123")]);
+
+        let sock_path = sock_str.clone();
+        let handle = std::thread::spawn(move || {
+            serve_secrets(&env, &sock_path).unwrap();
+        });
+
+        // Wait for server to start
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let stream = UnixStream::connect(&sock_str).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+
+        // GET existing key
+        writeln!(writer, "DB_URL").unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "OK postgres://localhost");
+
+        // GET another key
+        line.clear();
+        writeln!(writer, "API_KEY").unwrap();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "OK sk-123");
+
+        // GET non-existent key
+        line.clear();
+        writeln!(writer, "NOPE").unwrap();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "ERR not found");
+
+        // QUIT
+        writeln!(writer, "QUIT").unwrap();
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_socket_list_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("list-test.sock");
+        let sock_str = sock.to_str().unwrap().to_string();
+
+        let env = make_env(&[("A", "1"), ("B", "2")]);
+
+        let sock_path = sock_str.clone();
+        let handle = std::thread::spawn(move || {
+            serve_secrets(&env, &sock_path).unwrap();
+        });
+
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let stream = UnixStream::connect(&sock_str).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+
+        // LIST command
+        writeln!(writer, "LIST").unwrap();
+        let mut keys = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim();
+            if trimmed == "." {
+                break;
+            }
+            keys.push(trimmed.to_string());
+        }
+        assert!(keys.contains(&"A".to_string()));
+        assert!(keys.contains(&"B".to_string()));
+
+        // Quit
+        writeln!(writer, "QUIT").unwrap();
+        handle.join().unwrap();
+    }
+}

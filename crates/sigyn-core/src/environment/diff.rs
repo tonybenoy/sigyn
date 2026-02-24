@@ -52,3 +52,80 @@ impl EnvDiff {
         !self.added.is_empty() || !self.removed.is_empty() || !self.modified.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::KeyFingerprint;
+    use crate::secrets::types::SecretValue;
+    use crate::vault::PlaintextEnv;
+
+    fn make_env(pairs: &[(&str, &str)]) -> PlaintextEnv {
+        let fp = KeyFingerprint([0u8; 16]);
+        let mut env = PlaintextEnv::new();
+        for (k, v) in pairs {
+            env.set(k.to_string(), SecretValue::String(v.to_string()), &fp);
+        }
+        env
+    }
+
+    #[test]
+    fn test_identical_envs() {
+        let a = make_env(&[("A", "1"), ("B", "2")]);
+        let b = make_env(&[("A", "1"), ("B", "2")]);
+        let diff = EnvDiff::compute(&a, &b);
+        assert!(!diff.has_changes());
+        assert_eq!(diff.unchanged.len(), 2);
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.modified.is_empty());
+    }
+
+    #[test]
+    fn test_added_keys() {
+        let source = make_env(&[("A", "1"), ("B", "2")]);
+        let target = make_env(&[("A", "1")]);
+        let diff = EnvDiff::compute(&source, &target);
+        assert!(diff.has_changes());
+        assert_eq!(diff.added, vec!["B"]);
+        assert_eq!(diff.unchanged, vec!["A"]);
+    }
+
+    #[test]
+    fn test_removed_keys() {
+        let source = make_env(&[("A", "1")]);
+        let target = make_env(&[("A", "1"), ("B", "2")]);
+        let diff = EnvDiff::compute(&source, &target);
+        assert!(diff.has_changes());
+        assert_eq!(diff.removed, vec!["B"]);
+    }
+
+    #[test]
+    fn test_modified_keys() {
+        let source = make_env(&[("A", "old")]);
+        let target = make_env(&[("A", "new")]);
+        let diff = EnvDiff::compute(&source, &target);
+        assert!(diff.has_changes());
+        assert_eq!(diff.modified, vec!["A"]);
+    }
+
+    #[test]
+    fn test_empty_envs() {
+        let a = PlaintextEnv::new();
+        let b = PlaintextEnv::new();
+        let diff = EnvDiff::compute(&a, &b);
+        assert!(!diff.has_changes());
+    }
+
+    #[test]
+    fn test_mixed_changes() {
+        let source = make_env(&[("KEEP", "same"), ("MOD", "v1"), ("ADD", "new")]);
+        let target = make_env(&[("KEEP", "same"), ("MOD", "v2"), ("DEL", "old")]);
+        let diff = EnvDiff::compute(&source, &target);
+        assert!(diff.has_changes());
+        assert!(diff.added.contains(&"ADD".to_string()));
+        assert!(diff.removed.contains(&"DEL".to_string()));
+        assert!(diff.modified.contains(&"MOD".to_string()));
+        assert!(diff.unchanged.contains(&"KEEP".to_string()));
+    }
+}

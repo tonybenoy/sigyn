@@ -5,6 +5,8 @@ pub struct Constraints {
     pub time_windows: Vec<TimeWindow>,
     pub ip_allowlist: Vec<String>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub require_mfa: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +155,7 @@ mod tests {
             time_windows: vec![],
             ip_allowlist: vec![],
             expires_at: None,
+            require_mfa: false,
         }
     }
 

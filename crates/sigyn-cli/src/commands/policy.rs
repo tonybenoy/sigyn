@@ -265,6 +265,7 @@ pub fn handle(
                 env,
                 key,
                 ip: None,
+                mfa_verified: false,
             };
 
             match engine.evaluate(&request)? {
@@ -291,6 +292,15 @@ pub fn handle(
                         )?;
                     } else {
                         println!("{} Access: DENY ({})", style("X").red().bold(), reason);
+                    }
+                }
+                PolicyDecision::RequiresMfa => {
+                    if json {
+                        crate::output::print_json(
+                            &serde_json::json!({"decision": "requires_mfa"}),
+                        )?;
+                    } else {
+                        println!("{} Access: REQUIRES MFA", style("!").yellow().bold());
                     }
                 }
             }

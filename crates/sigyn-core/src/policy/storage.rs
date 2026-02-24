@@ -73,3 +73,103 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let _ = file;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::KeyFingerprint;
+    use crate::crypto::vault_cipher::VaultCipher;
+    use crate::policy::member::MemberPolicy;
+    use crate::policy::roles::Role;
+
+    fn test_fp(byte: u8) -> KeyFingerprint {
+        KeyFingerprint([byte; 16])
+    }
+
+    #[test]
+    fn test_new_policy_is_empty() {
+        let policy = VaultPolicy::new();
+        assert!(policy.members.is_empty());
+        assert!(policy.global_constraints.is_none());
+    }
+
+    #[test]
+    fn test_add_and_get_member() {
+        let mut policy = VaultPolicy::new();
+        let fp = test_fp(0xAA);
+        let member = MemberPolicy::new(fp.clone(), Role::Contributor);
+        policy.add_member(member);
+
+        let retrieved = policy.get_member(&fp);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().role, Role::Contributor);
+    }
+
+    #[test]
+    fn test_remove_member() {
+        let mut policy = VaultPolicy::new();
+        let fp = test_fp(0xBB);
+        policy.add_member(MemberPolicy::new(fp.clone(), Role::Admin));
+
+        let removed = policy.remove_member(&fp);
+        assert!(removed.is_some());
+        assert!(policy.get_member(&fp).is_none());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_member() {
+        let mut policy = VaultPolicy::new();
+        let fp = test_fp(0xCC);
+        assert!(policy.remove_member(&fp).is_none());
+    }
+
+    #[test]
+    fn test_get_member_mut() {
+        let mut policy = VaultPolicy::new();
+        let fp = test_fp(0xDD);
+        policy.add_member(MemberPolicy::new(fp.clone(), Role::Contributor));
+
+        let member = policy.get_member_mut(&fp).unwrap();
+        member.role = Role::Admin;
+
+        assert_eq!(policy.get_member(&fp).unwrap().role, Role::Admin);
+    }
+
+    #[test]
+    fn test_members_iterator() {
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(test_fp(1), Role::ReadOnly));
+        policy.add_member(MemberPolicy::new(test_fp(2), Role::Admin));
+        policy.add_member(MemberPolicy::new(test_fp(3), Role::Owner));
+
+        let members: Vec<_> = policy.members().collect();
+        assert_eq!(members.len(), 3);
+    }
+
+    #[test]
+    fn test_save_load_encrypted_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.cbor");
+        let cipher = VaultCipher::generate();
+
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(test_fp(0xEE), Role::Manager));
+
+        policy.save_encrypted(&path, &cipher).unwrap();
+        let loaded = VaultPolicy::load_encrypted(&path, &cipher).unwrap();
+
+        assert_eq!(loaded.members.len(), 1);
+        let fp = test_fp(0xEE);
+        assert_eq!(loaded.get_member(&fp).unwrap().role, Role::Manager);
+    }
+
+    #[test]
+    fn test_load_encrypted_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.cbor");
+        let cipher = VaultCipher::generate();
+
+        let loaded = VaultPolicy::load_encrypted(&path, &cipher).unwrap();
+        assert!(loaded.members.is_empty());
+    }
+}

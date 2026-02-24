@@ -126,7 +126,7 @@ in order:
 
 1. **Owner bypass**: if the actor is the vault owner, access is always granted.
 2. **Membership check**: the actor must be a registered vault member.
-3. **Constraint check**: if the member has constraints (time windows, IP, expiry, MFA), they are all evaluated. Any failure results in denial.
+3. **Constraint check**: if the member has constraints (time windows, expiry, MFA), they are all evaluated. Any failure results in denial.
 4. **Environment check**: the member must have explicit access to the requested environment (or wildcard `*`).
 5. **Role check**: the member's role must have the required permission for the action (read, write, delete, manage members, manage policy, create env, promote).
 6. **Secret pattern check**: if the member has secret-level ACL patterns, the requested key must match at least one allowed pattern (glob syntax: `DB_*`, `AWS_*`, `*_SECRET`).
@@ -135,7 +135,7 @@ The engine returns one of three decisions:
 
 - `Allow` -- access granted.
 - `Deny(reason)` -- access denied with an explanation string.
-- `AllowWithWarning(message)` -- access granted but with a warning (e.g., approaching rate limit).
+- `AllowWithWarning(message)` -- access granted but with a warning.
 
 ## Constraints
 
@@ -155,18 +155,29 @@ If any time windows are defined for a member, at least one must match the curren
 time for access to be granted. Supports overnight windows (e.g., `start_hour: 22`,
 `end_hour: 6` wraps past midnight).
 
-### IP Allowlists
-
-```toml
-ip_allowlist = ["192.168.1.0/24", "10.0.0.1"]
-```
-
-Supports exact IP matching and CIDR notation. An empty allowlist permits all IPs.
-
 ### Expiry
 
 Members can have an `expires_at` timestamp. After expiry, all access is denied
 regardless of role.
+
+### MFA (Multi-Factor Authentication)
+
+When `require_mfa: true` is set on global or member constraints, the policy engine
+returns `RequiresMfa` instead of `Allow`. The CLI then:
+
+1. Checks for a valid MFA session (default grace period: 1 hour).
+2. If no session, loads the encrypted `.mfa` file (decrypted with a key derived via
+   HKDF-SHA256 from the identity's X25519 private key with context `b"mfa-state"`).
+3. Prompts for a TOTP code or single-use backup code.
+4. On success, creates a session file (HMAC-protected with blake3) so subsequent
+   operations within the grace period skip the prompt.
+
+MFA state is stored per identity at `~/.sigyn/identities/<fingerprint>.mfa`,
+encrypted with ChaCha20-Poly1305. Sessions are stored at
+`~/.sigyn/sessions/<fingerprint>.session`.
+
+Backup codes are hashed with blake3 before storage. Each backup code is consumed on
+use and cannot be reused.
 
 ## Per-Key ACLs
 
@@ -295,6 +306,7 @@ advisory file locking for concurrent access safety.
 | Lost access (key loss) | Shamir K-of-N recovery shards |
 | Unauthorized access escalation | `PolicyEngine::evaluate()` on every operation; no bypass path |
 | Brute-force passphrase | Argon2id with tuned memory/time cost |
+| Stolen credentials (passphrase only) | Optional TOTP-based MFA as second factor; session grace period limits exposure window |
 | Replay of old ciphertext | Unique nonces per encryption; vault UUID bound into HKDF salt |
 | Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop |
 | Partial file writes | Atomic writes via `tempfile::persist()` |

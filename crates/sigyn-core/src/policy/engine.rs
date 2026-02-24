@@ -10,6 +10,7 @@ pub struct AccessRequest {
     pub env: String,
     pub key: Option<String>,
     pub ip: Option<String>,
+    pub mfa_verified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,7 @@ pub enum PolicyDecision {
     Allow,
     Deny(String),
     AllowWithWarning(String),
+    RequiresMfa,
 }
 
 pub struct PolicyEngine<'a> {
@@ -127,6 +129,19 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
+        // Check MFA requirement from global or member constraints
+        if !request.mfa_verified {
+            let global_requires = self
+                .policy
+                .global_constraints
+                .as_ref()
+                .is_some_and(|c| c.require_mfa);
+            let member_requires = member.constraints.as_ref().is_some_and(|c| c.require_mfa);
+            if global_requires || member_requires {
+                return Ok(PolicyDecision::RequiresMfa);
+            }
+        }
+
         Ok(PolicyDecision::Allow)
     }
 }
@@ -149,6 +164,7 @@ mod tests {
             env: "prod".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
     }
@@ -166,6 +182,7 @@ mod tests {
             env: "dev".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&request).unwrap(),
@@ -187,6 +204,7 @@ mod tests {
             env: "dev".into(),
             key: Some("DB_URL".into()),
             ip: None,
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&read_req).unwrap(),
@@ -208,6 +226,7 @@ mod tests {
             env: "dev".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&audit_req).unwrap(), PolicyDecision::Allow);
 
@@ -221,6 +240,7 @@ mod tests {
             env: "dev".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&audit_req).unwrap(),
@@ -242,6 +262,7 @@ mod tests {
             env: "dev".into(),
             key: Some("DB_URL".into()),
             ip: None,
+            mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
 
@@ -251,6 +272,7 @@ mod tests {
             env: "dev".into(),
             key: Some("DB_URL".into()),
             ip: None,
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&write_req).unwrap(),
@@ -269,6 +291,7 @@ mod tests {
             time_windows: vec![],
             ip_allowlist: vec!["192.168.1.0/24".into()],
             expires_at: None,
+            require_mfa: false,
         };
         member_policy.constraints = Some(constraints);
         policy.add_member(member_policy);
@@ -283,6 +306,7 @@ mod tests {
                 env: "dev".into(),
                 key: None,
                 ip: Some("192.168.1.5".into()),
+                mfa_verified: false,
             };
             assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
 
@@ -293,6 +317,7 @@ mod tests {
                 env: "dev".into(),
                 key: None,
                 ip: Some("10.0.0.1".into()),
+                mfa_verified: false,
             };
             assert!(matches!(
                 engine.evaluate(&req).unwrap(),
@@ -305,6 +330,7 @@ mod tests {
             time_windows: vec![],
             ip_allowlist: vec!["10.0.0.0/8".into()],
             expires_at: None,
+            require_mfa: false,
         });
 
         // Now even with member allowed, global denies it
@@ -315,6 +341,7 @@ mod tests {
             env: "dev".into(),
             key: None,
             ip: Some("192.168.1.5".into()),
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&req).unwrap(),
@@ -340,6 +367,7 @@ mod tests {
             env: "dev".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
 
@@ -350,6 +378,7 @@ mod tests {
             env: "prod".into(),
             key: None,
             ip: None,
+            mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&req).unwrap(),

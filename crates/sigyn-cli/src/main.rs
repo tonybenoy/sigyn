@@ -135,6 +135,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::delegation::DelegationCommands,
     },
+    /// Manage TOTP-based multi-factor authentication
+    Mfa {
+        #[command(subcommand)]
+        command: commands::mfa::MfaCommands,
+    },
     /// Import secrets from files or cloud providers
     Import {
         #[command(subcommand)]
@@ -210,6 +215,9 @@ fn main() -> Result<()> {
         }
         Commands::Delegation { command } => {
             commands::delegation::handle(command, cli.vault.as_deref(), json)?;
+        }
+        Commands::Mfa { command } => {
+            commands::mfa::handle(command, cli.identity.as_deref(), json)?;
         }
         Commands::Import { command } => {
             commands::import::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;

@@ -4,6 +4,7 @@ pub mod env;
 pub mod fork;
 pub mod identity;
 pub mod import;
+pub mod mfa;
 pub mod policy;
 pub mod project;
 pub mod rotate;

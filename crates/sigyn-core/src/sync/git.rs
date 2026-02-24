@@ -298,4 +298,77 @@ mod tests {
         // After commit, working tree is clean
         assert!(!engine.has_changes().unwrap());
     }
+
+    #[test]
+    fn test_is_repo_false_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GitSyncEngine::new(dir.path().to_path_buf());
+        assert!(!engine.is_repo());
+    }
+
+    #[test]
+    fn test_add_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GitSyncEngine::new(dir.path().to_path_buf());
+        engine.init().unwrap();
+        engine
+            .add_remote("origin", "https://example.com/repo.git")
+            .unwrap();
+
+        // Verify remote was added
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let remote = repo.find_remote("origin").unwrap();
+        assert_eq!(remote.url().unwrap(), "https://example.com/repo.git");
+    }
+
+    #[test]
+    fn test_status_no_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GitSyncEngine::new(dir.path().to_path_buf());
+        let state = engine.status().unwrap();
+        assert!(matches!(state.status, SyncStatus::NeverSynced));
+        assert!(state.remote_url.is_none());
+    }
+
+    #[test]
+    fn test_status_no_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GitSyncEngine::new(dir.path().to_path_buf());
+        engine.init().unwrap();
+        let state = engine.status().unwrap();
+        assert!(matches!(state.status, SyncStatus::NeverSynced));
+        assert!(state.remote_url.is_none());
+    }
+
+    #[test]
+    fn test_multiple_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = GitSyncEngine::new(dir.path().to_path_buf());
+        engine.init().unwrap();
+
+        std::fs::write(dir.path().join("a.txt"), "first").unwrap();
+        engine.stage_all().unwrap();
+        let oid1 = engine.commit("first").unwrap();
+
+        std::fs::write(dir.path().join("b.txt"), "second").unwrap();
+        engine.stage_all().unwrap();
+        let oid2 = engine.commit("second").unwrap();
+
+        assert_ne!(oid1, oid2);
+        assert!(!engine.has_changes().unwrap());
+    }
+
+    #[test]
+    fn test_pull_result_enum() {
+        assert_ne!(PullResult::UpToDate, PullResult::FastForward);
+        assert_ne!(PullResult::FastForward, PullResult::Conflict);
+        assert_eq!(PullResult::UpToDate, PullResult::UpToDate);
+    }
+
+    #[test]
+    fn test_sync_result_enum() {
+        assert_ne!(SyncResult::Pushed, SyncResult::Merged);
+        assert_ne!(SyncResult::Merged, SyncResult::Conflict);
+        assert_eq!(SyncResult::Pushed, SyncResult::Pushed);
+    }
 }

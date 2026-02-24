@@ -1,7 +1,11 @@
 #[cfg(test)]
 mod audit_chain;
 #[cfg(test)]
+mod delegation_invite;
+#[cfg(test)]
 mod env_promotion;
+#[cfg(test)]
+mod forks_leash;
 #[cfg(test)]
 mod member_access;
 #[cfg(test)]

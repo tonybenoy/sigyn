@@ -89,6 +89,32 @@ Show full details:
 sigyn identity show alice
 ```
 
+## Enable MFA (Optional)
+
+Add TOTP-based multi-factor authentication to your identity for an extra layer of
+security. You'll need an authenticator app (Google Authenticator, Authy, 1Password,
+etc.).
+
+```bash
+sigyn mfa setup -i alice
+```
+
+This will:
+
+1. Generate a TOTP secret and display a **QR code** in the terminal (plus the base32 secret for manual entry).
+2. Ask you to enter a code from your authenticator app to verify.
+3. Print 8 single-use backup codes — **save these somewhere safe**.
+
+Once enrolled, any vault policy that sets `require_mfa: true` will prompt for a TOTP
+code before granting access. A session-based grace period (default: 1 hour) avoids
+re-prompting on every operation.
+
+Check your enrollment status at any time:
+
+```bash
+sigyn mfa status -i alice
+```
+
 ## Set Defaults
 
 Configure your default identity and vault to avoid typing `--identity` and `--vault`
@@ -463,7 +489,7 @@ Restart your shell or source the file to activate completions.
 ## Next Steps
 
 - [CLI Reference](cli-reference.md) -- complete command documentation
-- [Security Model](security.md) -- cryptographic primitives and threat model
+- [Security Model](security.md) -- cryptographic primitives, MFA, and threat model
 - [Delegation](delegation.md) -- invitation flow and cascade revocation
 - [Sync](sync.md) -- conflict resolution and CRDT merge
 - Set up [Shamir recovery shards](security.md#shamir-secret-sharing-recovery) for disaster recovery:

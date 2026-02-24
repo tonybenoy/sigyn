@@ -6,6 +6,15 @@ use sigyn_core::identity::{Identity, IdentityProfile, LoadedIdentity};
 
 use crate::config::sigyn_home;
 
+/// Read a passphrase, checking SIGYN_PASSPHRASE env var first (for testing),
+/// then falling back to interactive tty prompt.
+pub(crate) fn read_passphrase(prompt: &str) -> Result<String> {
+    if let Ok(p) = std::env::var("SIGYN_PASSPHRASE") {
+        return Ok(p);
+    }
+    Ok(rpassword::prompt_password(prompt)?)
+}
+
 #[derive(Subcommand)]
 pub enum IdentityCommands {
     /// Create a new identity
@@ -35,8 +44,8 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                 anyhow::bail!("identity with name '{}' already exists", name);
             }
 
-            let passphrase = rpassword::prompt_password("Enter passphrase: ")?;
-            let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+            let passphrase = read_passphrase("Enter passphrase: ")?;
+            let confirm = read_passphrase("Confirm passphrase: ")?;
             if passphrase != confirm {
                 anyhow::bail!("passphrases do not match");
             }
@@ -136,7 +145,7 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
     let identity = resolve_identity(store, name_or_fp)?;
 
     let fp_hex = identity.fingerprint.to_hex();
-    let passphrase = rpassword::prompt_password(format!(
+    let passphrase = read_passphrase(&format!(
         "Passphrase for [{}...]: ",
         &fp_hex[..8.min(fp_hex.len())]
     ))?;

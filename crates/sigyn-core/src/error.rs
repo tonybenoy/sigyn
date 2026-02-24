@@ -48,6 +48,14 @@ pub enum SigynError {
     #[error("invalid passphrase")]
     InvalidPassphrase,
 
+    // MFA errors
+    #[error("MFA not enrolled for identity {0}")]
+    MfaNotEnrolled(String),
+    #[error("MFA verification failed")]
+    MfaVerificationFailed,
+    #[error("MFA already enrolled for identity {0}")]
+    MfaAlreadyEnrolled(String),
+
     // Policy errors
     #[error("access denied: {0}")]
     AccessDenied(String),

@@ -17,9 +17,7 @@ clap_complete.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 dialoguer.workspace = true
-indicatif.workspace = true
 console.workspace = true
-tabled.workspace = true
 rpassword.workspace = true
 
 # Serialization
@@ -42,6 +40,14 @@ chrono.workspace = true
 uuid.workspace = true
 directories.workspace = true
 base64.workspace = true
+totp-rs.workspace = true
+qr2term.workspace = true
+blake3.workspace = true
+rand.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"

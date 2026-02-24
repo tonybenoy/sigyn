@@ -181,6 +181,7 @@ pub fn check_access(
         env: ctx.env_name.clone(),
         key: key.map(String::from),
         ip: None,
+        mfa_verified: false,
     };
     match engine.evaluate(&request)? {
         PolicyDecision::Allow => Ok(()),
@@ -190,6 +191,31 @@ pub fn check_access(
         }
         PolicyDecision::Deny(reason) => {
             anyhow::bail!("access denied: {}", reason);
+        }
+        PolicyDecision::RequiresMfa => {
+            crate::commands::mfa::prompt_and_verify_mfa(&ctx.fingerprint, &ctx.loaded_identity)?;
+            // Re-evaluate with mfa_verified: true
+            let verified_request = AccessRequest {
+                actor: ctx.fingerprint.clone(),
+                action: request.action.clone(),
+                env: ctx.env_name.clone(),
+                key: key.map(String::from),
+                ip: None,
+                mfa_verified: true,
+            };
+            match engine.evaluate(&verified_request)? {
+                PolicyDecision::Allow => Ok(()),
+                PolicyDecision::AllowWithWarning(msg) => {
+                    eprintln!("{} {}", style("WARNING").yellow().bold(), msg);
+                    Ok(())
+                }
+                PolicyDecision::Deny(reason) => {
+                    anyhow::bail!("access denied: {}", reason);
+                }
+                PolicyDecision::RequiresMfa => {
+                    unreachable!("MFA was just verified")
+                }
+            }
         }
     }
 }

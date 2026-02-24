@@ -101,6 +101,42 @@ sigyn policy member-add <fingerprint>
   --patterns '*'
 ```
 
+## MFA Enforcement
+
+### Requiring MFA for All Members
+
+Enable MFA globally by setting `require_mfa: true` in the vault's global constraints.
+Every non-owner member will be prompted for a TOTP code on their first access (then
+a 1-hour session grace period kicks in).
+
+First, have each team member enroll:
+
+```bash
+sigyn mfa setup -i alice
+```
+
+Then set the policy constraint (as vault owner):
+
+```bash
+# In the vault policy, set global_constraints.require_mfa = true
+sigyn policy show --vault myapp   # verify current policy
+```
+
+### MFA for Specific Members
+
+You can also require MFA only for certain members by setting `require_mfa: true` on
+their individual member constraints rather than globally. This is useful for
+restricting high-privilege roles while leaving read-only members unaffected.
+
+### Generating New Backup Codes
+
+If a team member loses their backup codes, they can generate a fresh set (the old
+codes are immediately invalidated):
+
+```bash
+sigyn mfa backup -i alice
+```
+
 ## Secret Rotation
 
 ### Manual Rotation of a Database Password

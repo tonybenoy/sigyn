@@ -293,6 +293,51 @@ sigyn policy check a1b2c3d4e5f6... write --env prod --key DATABASE_URL
 
 Actions: `read`, `write`, `delete`, `manage-members`, `manage-policy`, `create-env`, `promote`.
 
+## mfa
+
+Manage TOTP-based multi-factor authentication for identities.
+
+### mfa setup
+
+Enroll TOTP-based MFA for an identity. Generates a TOTP secret, displays the
+`otpauth://` URI for your authenticator app, then verifies with a code. On success,
+generates 8 single-use backup codes.
+
+```bash
+sigyn mfa setup -i alice
+```
+
+| Flag | Description |
+|---|---|
+| `--identity, -i <NAME>` | Identity to enroll (uses default if omitted) |
+| `--json` | Output URI, secret, and backup codes as JSON |
+
+### mfa disable
+
+Disable MFA for an identity. Requires a valid TOTP code or backup code to confirm.
+
+```bash
+sigyn mfa disable -i alice
+```
+
+### mfa status
+
+Show MFA enrollment status, including whether a session is active and how many
+backup codes remain.
+
+```bash
+sigyn mfa status -i alice
+```
+
+### mfa backup
+
+Generate a new set of 8 backup codes, invalidating any previous codes. Requires a
+valid TOTP code to confirm.
+
+```bash
+sigyn mfa backup -i alice
+```
+
 ## delegation (alias: member)
 
 Manage the delegation tree and invitations.
