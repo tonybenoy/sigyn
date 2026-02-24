@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Serverless, encrypted, peer-to-peer secret management.</strong></p>
 
-[![CI](https://github.com/tonybenoy/sigyn/actions/workflows/ci.yml/badge.svg)](https://github.com/tonybenoy/sigyn/actions/workflows/ci.yml)
+[![CI](https://github.com/tonybenoy/sigyn/actions/workflows/release.yml/badge.svg)](https://github.com/tonybenoy/sigyn/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-sigyn.org-blue)](https://sigyn.org)
 
