@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 fast-kdf = []
+vendored-openssl = ["openssl-sys/vendored"]
 
 [dependencies]
 # Crypto
@@ -40,6 +41,7 @@ thiserror.workspace = true
 
 # Sync
 git2 = "0.20"
+openssl-sys = { version = "0.9", optional = true }
 
 # Scheduling
 cron.workspace = true

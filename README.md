@@ -228,10 +228,10 @@ Contributions are welcome. To get started:
 git clone https://github.com/tonybenoy/sigyn.git
 cd sigyn
 cargo build
-cargo test
+cargo test --all --features sigyn-cli/fast-kdf
 ```
 
-Please ensure `cargo clippy` and `cargo test` pass before submitting a
+Please ensure `cargo clippy` and `cargo test --all --features sigyn-cli/fast-kdf` pass before submitting a
 pull request. The CI pipeline enforces both.
 
 ## Documentation

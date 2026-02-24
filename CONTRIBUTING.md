@@ -25,7 +25,7 @@ Please be respectful and professional in all interactions.
 - Create a new branch for your feature or bugfix.
 - Ensure your code follows the existing style.
 - **Write tests** for your changes.
-- Ensure all tests pass: `cargo test`
+- Ensure all tests pass: `cargo test --all --features sigyn-cli/fast-kdf`
 - Ensure the code is linted: `cargo clippy -- -D warnings`
 - Ensure the code is formatted: `cargo fmt --all -- --check`
 - Submit a pull request.
@@ -47,10 +47,10 @@ cargo build
 
 ### Running Tests
 
-Run all unit tests:
+Run all tests (the `fast-kdf` feature uses lightweight Argon2 params to speed up tests):
 
 ```bash
-cargo test
+cargo test --all --features sigyn-cli/fast-kdf
 ```
 
 Run integration tests:

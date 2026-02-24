@@ -8,8 +8,11 @@ license.workspace = true
 name = "sigyn-recovery"
 path = "src/main.rs"
 
+[features]
+vendored-openssl = ["sigyn-core/vendored-openssl"]
+
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.2.4" }
+sigyn-core = { path = "../sigyn-core", version = "0.2.5" }
 
 # CLI
 clap.workspace = true

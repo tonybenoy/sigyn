@@ -150,7 +150,9 @@ pub fn handle(
             let export_format = crate::inject::ExportFormat::from_str(&format)?;
             let output = crate::inject::export_secrets(&plaintext, export_format, &name)?;
 
-            println!("{}", output);
+            use std::io::Write;
+            std::io::stdout().write_all(output.as_bytes())?;
+            std::io::stdout().write_all(b"\n")?;
             Ok(())
         }
         #[cfg(unix)]
