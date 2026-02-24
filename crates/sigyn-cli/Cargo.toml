@@ -12,7 +12,7 @@ path = "src/main.rs"
 fast-kdf = ["sigyn-core/fast-kdf"]
 
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.2.2" }
+sigyn-core = { path = "../sigyn-core", version = "0.2.3" }
 
 # CLI
 clap.workspace = true

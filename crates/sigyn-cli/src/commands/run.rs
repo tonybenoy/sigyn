@@ -56,7 +56,8 @@ pub enum RunCommands {
         #[arg(long, default_value = "app-secrets")]
         name: String,
     },
-    /// Serve secrets over a Unix domain socket
+    /// Serve secrets over a Unix domain socket (Unix only)
+    #[cfg(unix)]
     Serve {
         /// Environment
         #[arg(long, short)]
@@ -152,6 +153,7 @@ pub fn handle(
             println!("{}", output);
             Ok(())
         }
+        #[cfg(unix)]
         Some(RunCommands::Serve { env, socket }) => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Read, None)?;

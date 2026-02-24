@@ -25,7 +25,6 @@ pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     };
 
     // H10: Restrict socket permissions to owner only
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
