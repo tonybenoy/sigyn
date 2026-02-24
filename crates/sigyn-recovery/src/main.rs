@@ -51,26 +51,6 @@ enum Commands {
         #[arg(long)]
         vault: String,
     },
-    /// Manage succession planning
-    Succession {
-        #[command(subcommand)]
-        command: SuccessionCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum SuccessionCommands {
-    /// Show current succession configuration
-    Show,
-    /// Set a successor identity
-    Set {
-        /// Successor's fingerprint
-        #[arg(long)]
-        successor: String,
-        /// Days of inactivity before succession triggers
-        #[arg(long, default_value = "90")]
-        dead_man_days: u64,
-    },
 }
 
 fn sigyn_home() -> std::path::PathBuf {
@@ -95,13 +75,6 @@ fn main() -> Result<()> {
         Commands::Restore { shards, output } => cmd_restore(&shards, output.as_deref())?,
         Commands::PrintShards { shards } => cmd_print_shards(&shards)?,
         Commands::Snapshots { vault } => cmd_snapshots(&vault)?,
-        Commands::Succession { command } => match command {
-            SuccessionCommands::Show => cmd_succession_show()?,
-            SuccessionCommands::Set {
-                successor,
-                dead_man_days,
-            } => cmd_succession_set(&successor, dead_man_days)?,
-        },
     }
 
     Ok(())
@@ -218,18 +191,57 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
         );
     }
 
-    let output_path = output.unwrap_or("recovered_key.bin");
-    std::fs::write(output_path, &recovered)?;
+    // Convert recovered bytes to encryption private key
+    let mut enc_key_bytes = [0u8; 32];
+    enc_key_bytes.copy_from_slice(&recovered);
+
+    // Derive X25519 public key from the recovered encryption private key
+    let enc_private = sigyn_core::crypto::keys::X25519PrivateKey::from_bytes(enc_key_bytes);
+    let enc_pubkey = enc_private.public_key();
+
+    // Generate a new Ed25519 signing keypair (the old signing key was NOT sharded)
+    let signing_kp = sigyn_core::crypto::keys::SigningKeyPair::generate();
+    let signing_pubkey = signing_kp.verifying_key();
+    let signing_private_bytes = signing_kp.to_bytes();
+
+    // Prompt for new passphrase
+    let passphrase = rpassword::prompt_password("Enter new passphrase for recovered identity: ")?;
+    let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+    if passphrase != confirm {
+        anyhow::bail!("passphrases do not match");
+    }
+
+    let profile = sigyn_core::identity::IdentityProfile {
+        name: "recovered".into(),
+        email: None,
+        created_at: chrono::Utc::now(),
+    };
+
+    let wrapped = sigyn_core::identity::WrappedIdentity::wrap(
+        &enc_key_bytes,
+        &signing_private_bytes,
+        enc_pubkey,
+        signing_pubkey,
+        profile,
+        &passphrase,
+    )
+    .context("failed to wrap recovered identity")?;
+
+    let output_path = output.unwrap_or("recovered.identity.toml");
+    let toml_content = toml::to_string_pretty(&wrapped).context("failed to serialize identity")?;
+    std::fs::write(output_path, &toml_content)?;
 
     println!(
-        "\n{} Key reconstructed and saved to: {}",
+        "\n{} Identity reconstructed and saved to: {}",
         style("✓").green().bold(),
         output_path
     );
+    println!("  Fingerprint: {}", wrapped.fingerprint.to_hex());
     println!(
-        "{}",
-        style("  This file contains sensitive key material. Handle with care.").yellow()
+        "  {} A new signing keypair was generated (only the encryption key was sharded).",
+        style("Note:").cyan().bold()
     );
+    println!("  Import with: sigyn identity import {}", output_path);
 
     Ok(())
 }
@@ -321,53 +333,6 @@ fn cmd_snapshots(vault_name: &str) -> Result<()> {
             println!("  Initialize with: sigyn sync configure --remote-url <url>");
         }
     }
-
-    Ok(())
-}
-
-fn cmd_succession_show() -> Result<()> {
-    let home = sigyn_home();
-    let path = home.join("succession.json");
-
-    if !path.exists() {
-        println!("No succession plan configured.");
-        println!("Set one with: sigyn-recovery succession set --successor <fingerprint>");
-        return Ok(());
-    }
-
-    let content = std::fs::read_to_string(&path)?;
-    let config: serde_json::Value = serde_json::from_str(&content)?;
-
-    println!("{}", style("Succession Plan").bold());
-    println!("{}", style("─".repeat(40)).dim());
-    println!(
-        "  Successor: {}",
-        config["successor"].as_str().unwrap_or("(not set)")
-    );
-    println!(
-        "  Dead-man trigger: {} days of inactivity",
-        config["dead_man_days"].as_u64().unwrap_or(0)
-    );
-
-    Ok(())
-}
-
-fn cmd_succession_set(successor: &str, dead_man_days: u64) -> Result<()> {
-    let home = sigyn_home();
-    std::fs::create_dir_all(&home)?;
-    let path = home.join("succession.json");
-
-    let config = serde_json::json!({
-        "successor": successor,
-        "dead_man_days": dead_man_days,
-        "configured_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    std::fs::write(&path, serde_json::to_string_pretty(&config)?)?;
-
-    println!("{} Succession plan configured", style("✓").green().bold());
-    println!("  Successor: {}", successor);
-    println!("  Dead-man trigger: {} days of inactivity", dead_man_days);
 
     Ok(())
 }

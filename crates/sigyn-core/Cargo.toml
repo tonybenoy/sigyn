@@ -36,7 +36,7 @@ chrono.workspace = true
 thiserror.workspace = true
 
 # Sync
-git2 = "0.19"
+git2 = "0.20"
 
 # Scheduling
 cron.workspace = true

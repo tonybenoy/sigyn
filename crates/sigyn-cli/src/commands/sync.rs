@@ -133,11 +133,26 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
             remote_url,
             auto_sync,
         } => {
-            let cfg = crate::config::load_config();
-            if let Some(url) = &remote_url {
+            if let Some(ref url) = remote_url {
+                let vault_name = vault.unwrap_or("default");
+                let home = crate::config::sigyn_home();
+                let vault_dir = home.join("vaults").join(vault_name);
+
+                if !vault_dir.exists() {
+                    anyhow::bail!("vault '{}' not found", vault_name);
+                }
+
+                let engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+                if !engine.is_repo() {
+                    engine.init()?;
+                }
+                engine.add_remote("origin", url)?;
                 println!("Remote URL set to: {}", url);
             }
+
+            let mut cfg = crate::config::load_config();
             if let Some(auto) = auto_sync {
+                cfg.auto_sync = auto;
                 println!("Auto-sync: {}", if auto { "enabled" } else { "disabled" });
             }
             crate::config::save_config(&cfg)?;

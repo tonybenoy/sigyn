@@ -1,8 +1,7 @@
 # Sync
 
 This document describes how Sigyn synchronizes vault data between machines, including
-the git-based transport, conflict detection via vector clocks, CRDT-based resolution,
-and LAN peer discovery.
+the git-based transport, conflict detection via vector clocks, and CRDT-based resolution.
 
 ## Design Principles
 
@@ -13,7 +12,7 @@ and LAN peer discovery.
   `vault.toml`, `members.cbor`, `policy.cbor`, `envs/*.vault`, `audit.log.json`,
   and `forks.cbor`. This maps naturally to git repositories.
 - **No central server**: Sigyn is peer-to-peer. Any member can push/pull to a shared
-  git remote. LAN peers can discover each other via mDNS.
+  git remote.
 
 ## On-Disk Layout
 
@@ -251,22 +250,6 @@ sigyn sync status
 sigyn sync resolve DATABASE_URL --strategy local
 sigyn sync resolve API_KEY --strategy remote
 sigyn sync resolve CONFIG --strategy latest
-```
-
-## LAN Peer Discovery
-
-Sigyn includes mDNS-based LAN peer discovery via the `sync::mdns` module. When
-enabled, Sigyn nodes on the same local network can discover each other and sync
-directly without a central git remote.
-
-This is useful for:
-
-- Teams working in the same office.
-- Development environments without internet access.
-- Fast local sync without round-tripping through a remote server.
-
-```bash
-sigyn sync peers
 ```
 
 ## Security Considerations

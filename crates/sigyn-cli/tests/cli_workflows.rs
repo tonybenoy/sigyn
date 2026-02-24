@@ -1130,7 +1130,7 @@ fn test_fork_create_leashed() {
 
     sigyn(&home)
         .args([
-            "fork", "create", "my-fork", "--mode", "leashed", "-v", "myapp",
+            "fork", "create", "my-fork", "--mode", "leashed", "-v", "myapp", "-i", "testuser",
         ])
         .assert()
         .success()
@@ -1151,6 +1151,8 @@ fn test_fork_create_unleashed() {
             "unleashed",
             "-v",
             "myapp",
+            "-i",
+            "testuser",
         ])
         .assert()
         .success()
@@ -1173,6 +1175,8 @@ fn test_fork_create_with_expiry() {
             "7",
             "-v",
             "myapp",
+            "-i",
+            "testuser",
         ])
         .assert()
         .success()
@@ -1189,7 +1193,7 @@ fn test_fork_create_invalid_mode() {
 
     sigyn(&home)
         .args([
-            "fork", "create", "bad-fork", "--mode", "invalid", "-v", "myapp",
+            "fork", "create", "bad-fork", "--mode", "invalid", "-v", "myapp", "-i", "testuser",
         ])
         .assert()
         .failure()
@@ -1203,7 +1207,8 @@ fn test_fork_create_json() {
 
     sigyn(&home)
         .args([
-            "--json", "fork", "create", "j-fork", "--mode", "leashed", "-v", "myapp",
+            "--json", "fork", "create", "j-fork", "--mode", "leashed", "-v", "myapp", "-i",
+            "testuser",
         ])
         .assert()
         .success()
@@ -1253,8 +1258,16 @@ fn test_fork_sync() {
     let home = fresh_home();
     setup_vault(&home);
 
+    // Create a fork first so sync has something to work with
     sigyn(&home)
-        .args(["fork", "sync", "my-fork", "-v", "myapp"])
+        .args([
+            "fork", "create", "my-fork", "--mode", "leashed", "-v", "myapp", "-i", "testuser",
+        ])
+        .assert()
+        .success();
+
+    sigyn(&home)
+        .args(["fork", "sync", "my-fork", "-v", "myapp", "-i", "testuser"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Synced fork"));
@@ -1345,6 +1358,7 @@ fn test_sync_resolve_invalid_strategy() {
 #[test]
 fn test_sync_configure() {
     let home = fresh_home();
+    setup_vault(&home);
 
     sigyn(&home)
         .args([
@@ -1401,7 +1415,7 @@ fn test_rotate_schedule() {
     setup_vault(&home);
 
     sigyn(&home)
-        .args(["rotate", "schedule", "-v", "myapp"])
+        .args(["rotate", "schedule", "list", "-v", "myapp"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Rotation Schedules"));

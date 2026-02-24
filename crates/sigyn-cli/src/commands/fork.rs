@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::Subcommand;
 use console::style;
 
+use super::secret::unlock_vault;
+
 #[derive(Subcommand)]
 pub enum ForkCommands {
     /// Create a fork of a vault
@@ -29,7 +31,35 @@ pub enum ForkCommands {
     },
 }
 
-pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> {
+fn forks_path(home: &std::path::Path, vault_name: &str) -> std::path::PathBuf {
+    home.join("vaults").join(vault_name).join("forks.cbor")
+}
+
+fn load_forks(path: &std::path::Path) -> Vec<sigyn_core::forks::Fork> {
+    if path.exists() {
+        if let Ok(data) = std::fs::read(path) {
+            if let Ok(forks) = ciborium::from_reader(data.as_slice()) {
+                return forks;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn save_forks(path: &std::path::Path, forks: &[sigyn_core::forks::Fork]) -> Result<()> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(forks, &mut buf)
+        .map_err(|e| anyhow::anyhow!("failed to encode forks: {}", e))?;
+    std::fs::write(path, buf)?;
+    Ok(())
+}
+
+pub fn handle(
+    cmd: ForkCommands,
+    vault: Option<&str>,
+    identity: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let vault_name = vault.unwrap_or("default");
     let home = crate::config::sigyn_home();
 
@@ -44,8 +74,40 @@ pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> 
                 "unleashed" => sigyn_core::forks::ForkMode::Unleashed,
                 other => anyhow::bail!("unknown fork mode: '{}'. Use: leashed, unleashed", other),
             };
-            // fork_mode is validated; actual fork creation would use it
-            let _ = fork_mode;
+
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+
+            let fork = match fork_mode {
+                sigyn_core::forks::ForkMode::Leashed => {
+                    sigyn_core::forks::leash::create_leashed_fork(
+                        &ctx.paths,
+                        &ctx.vault_name,
+                        &name,
+                        &ctx.cipher,
+                        &ctx.manifest,
+                        &ctx.loaded_identity.identity.encryption_pubkey,
+                        &ctx.loaded_identity.identity.encryption_pubkey,
+                        &ctx.fingerprint,
+                    )?
+                }
+                sigyn_core::forks::ForkMode::Unleashed => {
+                    sigyn_core::forks::leash::create_unleashed_fork(
+                        &ctx.paths,
+                        &ctx.vault_name,
+                        &name,
+                        &ctx.cipher,
+                        &ctx.manifest,
+                        &ctx.loaded_identity.identity.encryption_pubkey,
+                        &ctx.fingerprint,
+                    )?
+                }
+            };
+
+            // Save fork to registry
+            let fp = forks_path(&home, &ctx.vault_name);
+            let mut forks = load_forks(&fp);
+            forks.push(fork);
+            save_forks(&fp, &forks)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -65,18 +127,77 @@ pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> 
             }
         }
         ForkCommands::List => {
-            let forks_path = home.join("vaults").join(vault_name).join("forks.cbor");
-            if !forks_path.exists() {
+            let fp = forks_path(&home, vault_name);
+            let forks = load_forks(&fp);
+
+            if forks.is_empty() {
                 println!("No forks found for vault '{}'", vault_name);
                 return Ok(());
             }
 
-            println!("{} for vault '{}'", style("Forks").bold(), vault_name);
-            println!("{}", style("─".repeat(60)).dim());
-            println!("  (fork registry loaded)");
+            if json {
+                let items: Vec<_> = forks
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "id": f.id.to_string(),
+                            "mode": format!("{:?}", f.mode),
+                            "status": format!("{:?}", f.status),
+                            "created_at": f.created_at.to_rfc3339(),
+                            "expires_at": f.expires_at.map(|t| t.to_rfc3339()),
+                        })
+                    })
+                    .collect();
+                crate::output::print_json(&items)?;
+            } else {
+                println!("{} for vault '{}'", style("Forks").bold(), vault_name);
+                println!("{}", style("─".repeat(60)).dim());
+                for f in &forks {
+                    let id_short = &f.id.to_string()[..8];
+                    let expires = f
+                        .expires_at
+                        .map(|t| t.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "never".into());
+                    println!(
+                        "  {} {:?} {:?} created={} expires={}",
+                        style(id_short).cyan(),
+                        f.mode,
+                        f.status,
+                        f.created_at.format("%Y-%m-%d"),
+                        expires,
+                    );
+                }
+            }
         }
         ForkCommands::Status { name } => {
-            if json {
+            let fp = forks_path(&home, vault_name);
+            let forks = load_forks(&fp);
+
+            // Try to find fork by vault name match (fork_vault_id name)
+            // Since we store UUID-based forks, match by checking vault dir existence
+            let fork_dir = home.join("vaults").join(&name);
+            let fork = forks.iter().find(|_f| fork_dir.exists());
+
+            if let Some(f) = fork {
+                if json {
+                    crate::output::print_json(&serde_json::json!({
+                        "fork": name,
+                        "parent": vault_name,
+                        "mode": format!("{:?}", f.mode),
+                        "status": format!("{:?}", f.status),
+                        "created_at": f.created_at.to_rfc3339(),
+                        "expires_at": f.expires_at.map(|t| t.to_rfc3339()),
+                    }))?;
+                } else {
+                    println!("Fork '{}' (parent: '{}')", style(&name).bold(), vault_name);
+                    println!("  Mode:       {:?}", f.mode);
+                    println!("  Status:     {:?}", f.status);
+                    println!("  Created:    {}", f.created_at.format("%Y-%m-%d %H:%M:%S"));
+                    if let Some(exp) = f.expires_at {
+                        println!("  Expires:    {}", exp.format("%Y-%m-%d %H:%M:%S"));
+                    }
+                }
+            } else if json {
                 crate::output::print_json(&serde_json::json!({
                     "fork": name,
                     "parent": vault_name,
@@ -88,9 +209,45 @@ pub fn handle(cmd: ForkCommands, vault: Option<&str>, json: bool) -> Result<()> 
             }
         }
         ForkCommands::Sync { name } => {
+            let fp = forks_path(&home, vault_name);
+            let forks = load_forks(&fp);
+
+            // Check if this is an unleashed fork
+            let fork_dir = home.join("vaults").join(&name);
+            let is_unleashed = forks
+                .iter()
+                .find(|_f| fork_dir.exists())
+                .is_some_and(|f| matches!(f.mode, sigyn_core::forks::ForkMode::Unleashed));
+
+            if is_unleashed {
+                anyhow::bail!("unleashed forks cannot sync with parent");
+            }
+
+            // For leashed forks, re-read parent envs and update fork envs
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let fork_vault_dir = home.join("vaults").join(&name);
+            if !fork_vault_dir.exists() {
+                anyhow::bail!("fork vault '{}' not found", name);
+            }
+
+            // Copy parent environments to fork (re-encrypting would need fork cipher,
+            // but for a leashed fork the parent admin has access)
+            let mut synced_envs = 0u32;
+            for env_name in &ctx.manifest.environments {
+                let parent_env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
+                let fork_env_dir = fork_vault_dir.join("envs");
+                std::fs::create_dir_all(&fork_env_dir)?;
+                let fork_env_path = fork_env_dir.join(format!("{}.enc", env_name));
+
+                if parent_env_path.exists() {
+                    std::fs::copy(&parent_env_path, &fork_env_path)?;
+                    synced_envs += 1;
+                }
+            }
+
             crate::output::print_success(&format!(
-                "Synced fork '{}' with parent '{}'",
-                name, vault_name
+                "Synced fork '{}' with parent '{}' ({} environments)",
+                name, vault_name, synced_envs
             ));
         }
     }

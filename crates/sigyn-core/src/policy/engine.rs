@@ -9,7 +9,6 @@ pub struct AccessRequest {
     pub action: AccessAction,
     pub env: String,
     pub key: Option<String>,
-    pub ip: Option<String>,
     pub mfa_verified: bool,
 }
 
@@ -58,22 +57,12 @@ impl<'a> PolicyEngine<'a> {
             if let Err(reason) = global.check(chrono::Utc::now()) {
                 return Ok(PolicyDecision::Deny(reason));
             }
-            if let Some(ip) = &request.ip {
-                if let Err(reason) = global.check_ip(ip) {
-                    return Ok(PolicyDecision::Deny(reason));
-                }
-            }
         }
 
         // Check member-specific constraints
         if let Some(constraints) = &member.constraints {
             if let Err(reason) = constraints.check(chrono::Utc::now()) {
                 return Ok(PolicyDecision::Deny(reason));
-            }
-            if let Some(ip) = &request.ip {
-                if let Err(reason) = constraints.check_ip(ip) {
-                    return Ok(PolicyDecision::Deny(reason));
-                }
             }
         }
 
@@ -129,6 +118,30 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
+        // Check if access is expiring soon (within 24 hours) for AllowWithWarning
+        let mut warning: Option<String> = None;
+        let now = chrono::Utc::now();
+        let warn_threshold = chrono::Duration::hours(24);
+        if let Some(constraints) = &member.constraints {
+            if let Some(expires_at) = constraints.expires_at {
+                let remaining = expires_at - now;
+                if remaining > chrono::Duration::zero() && remaining < warn_threshold {
+                    warning = Some(format!("access expires in {} hours", remaining.num_hours()));
+                }
+            }
+        }
+        if warning.is_none() {
+            if let Some(global) = &self.policy.global_constraints {
+                if let Some(expires_at) = global.expires_at {
+                    let remaining = expires_at - now;
+                    if remaining > chrono::Duration::zero() && remaining < warn_threshold {
+                        warning =
+                            Some(format!("access expires in {} hours", remaining.num_hours()));
+                    }
+                }
+            }
+        }
+
         // Check MFA requirement from global or member constraints
         if !request.mfa_verified {
             let global_requires = self
@@ -142,7 +155,11 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
-        Ok(PolicyDecision::Allow)
+        if let Some(msg) = warning {
+            Ok(PolicyDecision::AllowWithWarning(msg))
+        } else {
+            Ok(PolicyDecision::Allow)
+        }
     }
 }
 
@@ -163,7 +180,7 @@ mod tests {
             action: AccessAction::ManagePolicy,
             env: "prod".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
@@ -181,7 +198,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert!(matches!(
@@ -203,7 +220,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: Some("DB_URL".into()),
-            ip: None,
+
             mfa_verified: false,
         };
         assert!(matches!(
@@ -225,7 +242,7 @@ mod tests {
             action: AccessAction::Audit,
             env: "dev".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&audit_req).unwrap(), PolicyDecision::Allow);
@@ -239,7 +256,7 @@ mod tests {
             action: AccessAction::Audit,
             env: "dev".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert!(matches!(
@@ -261,7 +278,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: Some("DB_URL".into()),
-            ip: None,
+
             mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
@@ -271,80 +288,11 @@ mod tests {
             action: AccessAction::Write,
             env: "dev".into(),
             key: Some("DB_URL".into()),
-            ip: None,
+
             mfa_verified: false,
         };
         assert!(matches!(
             engine.evaluate(&write_req).unwrap(),
-            PolicyDecision::Deny(_)
-        ));
-    }
-
-    #[test]
-    fn test_ip_constraints() {
-        let owner = KeyFingerprint([0u8; 16]);
-        let member = KeyFingerprint([2u8; 16]);
-        let mut policy = VaultPolicy::new();
-        let mut member_policy = MemberPolicy::new(member.clone(), Role::Contributor);
-
-        let constraints = crate::policy::constraints::Constraints {
-            time_windows: vec![],
-            ip_allowlist: vec!["192.168.1.0/24".into()],
-            expires_at: None,
-            require_mfa: false,
-        };
-        member_policy.constraints = Some(constraints);
-        policy.add_member(member_policy);
-
-        {
-            let engine = PolicyEngine::new(&policy, &owner);
-
-            // Allowed IP
-            let req = AccessRequest {
-                actor: member.clone(),
-                action: AccessAction::Read,
-                env: "dev".into(),
-                key: None,
-                ip: Some("192.168.1.5".into()),
-                mfa_verified: false,
-            };
-            assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
-
-            // Denied IP
-            let req = AccessRequest {
-                actor: member.clone(),
-                action: AccessAction::Read,
-                env: "dev".into(),
-                key: None,
-                ip: Some("10.0.0.1".into()),
-                mfa_verified: false,
-            };
-            assert!(matches!(
-                engine.evaluate(&req).unwrap(),
-                PolicyDecision::Deny(_)
-            ));
-        }
-
-        // Global IP constraint
-        policy.global_constraints = Some(crate::policy::constraints::Constraints {
-            time_windows: vec![],
-            ip_allowlist: vec!["10.0.0.0/8".into()],
-            expires_at: None,
-            require_mfa: false,
-        });
-
-        // Now even with member allowed, global denies it
-        let engine = PolicyEngine::new(&policy, &owner);
-        let req = AccessRequest {
-            actor: member,
-            action: AccessAction::Read,
-            env: "dev".into(),
-            key: None,
-            ip: Some("192.168.1.5".into()),
-            mfa_verified: false,
-        };
-        assert!(matches!(
-            engine.evaluate(&req).unwrap(),
             PolicyDecision::Deny(_)
         ));
     }
@@ -366,7 +314,7 @@ mod tests {
             action: AccessAction::Read,
             env: "dev".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
@@ -377,7 +325,7 @@ mod tests {
             action: AccessAction::Read,
             env: "prod".into(),
             key: None,
-            ip: None,
+
             mfa_verified: false,
         };
         assert!(matches!(

@@ -8,6 +8,7 @@ use sigyn_core::crypto::keys::KeyFingerprint;
 use sigyn_core::policy::engine::AccessAction;
 use sigyn_core::rotation::breach::BreachReport;
 use sigyn_core::rotation::dead::find_dead_secrets;
+use sigyn_core::rotation::schedule::RotationSchedule;
 use sigyn_core::secrets::generation::{GenerationTemplate, PasswordCharset};
 use sigyn_core::secrets::types::SecretValue;
 use sigyn_core::vault::env_file;
@@ -24,8 +25,11 @@ pub enum RotateCommands {
         #[arg(long, short)]
         env: Option<String>,
     },
-    /// Show rotation schedule
-    Schedule,
+    /// Manage rotation schedules
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommands,
+    },
     /// Show secrets due for rotation
     Due {
         /// Max age in days before a secret is "due"
@@ -52,6 +56,57 @@ pub enum RotateCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ScheduleCommands {
+    /// List all rotation schedules
+    List,
+    /// Set a rotation schedule for a key
+    Set {
+        /// Secret key pattern
+        key: String,
+        /// Cron expression (e.g. '0 0 * * * *' for hourly)
+        #[arg(long)]
+        cron: String,
+        /// Grace period in hours before rotation is considered overdue
+        #[arg(long, default_value = "24")]
+        grace_hours: u32,
+        /// Post-rotation hook commands
+        #[arg(long)]
+        hooks: Vec<String>,
+    },
+    /// Remove a rotation schedule
+    Remove {
+        /// Secret key pattern to remove schedule for
+        key: String,
+    },
+}
+
+/// Load rotation schedules from vault dir
+fn load_schedules(
+    vault_dir: &std::path::Path,
+) -> std::collections::HashMap<String, RotationSchedule> {
+    let path = vault_dir.join("rotation_schedules.toml");
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(schedules) = toml::from_str(&content) {
+                return schedules;
+            }
+        }
+    }
+    std::collections::HashMap::new()
+}
+
+/// Save rotation schedules to vault dir
+fn save_schedules(
+    vault_dir: &std::path::Path,
+    schedules: &std::collections::HashMap<String, RotationSchedule>,
+) -> Result<()> {
+    let path = vault_dir.join("rotation_schedules.toml");
+    let content = toml::to_string_pretty(schedules)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
 /// Append an audit entry (best-effort -- don't fail the operation on audit error)
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
@@ -71,6 +126,7 @@ pub fn handle(
     vault: Option<&str>,
     identity: Option<&str>,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
     match cmd {
         RotateCommands::Key { key, env } => {
@@ -107,6 +163,11 @@ pub fn handle(
                 _ => anyhow::bail!("cannot auto-rotate this secret type"),
             };
 
+            if dry_run {
+                println!("[dry-run] Would rotate '{}' in env '{}'", key, ctx.env_name);
+                return Ok(());
+            }
+
             plaintext.set(key.clone(), new_value, &ctx.fingerprint);
 
             let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
@@ -116,6 +177,52 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretWritten { key: key.clone() },
                 AuditOutcome::Success,
+            );
+
+            // Execute rotation hooks if a schedule exists for this key
+            let vault_dir = crate::config::sigyn_home()
+                .join("vaults")
+                .join(&ctx.vault_name);
+            let schedules = load_schedules(&vault_dir);
+            if let Some(schedule) = schedules.get(&key) {
+                if !schedule.hooks.is_empty() {
+                    match sigyn_core::rotation::hooks::execute_rotation_hooks(
+                        &schedule.hooks,
+                        &key,
+                        &ctx.env_name,
+                    ) {
+                        Ok(results) => {
+                            for r in &results {
+                                if r.success {
+                                    eprintln!("  Hook '{}': OK", r.hook);
+                                } else {
+                                    eprintln!(
+                                        "  {} Hook '{}' failed: {}",
+                                        style("warning:").yellow().bold(),
+                                        r.hook,
+                                        r.output.trim()
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  {} rotation hooks failed: {}",
+                                style("warning:").yellow().bold(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                Some(&ctx.env_name),
+                Some(&key),
+                &ctx.fingerprint.to_hex(),
+                "secret.rotated",
+                &format!("Secret '{}' rotated in env '{}'", key, ctx.env_name),
             );
 
             if json {
@@ -131,11 +238,79 @@ pub fn handle(
                 ));
             }
         }
-        RotateCommands::Schedule => {
-            println!("{}", style("Rotation Schedules").bold());
-            println!("{}", style("─".repeat(60)).dim());
-            println!("  No rotation schedules configured.");
-            println!("  Use: sigyn rotate schedule set <key> --cron '0 0 * * 1'");
+        RotateCommands::Schedule { command } => {
+            let vault_name = vault.unwrap_or("default");
+            let home = crate::config::sigyn_home();
+            let vault_dir = home.join("vaults").join(vault_name);
+
+            if !vault_dir.exists() {
+                anyhow::bail!("vault '{}' not found", vault_name);
+            }
+
+            match command {
+                ScheduleCommands::List => {
+                    let schedules = load_schedules(&vault_dir);
+                    if schedules.is_empty() {
+                        println!("{}", style("Rotation Schedules").bold());
+                        println!("{}", style("─".repeat(60)).dim());
+                        println!("  No rotation schedules configured.");
+                        println!("  Use: sigyn rotate schedule set <key> --cron '0 0 * * * *'");
+                    } else if json {
+                        crate::output::print_json(&serde_json::json!(schedules))?;
+                    } else {
+                        println!("{}", style("Rotation Schedules").bold());
+                        println!("{}", style("─".repeat(60)).dim());
+                        for (key, sched) in &schedules {
+                            println!(
+                                "  {} cron={} grace={}h hooks={}",
+                                style(key).bold(),
+                                sched.cron_expression,
+                                sched.grace_period_hours,
+                                sched.hooks.len(),
+                            );
+                        }
+                    }
+                }
+                ScheduleCommands::Set {
+                    key,
+                    cron,
+                    grace_hours,
+                    hooks,
+                } => {
+                    let mut schedules = load_schedules(&vault_dir);
+                    let mut schedule = RotationSchedule::new(&cron, grace_hours);
+                    schedule.key_pattern = key.clone();
+                    schedule.hooks = hooks;
+                    schedules.insert(key.clone(), schedule);
+                    save_schedules(&vault_dir, &schedules)?;
+
+                    if json {
+                        crate::output::print_json(&serde_json::json!({
+                            "action": "schedule_set",
+                            "key": key,
+                            "cron": cron,
+                            "grace_hours": grace_hours,
+                        }))?;
+                    } else {
+                        crate::output::print_success(&format!(
+                            "Rotation schedule set for '{}' (cron: {})",
+                            key, cron
+                        ));
+                    }
+                }
+                ScheduleCommands::Remove { key } => {
+                    let mut schedules = load_schedules(&vault_dir);
+                    if schedules.remove(&key).is_none() {
+                        anyhow::bail!("no rotation schedule found for '{}'", key);
+                    }
+                    save_schedules(&vault_dir, &schedules)?;
+
+                    crate::output::print_success(&format!(
+                        "Removed rotation schedule for '{}'",
+                        key
+                    ));
+                }
+            }
         }
         RotateCommands::Due { max_age, env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
@@ -247,6 +422,19 @@ pub fn handle(
                 vault_locked: false,
                 timestamp: chrono::Utc::now(),
             };
+
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                None,
+                None,
+                &ctx.fingerprint.to_hex(),
+                "breach_mode",
+                &format!(
+                    "Breach mode activated: {} secrets rotated, {} members revoked",
+                    all_rotated_keys.len(),
+                    delegated_fps.len()
+                ),
+            );
 
             if json {
                 crate::output::print_json(&serde_json::json!({

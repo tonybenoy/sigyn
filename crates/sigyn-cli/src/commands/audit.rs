@@ -32,6 +32,8 @@ pub enum AuditCommands {
     },
     /// Sign the latest audit entry as a witness
     Witness,
+    /// Anchor audit log to git (cryptographic hash commit)
+    Anchor,
 }
 
 pub fn handle(
@@ -224,6 +226,44 @@ pub fn handle(
                 ));
                 println!("  Signed by: {}", &ctx.fingerprint.to_hex()[..12]);
                 println!("  Total witnesses for this entry: {}", witness_count);
+            }
+        }
+        AuditCommands::Anchor => {
+            let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_core::policy::engine::AccessAction::Audit,
+                None,
+            )?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if !audit_path.exists() {
+                anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
+            }
+
+            let vault_dir = crate::config::sigyn_home()
+                .join("vaults")
+                .join(&ctx.vault_name);
+            let git_engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+            if !git_engine.is_repo() {
+                git_engine.init()?;
+            }
+
+            let mut anchor = sigyn_core::audit::anchor::GitAnchor::new();
+            let hash = anchor.anchor(&audit_path, &git_engine)?;
+            let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "anchored",
+                    "hash": hash_hex,
+                    "vault": ctx.vault_name,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Audit log anchored to git (hash: {}...)",
+                    &hash_hex[..16]
+                ));
             }
         }
         AuditCommands::Export { output, format } => {

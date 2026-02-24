@@ -3,7 +3,6 @@ mod config;
 mod doctor;
 mod importexport;
 mod inject;
-#[allow(dead_code)]
 mod notifications;
 mod output;
 mod project_config;
@@ -166,7 +165,13 @@ fn main() -> Result<()> {
             commands::vault::handle(command, cli.identity.as_deref(), json)?;
         }
         Commands::Secret { command } => {
-            commands::secret::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+            commands::secret::handle(
+                command,
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+                cli.dry_run,
+            )?;
         }
         Commands::Env { command } => {
             commands::env::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
@@ -205,13 +210,19 @@ fn main() -> Result<()> {
             commands::audit::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Fork { command } => {
-            commands::fork::handle(command, cli.vault.as_deref(), json)?;
+            commands::fork::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Run(args) => {
             commands::run::handle(args, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Rotate { command } => {
-            commands::rotate::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+            commands::rotate::handle(
+                command,
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+                cli.dry_run,
+            )?;
         }
         Commands::Delegation { command } => {
             commands::delegation::handle(

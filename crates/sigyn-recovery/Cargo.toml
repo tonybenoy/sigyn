@@ -23,11 +23,12 @@ anyhow.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 # Other
 chrono.workspace = true
 directories.workspace = true
-git2 = "0.19"
+git2 = "0.20"
 
 [dev-dependencies]
 tempfile.workspace = true

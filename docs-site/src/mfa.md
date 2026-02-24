@@ -67,7 +67,6 @@ non-owner members:
   "global_constraints": {
     "require_mfa": true,
     "time_windows": [],
-    "ip_allowlist": [],
     "expires_at": null
   }
 }
@@ -83,7 +82,6 @@ for that member:
   "constraints": {
     "require_mfa": true,
     "time_windows": [],
-    "ip_allowlist": [],
     "expires_at": null
   }
 }

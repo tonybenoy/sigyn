@@ -38,16 +38,6 @@ sigyn recovery snapshots
 sigyn recovery snapshots --restore <commit-hash>
 ```
 
-## Succession Planning
-
-Designate backup owners who can take over vault administration:
-
-```bash
-sigyn recovery succession --designate <fingerprint>
-```
-
-This is useful for organizational continuity — ensuring that vault access is not lost if the primary owner is unavailable.
-
 ## Recovery Binary
 
 The `sigyn-recovery` binary is a minimal standalone tool that can:

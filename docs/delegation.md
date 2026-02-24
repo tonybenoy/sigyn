@@ -292,14 +292,6 @@ TimeWindow {
 }
 ```
 
-### IP Allowlists
-
-Restrict access to specific IPs or CIDR ranges. An empty list permits all IPs.
-
-```toml
-ip_allowlist = ["192.168.1.0/24", "10.0.0.1"]
-```
-
 ### Expiry
 
 Members can have an `expires_at` timestamp. After expiry, all access is denied

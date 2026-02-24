@@ -9,7 +9,7 @@ use sigyn_core::policy::storage::VaultPolicy;
 fn make_constraints() -> Constraints {
     Constraints {
         time_windows: vec![],
-        ip_allowlist: vec![],
+
         expires_at: None,
         require_mfa: false,
     }
@@ -36,7 +36,7 @@ fn test_expired_member_denied() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DB_URL".into()),
-        ip: None,
+
         mfa_verified: false,
     };
 
@@ -69,11 +69,18 @@ fn test_non_expired_member_allowed() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DB_URL".into()),
-        ip: None,
+
         mfa_verified: false,
     };
 
-    assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
+    let decision = engine.evaluate(&request).unwrap();
+    // Expiry is within 24 hours, so we get AllowWithWarning
+    match decision {
+        PolicyDecision::AllowWithWarning(msg) => {
+            assert!(msg.contains("access expires in"));
+        }
+        other => panic!("expected AllowWithWarning, got {:?}", other),
+    }
 }
 
 #[test]
@@ -138,7 +145,7 @@ fn test_time_window_with_policy_engine() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: None,
-        ip: None,
+
         mfa_verified: false,
     };
 
@@ -194,27 +201,11 @@ fn test_no_constraints_allows_access() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("ANY_KEY".into()),
-        ip: None,
+
         mfa_verified: false,
     };
 
     assert_eq!(engine.evaluate(&request).unwrap(), PolicyDecision::Allow);
-}
-
-#[test]
-fn test_ip_allowlist_constraint() {
-    let mut constraints = make_constraints();
-    constraints.ip_allowlist = vec!["10.0.0.0/24".into(), "192.168.1.5".into()];
-
-    // Allowed IPs
-    assert!(constraints.check_ip("10.0.0.1").is_ok());
-    assert!(constraints.check_ip("10.0.0.255").is_ok());
-    assert!(constraints.check_ip("192.168.1.5").is_ok());
-
-    // Denied IPs
-    assert!(constraints.check_ip("10.0.1.1").is_err());
-    assert!(constraints.check_ip("192.168.1.6").is_err());
-    assert!(constraints.check_ip("8.8.8.8").is_err());
 }
 
 #[test]

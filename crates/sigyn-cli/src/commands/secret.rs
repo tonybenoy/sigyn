@@ -180,7 +180,7 @@ pub fn check_access(
         action,
         env: ctx.env_name.clone(),
         key: key.map(String::from),
-        ip: None,
+
         mfa_verified: false,
     };
     match engine.evaluate(&request)? {
@@ -200,7 +200,7 @@ pub fn check_access(
                 action: request.action.clone(),
                 env: ctx.env_name.clone(),
                 key: key.map(String::from),
-                ip: None,
+
                 mfa_verified: true,
             };
             match engine.evaluate(&verified_request)? {
@@ -254,6 +254,7 @@ pub fn handle(
     vault: Option<&str>,
     identity: Option<&str>,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
     match cmd {
         SecretCommands::Set { key, value, env } => {
@@ -273,14 +274,25 @@ pub fn handle(
             };
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
-            let mut plaintext = if env_path.exists() {
+            let existing = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, &ctx.cipher)?
             } else {
                 sigyn_core::vault::PlaintextEnv::new()
             };
 
-            let is_update = plaintext.get(&key).is_some();
+            let is_update = existing.get(&key).is_some();
+
+            if dry_run {
+                let action = if is_update { "update" } else { "create" };
+                println!(
+                    "[dry-run] Would {} '{}' in env '{}'",
+                    action, key, ctx.env_name
+                );
+                return Ok(());
+            }
+
+            let mut plaintext = existing;
             plaintext.set(key.clone(), SecretValue::String(value), &ctx.fingerprint);
 
             let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
@@ -290,6 +302,24 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretWritten { key: key.clone() },
                 AuditOutcome::Success,
+            );
+
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                Some(&ctx.env_name),
+                Some(&key),
+                &ctx.fingerprint.to_hex(),
+                if is_update {
+                    "secret.updated"
+                } else {
+                    "secret.created"
+                },
+                &format!(
+                    "Secret '{}' {} in env '{}'",
+                    key,
+                    if is_update { "updated" } else { "created" },
+                    ctx.env_name
+                ),
             );
 
             if json {
@@ -402,9 +432,19 @@ pub fn handle(
             let encrypted = env_file::read_encrypted_env(&env_path)?;
             let mut plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
 
-            if plaintext.remove(&key).is_none() {
+            if plaintext.get(&key).is_none() {
                 anyhow::bail!("secret '{}' not found in env '{}'", key, ctx.env_name);
             }
+
+            if dry_run {
+                println!(
+                    "[dry-run] Would remove '{}' from env '{}'",
+                    key, ctx.env_name
+                );
+                return Ok(());
+            }
+
+            plaintext.remove(&key);
 
             let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
@@ -413,6 +453,15 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretDeleted { key: key.clone() },
                 AuditOutcome::Success,
+            );
+
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                Some(&ctx.env_name),
+                Some(&key),
+                &ctx.fingerprint.to_hex(),
+                "secret.deleted",
+                &format!("Secret '{}' removed from env '{}'", key, ctx.env_name),
             );
 
             crate::output::print_success(&format!("Removed '{}' from env '{}'", key, ctx.env_name));
@@ -465,6 +514,15 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretWritten { key: key.clone() },
                 AuditOutcome::Success,
+            );
+
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                Some(&ctx.env_name),
+                Some(&key),
+                &ctx.fingerprint.to_hex(),
+                "secret.generated",
+                &format!("Secret '{}' generated in env '{}'", key, ctx.env_name),
             );
 
             if json {

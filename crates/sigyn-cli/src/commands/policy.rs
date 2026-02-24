@@ -264,7 +264,7 @@ pub fn handle(
                 action,
                 env,
                 key,
-                ip: None,
+
                 mfa_verified: false,
             };
 

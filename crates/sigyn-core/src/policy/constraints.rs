@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constraints {
     pub time_windows: Vec<TimeWindow>,
-    pub ip_allowlist: Vec<String>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub require_mfa: bool,
@@ -36,32 +35,6 @@ impl Constraints {
         }
 
         Ok(())
-    }
-
-    /// Check if a given IP address is allowed. Empty allowlist means all IPs allowed.
-    pub fn check_ip(&self, ip: &str) -> Result<(), String> {
-        if self.ip_allowlist.is_empty() {
-            return Ok(());
-        }
-        // Support exact match and CIDR prefix match
-        for allowed in &self.ip_allowlist {
-            if allowed == ip {
-                return Ok(());
-            }
-            // Simple CIDR prefix: "10.0.0." matches "10.0.0.5"
-            if allowed.ends_with('.') && ip.starts_with(allowed.as_str()) {
-                return Ok(());
-            }
-            // CIDR notation support: "192.168.1.0/24" style
-            if let Some((network, prefix_str)) = allowed.split_once('/') {
-                if let Ok(prefix_len) = prefix_str.parse::<u8>() {
-                    if cidr_match(network, ip, prefix_len) {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Err(format!("IP {} not in allowlist", ip))
     }
 }
 
@@ -115,36 +88,6 @@ impl HourUtc for chrono::DateTime<chrono::Utc> {
     }
 }
 
-/// Simple IPv4 CIDR matching.
-fn cidr_match(network: &str, ip: &str, prefix_len: u8) -> bool {
-    let parse_ipv4 = |s: &str| -> Option<u32> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 4 {
-            return None;
-        }
-        let mut result = 0u32;
-        for part in parts {
-            result = result << 8 | part.parse::<u32>().ok()?;
-        }
-        Some(result)
-    };
-
-    let Some(net) = parse_ipv4(network) else {
-        return false;
-    };
-    let Some(addr) = parse_ipv4(ip) else {
-        return false;
-    };
-    if prefix_len > 32 {
-        return false;
-    }
-    if prefix_len == 0 {
-        return true;
-    }
-    let mask = !((1u32 << (32 - prefix_len)) - 1);
-    (net & mask) == (addr & mask)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,7 +96,6 @@ mod tests {
     fn make_constraints() -> Constraints {
         Constraints {
             time_windows: vec![],
-            ip_allowlist: vec![],
             expires_at: None,
             require_mfa: false,
         }
@@ -202,37 +144,5 @@ mod tests {
 
         let mid_friday = Utc.with_ymd_and_hms(2025, 3, 14, 15, 0, 0).unwrap();
         assert!(!window.is_active(mid_friday));
-    }
-
-    #[test]
-    fn test_ip_allowlist_exact() {
-        let mut c = make_constraints();
-        c.ip_allowlist = vec!["10.0.0.1".into(), "192.168.1.5".into()];
-        assert!(c.check_ip("10.0.0.1").is_ok());
-        assert!(c.check_ip("192.168.1.5").is_ok());
-        assert!(c.check_ip("10.0.0.2").is_err());
-    }
-
-    #[test]
-    fn test_ip_allowlist_cidr() {
-        let mut c = make_constraints();
-        c.ip_allowlist = vec!["192.168.1.0/24".into()];
-        assert!(c.check_ip("192.168.1.1").is_ok());
-        assert!(c.check_ip("192.168.1.255").is_ok());
-        assert!(c.check_ip("192.168.2.1").is_err());
-    }
-
-    #[test]
-    fn test_empty_allowlist_allows_all() {
-        let c = make_constraints();
-        assert!(c.check_ip("anything").is_ok());
-    }
-
-    #[test]
-    fn test_cidr_match() {
-        assert!(cidr_match("10.0.0.0", "10.0.0.5", 24));
-        assert!(cidr_match("10.0.0.0", "10.0.1.5", 16));
-        assert!(!cidr_match("10.0.0.0", "10.0.1.5", 24));
-        assert!(cidr_match("0.0.0.0", "1.2.3.4", 0));
     }
 }

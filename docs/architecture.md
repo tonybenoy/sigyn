@@ -187,7 +187,7 @@ Sigyn is organized into 16 logical modules spanning the core library and CLI:
 | **delegation** | `mod.rs`, `tree.rs`, `invite.rs`, `revoke.rs` | Delegation tree structure, Ed25519-signed invitation files, cascade revocation with master key rotation |
 | **forks** | `mod.rs`, `types.rs`, `approval.rs`, `leash.rs`, `expiry.rs` | Fork creation (leashed/unleashed), approval workflows, leash management, fork expiry |
 | **audit** | `mod.rs`, `entry.rs`, `chain.rs`, `anchor.rs`, `witness.rs` | Hash-chained audit entries, Ed25519 signed entries, chain verification, external anchoring, witness countersigning |
-| **sync** | `mod.rs`, `vector_clock.rs`, `crdt.rs`, `conflict.rs`, `state.rs`, `git.rs`, `mdns.rs` | Vector clocks, LWW-Map CRDT, conflict detection and resolution, git-based sync, LAN peer discovery |
+| **sync** | `mod.rs`, `vector_clock.rs`, `crdt.rs`, `conflict.rs`, `state.rs`, `git.rs` | Vector clocks, LWW-Map CRDT, conflict detection and resolution, git-based sync |
 | **rotation** | `mod.rs`, `schedule.rs`, `history.rs`, `hooks.rs`, `breach.rs`, `dead.rs` | Key rotation, cron-based scheduling, rotation history, pre/post-rotation hooks, breach mode, dead-check detection |
 
 ### sigyn-cli Modules

@@ -27,6 +27,13 @@ jobs:
 
       - name: Run DevSkim scanner
         uses: microsoft/DevSkim-Action@v1
+        with:
+          # DS440100: X25519/Ed25519 curve references are intentional crypto, not hard-coded secrets
+          # DS126858: SHA1 is required by the TOTP (RFC 6238) specification
+          # DS162092: localhost references are test data only
+          # DS173237: hex fingerprints in tests are not real secrets/tokens
+          # DS137138: sitemap XML namespace URL is a standard URI, not an API endpoint
+          exclude-rules: "DS440100,DS126858,DS162092,DS173237,DS137138"
 
       - name: Upload DevSkim scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3

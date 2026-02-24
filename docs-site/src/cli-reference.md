@@ -463,10 +463,10 @@ sigyn audit witness --vault myapp
 
 ### audit anchor
 
-Anchor the latest audit hash to an external system for additional tamper evidence.
+Anchor the audit trail to a git commit for tamper-evidence.
 
 ```bash
-sigyn audit anchor --target git
+sigyn audit anchor -v myapp
 ```
 
 ## sync
@@ -519,14 +519,6 @@ sigyn sync resolve CONFIG --strategy latest
 | Flag | Description |
 |---|---|
 | `--strategy <S>` | Resolution strategy: `local`, `remote`, `latest` |
-
-### sync peers
-
-List known peers (LAN discovery via mDNS and remote).
-
-```bash
-sigyn sync peers
-```
 
 ### sync configure
 
@@ -704,12 +696,34 @@ sigyn rotate key DATABASE_PASSWORD --env prod
 sigyn rotate key API_KEY --env dev
 ```
 
-### rotate schedule
+### rotate schedule list
 
-Show configured rotation schedules.
+List all rotation schedules.
 
 ```bash
-sigyn rotate schedule
+sigyn rotate schedule list -v myapp
+```
+
+### rotate schedule set
+
+Set a rotation schedule for a key.
+
+```bash
+sigyn rotate schedule set -v myapp --key DB_PASSWORD --cron "0 0 * * MON" --grace-hours 48
+```
+
+Options:
+- `--key` — Secret key name
+- `--cron` — Cron expression for schedule
+- `--grace-hours` — Grace period in hours (default: 24)
+- `--hooks` — Post-rotation hooks (comma-separated)
+
+### rotate schedule remove
+
+Remove a rotation schedule.
+
+```bash
+sigyn rotate schedule remove -v myapp --key DB_PASSWORD
 ```
 
 ### rotate due
@@ -841,15 +855,6 @@ List available vault snapshots from git history.
 
 ```bash
 sigyn-recovery snapshots --vault myapp
-```
-
-### recovery succession
-
-Manage succession planning (dead-man trigger for vault ownership transfer).
-
-```bash
-sigyn-recovery succession show
-sigyn-recovery succession set --successor b2c3d4e5f6... --dead-man-days 90
 ```
 
 ## Utility Commands

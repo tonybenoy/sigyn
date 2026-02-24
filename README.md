@@ -44,7 +44,6 @@ what Sigyn is about.
 - **Process injection** -- `sigyn run -- cmd` injects secrets as environment variables without writing them to disk.
 - **Unix socket server** -- programmatic access for scripts and CI pipelines.
 - **Interactive TUI** -- ratatui-powered dashboard for browsing and managing secrets.
-- **LAN peer discovery** -- find and sync with teammates on the local network.
 - **Shell completions** -- bash, zsh, fish, and PowerShell.
 
 ---

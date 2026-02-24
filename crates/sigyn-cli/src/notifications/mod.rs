@@ -138,6 +138,29 @@ pub fn notify_event(
     notify_all(&config, event)
 }
 
+/// Best-effort notification: loads config from sigyn_home and sends to all matching webhooks.
+/// Errors are silently ignored so notifications never fail the parent operation.
+pub fn try_notify(
+    vault: &str,
+    env: Option<&str>,
+    key: Option<&str>,
+    actor: &str,
+    event_type: &str,
+    message: &str,
+) {
+    let home = crate::config::sigyn_home();
+    let event = NotificationEvent {
+        event_type: event_type.into(),
+        vault: vault.into(),
+        env: env.map(String::from),
+        key: key.map(String::from),
+        actor: actor.into(),
+        timestamp: chrono::Utc::now(),
+        message: message.into(),
+    };
+    let _ = notify_event(&home, &event);
+}
+
 pub fn load_notification_config(sigyn_home: &std::path::Path) -> NotificationConfig {
     let path = sigyn_home.join("notifications.toml");
     if path.exists() {
@@ -150,6 +173,7 @@ pub fn load_notification_config(sigyn_home: &std::path::Path) -> NotificationCon
     NotificationConfig::default()
 }
 
+#[allow(dead_code)]
 pub fn save_notification_config(
     sigyn_home: &std::path::Path,
     config: &NotificationConfig,

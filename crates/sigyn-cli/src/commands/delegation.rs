@@ -507,6 +507,19 @@ pub fn handle(
                 audit_log(&ctx, AuditAction::MasterKeyRotated);
             }
 
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                None,
+                None,
+                &ctx.fingerprint.to_hex(),
+                "member.revoked",
+                &format!(
+                    "Member {} revoked{}",
+                    &fingerprint[..12.min(fingerprint.len())],
+                    if cascade { " (cascade)" } else { "" }
+                ),
+            );
+
             if json {
                 let cascade_hex: Vec<String> = result
                     .cascade_revoked
