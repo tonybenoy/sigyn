@@ -1,6 +1,6 @@
-use sigyn_core::crypto::keys::{KeyFingerprint, SigningKeyPair};
-use sigyn_core::delegation::invite::InvitationFile;
-use sigyn_core::policy::roles::Role;
+use sigyn_engine::crypto::keys::{KeyFingerprint, SigningKeyPair};
+use sigyn_engine::delegation::invite::InvitationFile;
+use sigyn_engine::policy::roles::Role;
 
 fn make_signed_invitation(
     vault_name: &str,

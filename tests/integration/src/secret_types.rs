@@ -1,7 +1,7 @@
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file::{decrypt_env, encrypt_env, PlaintextEnv};
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file::{decrypt_env, encrypt_env, PlaintextEnv};
 
 fn roundtrip_secret(key: &str, value: SecretValue) {
     let cipher = VaultCipher::generate();
@@ -60,10 +60,7 @@ fn test_certificate_secret_roundtrip() {
 
 #[test]
 fn test_ssh_private_key_secret_roundtrip() {
-    let ssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
-        b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
-        QyNTUxOQAAACDFakeKeyDataHereForTestingPurposesOnlyAAAAAAAA\n\
-        -----END OPENSSH PRIVATE KEY-----";
+    let ssh_key = "fake-ssh-private-key-data-for-testing-only";
     roundtrip_secret("DEPLOY_KEY", SecretValue::SshPrivateKey(ssh_key.into()));
 }
 
@@ -119,7 +116,7 @@ fn test_all_secret_types_in_single_env() {
     );
     env.set(
         "S5".into(),
-        SecretValue::SshPrivateKey("-----BEGIN KEY-----\ndata\n-----END KEY-----".into()),
+        SecretValue::SshPrivateKey("fake-ssh-key-data-for-testing".into()),
         &fp,
     );
     env.set(

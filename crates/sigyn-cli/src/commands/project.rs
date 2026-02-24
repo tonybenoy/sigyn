@@ -43,8 +43,8 @@ fn init_project(
     identity_arg: Option<String>,
     json: bool,
 ) -> Result<()> {
-    use sigyn_core::identity::keygen::IdentityStore;
-    use sigyn_core::vault::VaultPaths;
+    use sigyn_engine::identity::keygen::IdentityStore;
+    use sigyn_engine::vault::VaultPaths;
 
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());

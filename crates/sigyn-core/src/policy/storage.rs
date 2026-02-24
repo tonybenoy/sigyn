@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 use super::constraints::Constraints;
 use super::member::MemberPolicy;
@@ -40,38 +39,19 @@ impl VaultPolicy {
         self.members.values()
     }
 
-    pub fn save_encrypted(&self, path: &Path, cipher: &crate::crypto::VaultCipher) -> Result<()> {
+    /// Encrypt the policy to bytes using the given cipher.
+    pub fn to_encrypted_bytes(&self, cipher: &crate::crypto::VaultCipher) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).map_err(|e| SigynError::CborEncode(e.to_string()))?;
-        let encrypted = cipher.encrypt(&buf, b"policy")?;
-        atomic_write(path, &encrypted)
+        cipher.encrypt(&buf, b"policy")
     }
 
-    pub fn load_encrypted(path: &Path, cipher: &crate::crypto::VaultCipher) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::new());
-        }
-        let data = std::fs::read(path)?;
-        let decrypted = cipher.decrypt(&data, b"policy")?;
+    /// Decrypt a policy from bytes using the given cipher.
+    pub fn from_encrypted_bytes(data: &[u8], cipher: &crate::crypto::VaultCipher) -> Result<Self> {
+        let decrypted = cipher.decrypt(data, b"policy")?;
         ciborium::from_reader(decrypted.as_slice())
             .map_err(|e| SigynError::CborDecode(e.to_string()))
     }
-}
-
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(data)?;
-    let file = tmp.persist(path).map_err(|e| SigynError::Io(e.error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    let _ = file;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -147,29 +127,17 @@ mod tests {
     }
 
     #[test]
-    fn test_save_load_encrypted_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("policy.cbor");
+    fn test_encrypted_roundtrip() {
         let cipher = VaultCipher::generate();
 
         let mut policy = VaultPolicy::new();
         policy.add_member(MemberPolicy::new(test_fp(0xEE), Role::Manager));
 
-        policy.save_encrypted(&path, &cipher).unwrap();
-        let loaded = VaultPolicy::load_encrypted(&path, &cipher).unwrap();
+        let bytes = policy.to_encrypted_bytes(&cipher).unwrap();
+        let loaded = VaultPolicy::from_encrypted_bytes(&bytes, &cipher).unwrap();
 
         assert_eq!(loaded.members.len(), 1);
         let fp = test_fp(0xEE);
         assert_eq!(loaded.get_member(&fp).unwrap().role, Role::Manager);
-    }
-
-    #[test]
-    fn test_load_encrypted_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nonexistent.cbor");
-        let cipher = VaultCipher::generate();
-
-        let loaded = VaultPolicy::load_encrypted(&path, &cipher).unwrap();
-        assert!(loaded.members.is_empty());
     }
 }

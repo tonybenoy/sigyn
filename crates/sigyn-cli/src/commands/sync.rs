@@ -53,7 +53,7 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                 anyhow::bail!("vault '{}' not found", vault_name);
             }
 
-            let engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
             engine.push(&remote, &branch)?;
 
             if json {
@@ -78,7 +78,7 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                 anyhow::bail!("vault '{}' not found", vault_name);
             }
 
-            let engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
             engine.pull(&remote, &branch)?;
 
             if json {
@@ -103,7 +103,7 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                 anyhow::bail!("vault '{}' not found", vault_name);
             }
 
-            let engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
             let has_changes = engine.has_changes()?;
 
             if json {
@@ -119,9 +119,9 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
         }
         SyncCommands::Resolve { key, strategy } => {
             let resolution = match strategy.as_str() {
-                "local" => sigyn_core::sync::ConflictResolution::TakeLocal,
-                "remote" => sigyn_core::sync::ConflictResolution::TakeRemote,
-                "latest" => sigyn_core::sync::ConflictResolution::TakeLatestTimestamp,
+                "local" => sigyn_engine::sync::ConflictResolution::TakeLocal,
+                "remote" => sigyn_engine::sync::ConflictResolution::TakeRemote,
+                "latest" => sigyn_engine::sync::ConflictResolution::TakeLatestTimestamp,
                 other => anyhow::bail!("unknown strategy: '{}'. Use: local, remote, latest", other),
             };
             crate::output::print_success(&format!(
@@ -142,7 +142,7 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
                     anyhow::bail!("vault '{}' not found", vault_name);
                 }
 
-                let engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+                let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
                 if !engine.is_repo() {
                     engine.init()?;
                 }

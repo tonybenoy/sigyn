@@ -1,6 +1,5 @@
 pub mod conflict;
 pub mod crdt;
-pub mod git;
 pub mod state;
 pub mod vector_clock;
 

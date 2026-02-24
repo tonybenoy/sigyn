@@ -6,7 +6,7 @@ publish = false
 license = "MIT"
 
 [dependencies]
-sigyn-core = { path = "../../crates/sigyn-core" }
+sigyn-engine = { path = "../../crates/sigyn-engine" }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

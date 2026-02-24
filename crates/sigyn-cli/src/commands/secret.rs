@@ -1,16 +1,17 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::crypto::{envelope, vault_cipher::VaultCipher};
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::identity::LoadedIdentity;
-use sigyn_core::policy::engine::AccessAction;
-use sigyn_core::policy::storage::VaultPolicy;
-use sigyn_core::policy::{AccessRequest, PolicyDecision, PolicyEngine};
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::{env_file, VaultManifest, VaultPaths};
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::crypto::{envelope, vault_cipher::VaultCipher};
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::identity::LoadedIdentity;
+use sigyn_engine::policy::engine::AccessAction;
+use sigyn_engine::policy::storage::VaultPolicy;
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::policy::{AccessRequest, PolicyDecision, PolicyEngine};
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::{env_file, VaultManifest, VaultPaths};
 
 use crate::commands::identity::load_identity;
 use crate::config::sigyn_home;
@@ -73,7 +74,7 @@ pub struct UnlockedVaultContext {
     pub cipher: VaultCipher,
     pub vault_name: String,
     pub env_name: String,
-    pub fingerprint: sigyn_core::crypto::KeyFingerprint,
+    pub fingerprint: sigyn_engine::crypto::KeyFingerprint,
     pub paths: VaultPaths,
     pub manifest: VaultManifest,
     pub policy: VaultPolicy,
@@ -143,8 +144,9 @@ pub fn unlock_vault(
 
     let header_bytes =
         std::fs::read(paths.members_path(&vault_name)).context("failed to read vault members")?;
-    let header: sigyn_core::crypto::EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+    let header: sigyn_engine::crypto::EnvelopeHeader =
+        ciborium::from_reader(header_bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
     let master_key =
         envelope::unseal_master_key(&header, loaded.encryption_key(), manifest.vault_id)
@@ -190,13 +192,13 @@ pub fn check_access(
     let decision = if let Some(ref org_path_str) = ctx.manifest.org_path {
         // Hierarchical evaluation: build policy chain from vault → root org
         let home = crate::config::sigyn_home();
-        let hierarchy_paths = sigyn_core::hierarchy::path::HierarchyPaths::new(home);
+        let hierarchy_paths = sigyn_engine::hierarchy::path::HierarchyPaths::new(home);
 
-        if let Ok(org_path) = sigyn_core::hierarchy::path::OrgPath::parse(org_path_str) {
+        if let Ok(org_path) = sigyn_engine::hierarchy::path::OrgPath::parse(org_path_str) {
             let mut chain = Vec::new();
 
             // First level: vault's own policy
-            chain.push(sigyn_core::hierarchy::engine::PolicyLevel {
+            chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
                 owner: ctx.manifest.owner.clone(),
                 policy: ctx.policy.clone(),
             });
@@ -212,29 +214,32 @@ pub fn check_access(
                 }
                 if let Ok(content) = std::fs::read_to_string(&mp) {
                     if let Ok(manifest) =
-                        sigyn_core::hierarchy::manifest::NodeManifest::from_toml(&content)
+                        sigyn_engine::hierarchy::manifest::NodeManifest::from_toml(&content)
                     {
                         let members_p = hierarchy_paths.members_path(cp);
                         if members_p.exists() {
                             if let Ok(hdr_bytes) = std::fs::read(&members_p) {
-                                if let Ok(header) =
-                                    ciborium::from_reader::<sigyn_core::crypto::EnvelopeHeader, _>(
-                                        hdr_bytes.as_slice(),
-                                    )
-                                {
+                                if let Ok(header) = ciborium::from_reader::<
+                                    sigyn_engine::crypto::EnvelopeHeader,
+                                    _,
+                                >(
+                                    hdr_bytes.as_slice()
+                                ) {
                                     if let Ok(mk) = envelope::unseal_master_key(
                                         &header,
                                         ctx.loaded_identity.encryption_key(),
                                         manifest.node_id,
                                     ) {
                                         let cipher =
-                                            sigyn_core::crypto::vault_cipher::VaultCipher::new(mk);
+                                            sigyn_engine::crypto::vault_cipher::VaultCipher::new(
+                                                mk,
+                                            );
                                         if let Ok(policy) = VaultPolicy::load_encrypted(
                                             &hierarchy_paths.policy_path(cp),
                                             &cipher,
                                         ) {
                                             chain.push(
-                                                sigyn_core::hierarchy::engine::PolicyLevel {
+                                                sigyn_engine::hierarchy::engine::PolicyLevel {
                                                     owner: manifest.owner.clone(),
                                                     policy,
                                                 },
@@ -248,7 +253,7 @@ pub fn check_access(
                 }
             }
 
-            sigyn_core::hierarchy::engine::HierarchicalPolicyEngine::evaluate(&chain, &request)?
+            sigyn_engine::hierarchy::engine::HierarchicalPolicyEngine::evaluate(&chain, &request)?
         } else {
             // Invalid org path, fall back to standard evaluation
             let engine = PolicyEngine::new(&ctx.policy, &ctx.manifest.owner);
@@ -344,7 +349,7 @@ pub fn handle(
 ) -> Result<()> {
     match cmd {
         SecretCommands::Set { key, value, env } => {
-            sigyn_core::secrets::validate_key_name(&key)?;
+            sigyn_engine::secrets::validate_key_name(&key)?;
 
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Write, Some(&key))?;
@@ -364,7 +369,7 @@ pub fn handle(
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, &ctx.cipher)?
             } else {
-                sigyn_core::vault::PlaintextEnv::new()
+                sigyn_engine::vault::PlaintextEnv::new()
             };
 
             let is_update = existing.get(&key).is_some();
@@ -558,17 +563,19 @@ pub fn handle(
             r#type,
             env,
         } => {
-            sigyn_core::secrets::validate_key_name(&key)?;
+            sigyn_engine::secrets::validate_key_name(&key)?;
 
             let template = match r#type.as_str() {
-                "password" => sigyn_core::secrets::GenerationTemplate::Password {
+                "password" => sigyn_engine::secrets::GenerationTemplate::Password {
                     length,
-                    charset: sigyn_core::secrets::generation::PasswordCharset::default(),
+                    charset: sigyn_engine::secrets::generation::PasswordCharset::default(),
                 },
-                "uuid" => sigyn_core::secrets::GenerationTemplate::Uuid,
-                "hex" => sigyn_core::secrets::GenerationTemplate::Hex { length },
-                "base64" => sigyn_core::secrets::GenerationTemplate::Base64 { length },
-                "alphanumeric" => sigyn_core::secrets::GenerationTemplate::Alphanumeric { length },
+                "uuid" => sigyn_engine::secrets::GenerationTemplate::Uuid,
+                "hex" => sigyn_engine::secrets::GenerationTemplate::Hex { length },
+                "base64" => sigyn_engine::secrets::GenerationTemplate::Base64 { length },
+                "alphanumeric" => {
+                    sigyn_engine::secrets::GenerationTemplate::Alphanumeric { length }
+                }
                 other => anyhow::bail!(
                     "unknown generation type: '{}'. Use: password, uuid, hex, base64, alphanumeric",
                     other
@@ -584,7 +591,7 @@ pub fn handle(
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, &ctx.cipher)?
             } else {
-                sigyn_core::vault::PlaintextEnv::new()
+                sigyn_engine::vault::PlaintextEnv::new()
             };
 
             plaintext.set(

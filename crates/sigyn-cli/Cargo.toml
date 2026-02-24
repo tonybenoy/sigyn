@@ -9,11 +9,11 @@ name = "sigyn"
 path = "src/main.rs"
 
 [features]
-fast-kdf = ["sigyn-core/fast-kdf"]
-vendored-openssl = ["sigyn-core/vendored-openssl"]
+fast-kdf = ["sigyn-engine/fast-kdf"]
+vendored-openssl = ["sigyn-engine/vendored-openssl"]
 
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.3.0" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.3.0" }
 
 # CLI
 clap.workspace = true

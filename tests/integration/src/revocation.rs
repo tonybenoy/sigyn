@@ -1,12 +1,12 @@
-use sigyn_core::crypto::envelope::{seal_master_key, unseal_master_key};
-use sigyn_core::crypto::keys::{KeyFingerprint, X25519PrivateKey};
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::delegation::revoke::revoke_member;
-use sigyn_core::policy::member::MemberPolicy;
-use sigyn_core::policy::roles::Role;
-use sigyn_core::policy::storage::VaultPolicy;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file::{decrypt_env, encrypt_env, PlaintextEnv};
+use sigyn_engine::crypto::envelope::{seal_master_key, unseal_master_key};
+use sigyn_engine::crypto::keys::{KeyFingerprint, X25519PrivateKey};
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::delegation::revoke::revoke_member;
+use sigyn_engine::policy::member::MemberPolicy;
+use sigyn_engine::policy::roles::Role;
+use sigyn_engine::policy::storage::VaultPolicy;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file::{decrypt_env, encrypt_env, PlaintextEnv};
 use uuid::Uuid;
 
 /// Helper to create a MemberPolicy with an optional delegated_by field.

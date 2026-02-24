@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/sigyn-core",
+    "crates/sigyn-engine",
     "crates/sigyn-cli",
     "crates/sigyn-recovery",
     "tests/integration",

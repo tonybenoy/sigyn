@@ -1,4 +1,4 @@
-use crate::error::Result;
+use sigyn_core::error::Result;
 
 #[allow(dead_code)]
 pub struct GitAnchor {

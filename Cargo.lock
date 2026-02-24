@@ -2921,7 +2921,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sigyn-core",
+ "sigyn-engine",
  "tar",
  "tempfile",
  "tokio",
@@ -2932,6 +2932,35 @@ dependencies = [
 
 [[package]]
 name = "sigyn-core"
+version = "0.3.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "blake3",
+ "chacha20poly1305",
+ "chrono",
+ "ciborium",
+ "cron",
+ "ed25519-dalek",
+ "globset",
+ "hkdf",
+ "indexmap",
+ "proptest",
+ "rand 0.8.5",
+ "regex",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "toml",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "sigyn-engine"
 version = "0.3.0"
 dependencies = [
  "argon2",
@@ -2956,6 +2985,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sigyn-core",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -2972,7 +3002,7 @@ dependencies = [
  "ciborium",
  "rand 0.8.5",
  "serde_json",
- "sigyn-core",
+ "sigyn-engine",
  "tempfile",
  "uuid",
 ]
@@ -2991,7 +3021,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "sigyn-core",
+ "sigyn-engine",
  "tempfile",
  "toml",
 ]

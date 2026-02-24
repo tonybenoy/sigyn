@@ -1,13 +1,13 @@
-use sigyn_core::crypto::envelope::{seal_master_key, unseal_master_key};
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::identity::profile::IdentityProfile;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file::{
+use sigyn_engine::crypto::envelope::{seal_master_key, unseal_master_key};
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::identity::profile::IdentityProfile;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file::{
     decrypt_env, encrypt_env, read_encrypted_env, write_encrypted_env, PlaintextEnv,
 };
-use sigyn_core::vault::manifest::VaultManifest;
+use sigyn_engine::vault::manifest::VaultManifest;
 use tempfile::TempDir;
 
 #[test]

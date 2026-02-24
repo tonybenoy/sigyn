@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -119,34 +117,6 @@ pub fn decrypt_env(encrypted: &EncryptedEnvFile, cipher: &VaultCipher) -> Result
 
     ciborium::from_reader(plaintext_bytes.as_slice())
         .map_err(|e| SigynError::CborDecode(e.to_string()))
-}
-
-pub fn write_encrypted_env(path: &Path, env_file: &EncryptedEnvFile) -> Result<()> {
-    let mut data = Vec::new();
-    ciborium::into_writer(env_file, &mut data)
-        .map_err(|e| SigynError::CborEncode(e.to_string()))?;
-    atomic_write(path, &data)
-}
-
-pub fn read_encrypted_env(path: &Path) -> Result<EncryptedEnvFile> {
-    let data = std::fs::read(path)?;
-    ciborium::from_reader(data.as_slice()).map_err(|e| SigynError::CborDecode(e.to_string()))
-}
-
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(data)?;
-    let file = tmp.persist(path).map_err(|e| SigynError::Io(e.error))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    let _ = file;
-    Ok(())
 }
 
 #[cfg(test)]

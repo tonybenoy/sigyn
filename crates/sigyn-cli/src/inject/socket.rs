@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 
 use anyhow::Result;
-use sigyn_core::vault::PlaintextEnv;
+use sigyn_engine::vault::PlaintextEnv;
 
 /// Serve secrets over a Unix domain socket.
 /// Clients connect and send a key name; server responds with the value.
@@ -72,8 +72,8 @@ pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sigyn_core::crypto::keys::KeyFingerprint;
-    use sigyn_core::secrets::types::SecretValue;
+    use sigyn_engine::crypto::keys::KeyFingerprint;
+    use sigyn_engine::secrets::types::SecretValue;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 

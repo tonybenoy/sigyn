@@ -1,6 +1,6 @@
-use sigyn_core::audit::chain::AuditLog;
-use sigyn_core::audit::entry::{AuditAction, AuditOutcome};
-use sigyn_core::crypto::keys::{KeyFingerprint, SigningKeyPair};
+use sigyn_engine::audit::chain::AuditLog;
+use sigyn_engine::audit::entry::{AuditAction, AuditOutcome};
+use sigyn_engine::crypto::keys::{KeyFingerprint, SigningKeyPair};
 use tempfile::TempDir;
 
 #[test]

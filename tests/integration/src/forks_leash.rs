@@ -1,10 +1,11 @@
-use sigyn_core::crypto::envelope;
-use sigyn_core::crypto::keys::{KeyFingerprint, X25519PrivateKey};
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::forks::leash::{create_leashed_fork, create_unleashed_fork};
-use sigyn_core::forks::types::{ForkMode, ForkSharingPolicy, ForkStatus};
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
+use sigyn_engine::crypto::envelope;
+use sigyn_engine::crypto::keys::{KeyFingerprint, X25519PrivateKey};
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::forks::leash::{create_leashed_fork, create_unleashed_fork};
+use sigyn_engine::forks::types::{ForkMode, ForkSharingPolicy, ForkStatus};
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
 
 fn setup_parent_vault(
     dir: &std::path::Path,
@@ -52,7 +53,7 @@ fn setup_parent_vault(
     }
 
     // Save policy
-    let policy = sigyn_core::policy::storage::VaultPolicy::new();
+    let policy = sigyn_engine::policy::storage::VaultPolicy::new();
     policy
         .save_encrypted(&paths.policy_path("parent"), &cipher)
         .unwrap();
@@ -176,7 +177,7 @@ fn test_leashed_fork_has_two_slots() {
 
     // Read the fork's envelope header
     let header_bytes = std::fs::read(paths.members_path("dual-access-fork")).unwrap();
-    let header: sigyn_core::crypto::EnvelopeHeader =
+    let header: sigyn_engine::crypto::EnvelopeHeader =
         ciborium::from_reader(header_bytes.as_slice()).unwrap();
 
     // Leashed fork should have 2 recipient slots (fork owner + parent admin)
@@ -209,7 +210,7 @@ fn test_unleashed_fork_has_single_slot() {
     .unwrap();
 
     let header_bytes = std::fs::read(paths.members_path("solo-fork")).unwrap();
-    let header: sigyn_core::crypto::EnvelopeHeader =
+    let header: sigyn_engine::crypto::EnvelopeHeader =
         ciborium::from_reader(header_bytes.as_slice()).unwrap();
 
     // Unleashed fork should have only 1 slot (fork owner only)

@@ -1,13 +1,14 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::policy::engine::{AccessAction, AccessRequest, PolicyDecision};
-use sigyn_core::policy::member::MemberPolicy;
-use sigyn_core::policy::roles::Role;
-use sigyn_core::policy::PolicyEngine;
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision};
+use sigyn_engine::policy::member::MemberPolicy;
+use sigyn_engine::policy::roles::Role;
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::policy::PolicyEngine;
 
 use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 

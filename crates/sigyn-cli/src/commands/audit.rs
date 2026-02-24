@@ -49,7 +49,7 @@ pub fn handle(
             let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
             super::secret::check_access(
                 &ctx,
-                sigyn_core::policy::engine::AccessAction::Audit,
+                sigyn_engine::policy::engine::AccessAction::Audit,
                 None,
             )?;
 
@@ -59,7 +59,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
             let entries = log.tail(n)?;
 
             if json {
@@ -86,7 +86,7 @@ pub fn handle(
             let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
             super::secret::check_access(
                 &ctx,
-                sigyn_core::policy::engine::AccessAction::Audit,
+                sigyn_engine::policy::engine::AccessAction::Audit,
                 None,
             )?;
 
@@ -96,7 +96,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
             match log.verify_chain() {
                 Ok(count) => {
                     if json {
@@ -132,7 +132,7 @@ pub fn handle(
             let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
             super::secret::check_access(
                 &ctx,
-                sigyn_core::policy::engine::AccessAction::Audit,
+                sigyn_engine::policy::engine::AccessAction::Audit,
                 None,
             )?;
 
@@ -142,7 +142,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
             let all = log.tail(1000)?;
             let filtered: Vec<_> = all
                 .into_iter()
@@ -185,7 +185,7 @@ pub fn handle(
                 anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
             }
 
-            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
             let entries = log.tail(1)?;
             let latest = entries.last().ok_or_else(|| {
                 anyhow::anyhow!("audit log is empty for vault '{}'", ctx.vault_name)
@@ -193,7 +193,7 @@ pub fn handle(
 
             // Sign the entry hash with the current identity's signing key
             let signature = ctx.loaded_identity.signing_key().sign(&latest.entry_hash);
-            let witness_sig = sigyn_core::audit::WitnessSignature {
+            let witness_sig = sigyn_engine::audit::WitnessSignature {
                 witness: ctx.fingerprint.clone(),
                 signature,
                 timestamp: chrono::Utc::now(),
@@ -201,7 +201,7 @@ pub fn handle(
 
             // Persist to the witnesses file next to the audit log
             let witnesses_path = ctx.paths.witnesses_path(&ctx.vault_name);
-            let mut witness_log = sigyn_core::audit::WitnessLog::open(&witnesses_path)?;
+            let mut witness_log = sigyn_engine::audit::WitnessLog::open(&witnesses_path)?;
             witness_log.add_witness(latest.entry_hash, witness_sig)?;
 
             let witness_count = witness_log.witnesses_for(&latest.entry_hash).len();
@@ -232,7 +232,7 @@ pub fn handle(
             let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
             super::secret::check_access(
                 &ctx,
-                sigyn_core::policy::engine::AccessAction::Audit,
+                sigyn_engine::policy::engine::AccessAction::Audit,
                 None,
             )?;
 
@@ -244,12 +244,12 @@ pub fn handle(
             let vault_dir = crate::config::sigyn_home()
                 .join("vaults")
                 .join(&ctx.vault_name);
-            let git_engine = sigyn_core::sync::git::GitSyncEngine::new(vault_dir);
+            let git_engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
             if !git_engine.is_repo() {
                 git_engine.init()?;
             }
 
-            let mut anchor = sigyn_core::audit::anchor::GitAnchor::new();
+            let mut anchor = sigyn_engine::audit::anchor::GitAnchor::new();
             let hash = anchor.anchor(&audit_path, &git_engine)?;
             let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
@@ -270,7 +270,7 @@ pub fn handle(
             let ctx = super::secret::unlock_vault(identity, Some(vault_name), None)?;
             super::secret::check_access(
                 &ctx,
-                sigyn_core::policy::engine::AccessAction::ManagePolicy,
+                sigyn_engine::policy::engine::AccessAction::ManagePolicy,
                 None,
             )?;
 
@@ -279,7 +279,7 @@ pub fn handle(
                 anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
             }
 
-            let log = sigyn_core::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
             let entries = log.tail(usize::MAX)?;
 
             match format.as_str() {

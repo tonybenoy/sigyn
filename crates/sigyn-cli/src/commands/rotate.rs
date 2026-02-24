@@ -2,16 +2,17 @@ use anyhow::Result;
 use clap::Subcommand;
 use console::style;
 
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::policy::engine::AccessAction;
-use sigyn_core::rotation::breach::BreachReport;
-use sigyn_core::rotation::dead::find_dead_secrets;
-use sigyn_core::rotation::schedule::RotationSchedule;
-use sigyn_core::secrets::generation::{GenerationTemplate, PasswordCharset};
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file;
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::policy::engine::AccessAction;
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::rotation::breach::BreachReport;
+use sigyn_engine::rotation::dead::find_dead_secrets;
+use sigyn_engine::rotation::schedule::RotationSchedule;
+use sigyn_engine::secrets::generation::{GenerationTemplate, PasswordCharset};
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file;
 
 use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 
@@ -186,7 +187,7 @@ pub fn handle(
             let schedules = load_schedules(&vault_dir);
             if let Some(schedule) = schedules.get(&key) {
                 if !schedule.hooks.is_empty() {
-                    match sigyn_core::rotation::hooks::execute_rotation_hooks(
+                    match sigyn_engine::rotation::hooks::execute_rotation_hooks(
                         &schedule.hooks,
                         &key,
                         &ctx.env_name,

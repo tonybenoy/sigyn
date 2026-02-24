@@ -6,8 +6,8 @@ pub mod shamir;
 pub mod wrapping;
 
 pub use keygen::{Identity, LoadedIdentity};
-pub use mfa::{MfaState, MfaStore};
+pub use mfa::MfaState;
 pub use profile::IdentityProfile;
-pub use session::{MfaSession, MfaSessionStore};
+pub use session::MfaSession;
 pub use shamir::{reconstruct_secret, split_secret, RecoveryShardSet, Shard};
 pub use wrapping::WrappedIdentity;

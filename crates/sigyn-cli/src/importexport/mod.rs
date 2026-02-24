@@ -1,9 +1,9 @@
 pub mod cloud;
 
 use anyhow::Result;
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::PlaintextEnv;
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::PlaintextEnv;
 
 /// Import secrets from a .env file
 pub fn import_dotenv(

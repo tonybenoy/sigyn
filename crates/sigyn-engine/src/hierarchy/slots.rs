@@ -8,7 +8,7 @@ use crate::crypto::envelope::{self, EnvelopeHeader};
 use crate::crypto::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
 use crate::crypto::vault_cipher::VaultCipher;
 use crate::error::{Result, SigynError};
-use crate::policy::storage::VaultPolicy;
+use crate::policy::storage::{VaultPolicy, VaultPolicyExt};
 use crate::vault::VaultPaths;
 
 /// Read an envelope header from a CBOR file.

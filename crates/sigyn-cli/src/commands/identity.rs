@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::identity::{Identity, IdentityProfile, LoadedIdentity};
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::identity::{Identity, IdentityProfile, LoadedIdentity};
 
 use crate::config::sigyn_home;
 
@@ -124,7 +124,7 @@ fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<I
         Some(name_or_fp) => store
             .find_by_name(name_or_fp)?
             .or_else(|| {
-                sigyn_core::crypto::KeyFingerprint::from_hex(name_or_fp)
+                sigyn_engine::crypto::KeyFingerprint::from_hex(name_or_fp)
                     .ok()
                     .and_then(|fp| store.list().ok()?.into_iter().find(|i| i.fingerprint == fp))
             })

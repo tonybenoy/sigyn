@@ -35,7 +35,7 @@ fn forks_path(home: &std::path::Path, vault_name: &str) -> std::path::PathBuf {
     home.join("vaults").join(vault_name).join("forks.cbor")
 }
 
-fn load_forks(path: &std::path::Path) -> Vec<sigyn_core::forks::Fork> {
+fn load_forks(path: &std::path::Path) -> Vec<sigyn_engine::forks::Fork> {
     if path.exists() {
         if let Ok(data) = std::fs::read(path) {
             if let Ok(forks) = ciborium::from_reader(data.as_slice()) {
@@ -46,7 +46,7 @@ fn load_forks(path: &std::path::Path) -> Vec<sigyn_core::forks::Fork> {
     Vec::new()
 }
 
-fn save_forks(path: &std::path::Path, forks: &[sigyn_core::forks::Fork]) -> Result<()> {
+fn save_forks(path: &std::path::Path, forks: &[sigyn_engine::forks::Fork]) -> Result<()> {
     let mut buf = Vec::new();
     ciborium::into_writer(forks, &mut buf)
         .map_err(|e| anyhow::anyhow!("failed to encode forks: {}", e))?;
@@ -70,16 +70,16 @@ pub fn handle(
             expires_days,
         } => {
             let fork_mode = match mode.as_str() {
-                "leashed" => sigyn_core::forks::ForkMode::Leashed,
-                "unleashed" => sigyn_core::forks::ForkMode::Unleashed,
+                "leashed" => sigyn_engine::forks::ForkMode::Leashed,
+                "unleashed" => sigyn_engine::forks::ForkMode::Unleashed,
                 other => anyhow::bail!("unknown fork mode: '{}'. Use: leashed, unleashed", other),
             };
 
             let ctx = unlock_vault(identity, Some(vault_name), None)?;
 
             let fork = match fork_mode {
-                sigyn_core::forks::ForkMode::Leashed => {
-                    sigyn_core::forks::leash::create_leashed_fork(
+                sigyn_engine::forks::ForkMode::Leashed => {
+                    sigyn_engine::forks::leash::create_leashed_fork(
                         &ctx.paths,
                         &ctx.vault_name,
                         &name,
@@ -90,8 +90,8 @@ pub fn handle(
                         &ctx.fingerprint,
                     )?
                 }
-                sigyn_core::forks::ForkMode::Unleashed => {
-                    sigyn_core::forks::leash::create_unleashed_fork(
+                sigyn_engine::forks::ForkMode::Unleashed => {
+                    sigyn_engine::forks::leash::create_unleashed_fork(
                         &ctx.paths,
                         &ctx.vault_name,
                         &name,
@@ -217,7 +217,7 @@ pub fn handle(
             let is_unleashed = forks
                 .iter()
                 .find(|_f| fork_dir.exists())
-                .is_some_and(|f| matches!(f.mode, sigyn_core::forks::ForkMode::Unleashed));
+                .is_some_and(|f| matches!(f.mode, sigyn_engine::forks::ForkMode::Unleashed));
 
             if is_unleashed {
                 anyhow::bail!("unleashed forks cannot sync with parent");

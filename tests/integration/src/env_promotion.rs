@@ -1,7 +1,7 @@
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::environment::promotion::promote_env;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file::PlaintextEnv;
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::environment::promotion::promote_env;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file::PlaintextEnv;
 
 fn make_fp(byte: u8) -> KeyFingerprint {
     KeyFingerprint([byte; 16])

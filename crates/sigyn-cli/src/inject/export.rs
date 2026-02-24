@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sigyn_core::vault::PlaintextEnv;
+use sigyn_engine::vault::PlaintextEnv;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExportFormat {
@@ -70,8 +70,8 @@ pub fn export_secrets(env: &PlaintextEnv, format: ExportFormat, name: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sigyn_core::crypto::keys::KeyFingerprint;
-    use sigyn_core::secrets::types::SecretValue;
+    use sigyn_engine::crypto::keys::KeyFingerprint;
+    use sigyn_engine::secrets::types::SecretValue;
 
     fn test_env() -> PlaintextEnv {
         let fp = KeyFingerprint([0u8; 16]);

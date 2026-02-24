@@ -3,7 +3,7 @@ use console::style;
 
 use crate::config::{load_config, sigyn_home};
 use crate::project_config::load_project_config;
-use sigyn_core::vault::VaultPaths;
+use sigyn_engine::vault::VaultPaths;
 
 pub fn handle(json: bool) -> Result<()> {
     let home = sigyn_home();

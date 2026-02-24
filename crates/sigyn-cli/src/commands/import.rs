@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use sigyn_core::secrets::types::SecretValue;
-use sigyn_core::vault::env_file;
+use sigyn_engine::secrets::types::SecretValue;
+use sigyn_engine::vault::env_file;
 
 use crate::commands::secret::{check_access, unlock_vault};
 use crate::output;
-use sigyn_core::policy::engine::AccessAction;
+use sigyn_engine::policy::engine::AccessAction;
 
 #[derive(Subcommand)]
 pub enum ImportCommands {
@@ -99,13 +99,13 @@ fn store_pairs(
         let encrypted = env_file::read_encrypted_env(&env_path)?;
         env_file::decrypt_env(&encrypted, &ctx.cipher)?
     } else {
-        sigyn_core::vault::PlaintextEnv::new()
+        sigyn_engine::vault::PlaintextEnv::new()
     };
 
     let mut count = 0;
     for (key, value) in &pairs {
         // Validate key name; skip invalid keys with a warning
-        if let Err(e) = sigyn_core::secrets::validate_key_name(key) {
+        if let Err(e) = sigyn_engine::secrets::validate_key_name(key) {
             output::print_warning(&format!("Skipping invalid key '{}': {}", key, e));
             continue;
         }
@@ -144,7 +144,7 @@ pub fn handle(
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, &ctx.cipher)?
             } else {
-                sigyn_core::vault::PlaintextEnv::new()
+                sigyn_engine::vault::PlaintextEnv::new()
             };
 
             let count =
@@ -169,7 +169,7 @@ pub fn handle(
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, &ctx.cipher)?
             } else {
-                sigyn_core::vault::PlaintextEnv::new()
+                sigyn_engine::vault::PlaintextEnv::new()
             };
 
             let count =

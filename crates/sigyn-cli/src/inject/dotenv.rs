@@ -1,4 +1,4 @@
-use sigyn_core::vault::PlaintextEnv;
+use sigyn_engine::vault::PlaintextEnv;
 
 pub fn format_dotenv(env: &PlaintextEnv) -> String {
     let mut out = String::new();
@@ -49,9 +49,9 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sigyn_core::crypto::keys::KeyFingerprint;
-    use sigyn_core::secrets::types::SecretValue;
-    use sigyn_core::vault::PlaintextEnv;
+    use sigyn_engine::crypto::keys::KeyFingerprint;
+    use sigyn_engine::secrets::types::SecretValue;
+    use sigyn_engine::vault::PlaintextEnv;
 
     fn make_env(pairs: &[(&str, &str)]) -> PlaintextEnv {
         let fp = KeyFingerprint([0u8; 16]);

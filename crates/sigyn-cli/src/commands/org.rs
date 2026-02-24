@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::crypto::envelope;
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::hierarchy::manifest::{ChildRef, GitRemoteConfig, NodeManifest};
-use sigyn_core::hierarchy::path::{HierarchyPaths, OrgPath};
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::policy::storage::VaultPolicy;
+use sigyn_engine::crypto::envelope;
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::hierarchy::manifest::{ChildRef, GitRemoteConfig, NodeManifest};
+use sigyn_engine::hierarchy::path::{HierarchyPaths, OrgPath};
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::policy::storage::VaultPolicy;
+use sigyn_engine::policy::storage::VaultPolicyExt;
 
 use crate::commands::identity::load_identity;
 use crate::config::sigyn_home;
@@ -274,7 +275,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 }
 
                 // Check no linked vaults
-                let vault_paths = sigyn_core::vault::VaultPaths::new(home.clone());
+                let vault_paths = sigyn_engine::vault::VaultPaths::new(home.clone());
                 let linked = vault_paths.list_vaults_for_org(&path)?;
                 if !linked.is_empty() {
                     anyhow::bail!(
@@ -399,7 +400,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 // Unseal to read policy
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_core::crypto::EnvelopeHeader =
+                let header: sigyn_engine::crypto::EnvelopeHeader =
                     ciborium::from_reader(header_bytes.as_slice())
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
@@ -464,14 +465,14 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let content = std::fs::read_to_string(&manifest_path)?;
                 let manifest = NodeManifest::from_toml(&content)?;
 
-                let role = sigyn_core::policy::Role::from_str_name(&role)
+                let role = sigyn_engine::policy::Role::from_str_name(&role)
                     .ok_or_else(|| anyhow::anyhow!("unknown role: use readonly, auditor, operator, contributor, manager, admin, owner"))?;
 
-                let fp = sigyn_core::crypto::KeyFingerprint::from_hex(&fingerprint)?;
+                let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
                 // Unseal to modify policy
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_core::crypto::EnvelopeHeader =
+                let header: sigyn_engine::crypto::EnvelopeHeader =
                     ciborium::from_reader(header_bytes.as_slice())
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
@@ -483,7 +484,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let mut policy =
                     VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
 
-                let member = sigyn_core::policy::MemberPolicy::new(fp.clone(), role);
+                let member = sigyn_engine::policy::MemberPolicy::new(fp.clone(), role);
                 policy.add_member(member);
                 policy.save_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
 
@@ -514,10 +515,10 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let content = std::fs::read_to_string(&manifest_path)?;
                 let manifest = NodeManifest::from_toml(&content)?;
 
-                let fp = sigyn_core::crypto::KeyFingerprint::from_hex(&fingerprint)?;
+                let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_core::crypto::EnvelopeHeader =
+                let header: sigyn_engine::crypto::EnvelopeHeader =
                     ciborium::from_reader(header_bytes.as_slice())
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
@@ -552,7 +553,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let org_path = OrgPath::parse(&path)?;
                 let loaded = load_identity(&store, identity)?;
 
-                let fp = sigyn_core::crypto::KeyFingerprint::from_hex(&fingerprint)?;
+                let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
                 // Build the policy chain from the target path to root
                 let mut chain_paths = vec![org_path.clone()];
@@ -572,7 +573,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     let manifest = NodeManifest::from_toml(&content)?;
 
                     let header_bytes = std::fs::read(hierarchy_paths.members_path(cp))?;
-                    let header: sigyn_core::crypto::EnvelopeHeader =
+                    let header: sigyn_engine::crypto::EnvelopeHeader =
                         ciborium::from_reader(header_bytes.as_slice())
                             .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                     let master_key = envelope::unseal_master_key(
@@ -589,7 +590,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 // Collect effective permissions
                 let mut is_owner = false;
-                let mut roles: Vec<(String, sigyn_core::policy::Role)> = Vec::new();
+                let mut roles: Vec<(String, sigyn_engine::policy::Role)> = Vec::new();
                 let mut all_envs: Vec<String> = Vec::new();
                 let mut all_patterns: Vec<String> = Vec::new();
                 let mut has_wildcard_env = false;
@@ -741,7 +742,7 @@ fn print_tree(
 
     // Also show linked vaults
     let home = sigyn_home();
-    let vault_paths = sigyn_core::vault::VaultPaths::new(home);
+    let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
     if let Ok(vaults) = vault_paths.list_vaults_for_org(&org_str) {
         let direct_vaults: Vec<_> = vaults
@@ -750,7 +751,7 @@ fn print_tree(
                 vault_paths.manifest_path(v).exists()
                     && std::fs::read_to_string(vault_paths.manifest_path(v))
                         .ok()
-                        .and_then(|c| sigyn_core::vault::VaultManifest::from_toml(&c).ok())
+                        .and_then(|c| sigyn_engine::vault::VaultManifest::from_toml(&c).ok())
                         .and_then(|m| m.org_path)
                         .as_deref()
                         == Some(&org_str)
@@ -796,7 +797,7 @@ fn build_tree_json(paths: &HierarchyPaths, org_path: &OrgPath) -> Result<serde_j
 
     // List directly linked vaults
     let home = sigyn_home();
-    let vault_paths = sigyn_core::vault::VaultPaths::new(home);
+    let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
     let direct_vaults: Vec<String> = vault_paths
         .list_vaults_for_org(&org_str)
@@ -805,7 +806,7 @@ fn build_tree_json(paths: &HierarchyPaths, org_path: &OrgPath) -> Result<serde_j
         .filter(|v| {
             std::fs::read_to_string(vault_paths.manifest_path(v))
                 .ok()
-                .and_then(|c| sigyn_core::vault::VaultManifest::from_toml(&c).ok())
+                .and_then(|c| sigyn_engine::vault::VaultManifest::from_toml(&c).ok())
                 .and_then(|m| m.org_path)
                 .as_deref()
                 == Some(&org_str)

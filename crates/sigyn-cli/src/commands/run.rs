@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use console::style;
-use sigyn_core::policy::engine::AccessAction;
-use sigyn_core::vault::env_file;
+use sigyn_engine::policy::engine::AccessAction;
+use sigyn_engine::vault::env_file;
 
 use super::secret::{check_access, unlock_vault};
 use crate::project_config::load_project_config;

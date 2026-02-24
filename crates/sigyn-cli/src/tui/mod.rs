@@ -5,6 +5,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::{prelude::*, widgets::*};
+use sigyn_engine::policy::storage::VaultPolicyExt;
 use std::io::stdout;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,8 +121,8 @@ fn load_vault_data(state: &mut TuiState) {
 }
 
 fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
-    use sigyn_core::audit::AuditLog;
-    use sigyn_core::vault::{env_file, VaultPaths};
+    use sigyn_engine::audit::AuditLog;
+    use sigyn_engine::vault::{env_file, VaultPaths};
 
     let home = crate::config::sigyn_home();
     let paths = VaultPaths::new(home);
@@ -129,23 +130,24 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     // Load manifest to verify the vault exists
     let manifest_path = paths.manifest_path(&state.vault_name);
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest = sigyn_core::vault::VaultManifest::from_toml(&manifest_content)?;
+    let manifest = sigyn_engine::vault::VaultManifest::from_toml(&manifest_content)?;
 
     // Try to unlock the vault using the default identity
-    let store = sigyn_core::identity::keygen::IdentityStore::new(crate::config::sigyn_home());
+    let store = sigyn_engine::identity::keygen::IdentityStore::new(crate::config::sigyn_home());
     let loaded = crate::commands::identity::load_identity(&store, None)?;
     let fingerprint = loaded.identity.fingerprint.clone();
 
     let header_bytes = std::fs::read(paths.members_path(&state.vault_name))?;
-    let header: sigyn_core::crypto::EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+    let header: sigyn_engine::crypto::EnvelopeHeader =
+        ciborium::from_reader(header_bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
-    let master_key = sigyn_core::crypto::envelope::unseal_master_key(
+    let master_key = sigyn_engine::crypto::envelope::unseal_master_key(
         &header,
         loaded.encryption_key(),
         manifest.vault_id,
     )?;
-    let cipher = sigyn_core::crypto::vault_cipher::VaultCipher::new(master_key);
+    let cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(master_key);
 
     // --- Secrets tab: key names and types (no values) ---
     let env_path = paths.env_path(&state.vault_name, &state.env_name);
@@ -168,7 +170,7 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     }
 
     // --- Members tab: fingerprints and roles ---
-    let policy = sigyn_core::policy::storage::VaultPolicy::load_encrypted(
+    let policy = sigyn_engine::policy::storage::VaultPolicy::load_encrypted(
         &paths.policy_path(&state.vault_name),
         &cipher,
     )
@@ -201,10 +203,11 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
                             e.actor.to_hex(),
                             e.action,
                             match &e.outcome {
-                                sigyn_core::audit::entry::AuditOutcome::Success => "ok".to_string(),
-                                sigyn_core::audit::entry::AuditOutcome::Denied(r) =>
+                                sigyn_engine::audit::entry::AuditOutcome::Success =>
+                                    "ok".to_string(),
+                                sigyn_engine::audit::entry::AuditOutcome::Denied(r) =>
                                     format!("denied: {}", r),
-                                sigyn_core::audit::entry::AuditOutcome::Error(r) =>
+                                sigyn_engine::audit::entry::AuditOutcome::Error(r) =>
                                     format!("error: {}", r),
                             }
                         )

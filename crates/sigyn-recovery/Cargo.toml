@@ -9,10 +9,10 @@ name = "sigyn-recovery"
 path = "src/main.rs"
 
 [features]
-vendored-openssl = ["sigyn-core/vendored-openssl"]
+vendored-openssl = ["sigyn-engine/vendored-openssl"]
 
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.3.0" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.3.0" }
 
 # CLI
 clap.workspace = true

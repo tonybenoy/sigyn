@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::error::SigynError;
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::identity::mfa::{hash_backup_code, verify_backup_code, MfaState, MfaStore};
-use sigyn_core::identity::session::MfaSessionStore;
-use sigyn_core::identity::LoadedIdentity;
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::error::SigynError;
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::identity::mfa::{hash_backup_code, verify_backup_code, MfaState, MfaStore};
+use sigyn_engine::identity::session::MfaSessionStore;
+use sigyn_engine::identity::LoadedIdentity;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::commands::identity::{load_identity, read_passphrase};
@@ -188,7 +188,7 @@ fn status(identity: Option<&str>, json: bool) -> Result<()> {
     let enrolled = mfa_store.exists(&fp);
     let session_valid = session_store().is_valid(
         &fp,
-        sigyn_core::identity::session::DEFAULT_GRACE_PERIOD_SECS,
+        sigyn_engine::identity::session::DEFAULT_GRACE_PERIOD_SECS,
     );
 
     if json {
@@ -348,7 +348,7 @@ pub fn prompt_and_verify_mfa(fingerprint: &KeyFingerprint, loaded: &LoadedIdenti
     // Check session grace period first
     if session_store.is_valid(
         fingerprint,
-        sigyn_core::identity::session::DEFAULT_GRACE_PERIOD_SECS,
+        sigyn_engine::identity::session::DEFAULT_GRACE_PERIOD_SECS,
     ) {
         return Ok(());
     }

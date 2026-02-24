@@ -1,9 +1,10 @@
-use super::types::*;
-use crate::crypto::envelope;
-use crate::crypto::keys::KeyFingerprint;
-use crate::crypto::vault_cipher::VaultCipher;
-use crate::error::{Result, SigynError};
+use crate::policy::storage::{VaultPolicy, VaultPolicyExt};
 use crate::vault::{env_file, VaultManifest, VaultPaths};
+use sigyn_core::crypto::envelope;
+use sigyn_core::crypto::keys::KeyFingerprint;
+use sigyn_core::crypto::vault_cipher::VaultCipher;
+use sigyn_core::error::{Result, SigynError};
+use sigyn_core::forks::types::*;
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_leashed_fork(
@@ -12,8 +13,8 @@ pub fn create_leashed_fork(
     fork_name: &str,
     parent_cipher: &VaultCipher,
     parent_manifest: &VaultManifest,
-    fork_owner_pubkey: &crate::crypto::X25519PublicKey,
-    parent_admin_pubkey: &crate::crypto::X25519PublicKey,
+    fork_owner_pubkey: &sigyn_core::crypto::X25519PublicKey,
+    parent_admin_pubkey: &sigyn_core::crypto::X25519PublicKey,
     creator: &KeyFingerprint,
 ) -> Result<Fork> {
     let fork_paths = parent_paths;
@@ -64,7 +65,7 @@ pub fn create_leashed_fork(
     }
 
     // Initialize empty policy for fork
-    let policy = crate::policy::storage::VaultPolicy::new();
+    let policy = VaultPolicy::new();
     policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_cipher)?;
 
     let fork = Fork {
@@ -93,7 +94,7 @@ pub fn create_unleashed_fork(
     fork_name: &str,
     parent_cipher: &VaultCipher,
     parent_manifest: &VaultManifest,
-    fork_owner_pubkey: &crate::crypto::X25519PublicKey,
+    fork_owner_pubkey: &sigyn_core::crypto::X25519PublicKey,
     creator: &KeyFingerprint,
 ) -> Result<Fork> {
     let fork_paths = parent_paths;
@@ -136,7 +137,7 @@ pub fn create_unleashed_fork(
         }
     }
 
-    let policy = crate::policy::storage::VaultPolicy::new();
+    let policy = VaultPolicy::new();
     policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_cipher)?;
 
     let fork = Fork {

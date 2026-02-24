@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::environment::promotion::promote_env;
-use sigyn_core::policy::engine::AccessAction;
-use sigyn_core::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::environment::promotion::promote_env;
+use sigyn_engine::policy::engine::AccessAction;
+use sigyn_engine::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
 
 use super::secret::{check_access, unlock_vault};
 use crate::config::sigyn_home;
@@ -65,7 +65,7 @@ pub fn handle(
             }
         }
         EnvCommands::Create { name } => {
-            sigyn_core::secrets::validation::validate_env_name(&name)?;
+            sigyn_engine::secrets::validation::validate_env_name(&name)?;
 
             let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::CreateEnv, None)?;

@@ -1,12 +1,13 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::crypto::envelope;
-use sigyn_core::crypto::vault_cipher::VaultCipher;
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::vault::{VaultManifest, VaultPaths};
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::crypto::envelope;
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::vault::{VaultManifest, VaultPaths};
 
 use crate::commands::identity::load_identity;
 use crate::config::sigyn_home;
@@ -61,8 +62,8 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             // If --org is set, validate the org path exists
             if let Some(ref org_path_str) = org {
                 let hierarchy_paths =
-                    sigyn_core::hierarchy::path::HierarchyPaths::new(home.clone());
-                let org_path = sigyn_core::hierarchy::path::OrgPath::parse(org_path_str)
+                    sigyn_engine::hierarchy::path::HierarchyPaths::new(home.clone());
+                let org_path = sigyn_engine::hierarchy::path::OrgPath::parse(org_path_str)
                     .map_err(|_| anyhow::anyhow!("invalid org path: {}", org_path_str))?;
                 if !hierarchy_paths.manifest_path(&org_path).exists() {
                     anyhow::bail!("org node '{}' not found", org_path_str);
@@ -90,14 +91,14 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
             std::fs::write(paths.members_path(&name), header_bytes)?;
 
-            let policy = sigyn_core::policy::storage::VaultPolicy::new();
+            let policy = sigyn_engine::policy::storage::VaultPolicy::new();
             policy.save_encrypted(&paths.policy_path(&name), &master_cipher)?;
 
             for env_name in &manifest.environments {
-                let env = sigyn_core::vault::PlaintextEnv::new();
+                let env = sigyn_engine::vault::PlaintextEnv::new();
                 let encrypted =
-                    sigyn_core::vault::env_file::encrypt_env(&env, &master_cipher, env_name)?;
-                sigyn_core::vault::env_file::write_encrypted_env(
+                    sigyn_engine::vault::env_file::encrypt_env(&env, &master_cipher, env_name)?;
+                sigyn_engine::vault::env_file::write_encrypted_env(
                     &paths.env_path(&name, env_name),
                     &encrypted,
                 )?;
@@ -188,8 +189,8 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             }
 
             // Validate org path exists
-            let hierarchy_paths = sigyn_core::hierarchy::path::HierarchyPaths::new(home.clone());
-            let org_path = sigyn_core::hierarchy::path::OrgPath::parse(&org)
+            let hierarchy_paths = sigyn_engine::hierarchy::path::HierarchyPaths::new(home.clone());
+            let org_path = sigyn_engine::hierarchy::path::OrgPath::parse(&org)
                 .map_err(|_| anyhow::anyhow!("invalid org path: {}", org))?;
             if !hierarchy_paths.manifest_path(&org_path).exists() {
                 anyhow::bail!("org node '{}' not found", org);

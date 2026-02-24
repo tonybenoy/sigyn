@@ -1,19 +1,20 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
-use sigyn_core::audit::entry::AuditOutcome;
-use sigyn_core::audit::{AuditAction, AuditLog};
-use sigyn_core::crypto::envelope::{self, EnvelopeHeader};
-use sigyn_core::crypto::keys::KeyFingerprint;
-use sigyn_core::delegation::invite::InvitationFile;
-use sigyn_core::delegation::revoke::revoke_member;
-use sigyn_core::delegation::tree::DelegationNode;
-use sigyn_core::identity::keygen::IdentityStore;
-use sigyn_core::policy::engine::AccessAction;
-use sigyn_core::policy::member::MemberPolicy;
-use sigyn_core::policy::roles::Role;
-use sigyn_core::policy::storage::VaultPolicy;
-use sigyn_core::vault::{env_file, VaultPaths};
+use sigyn_engine::audit::entry::AuditOutcome;
+use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::crypto::envelope::{self, EnvelopeHeader};
+use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::delegation::invite::InvitationFile;
+use sigyn_engine::delegation::revoke::revoke_member;
+use sigyn_engine::delegation::tree::DelegationNode;
+use sigyn_engine::identity::keygen::IdentityStore;
+use sigyn_engine::policy::engine::AccessAction;
+use sigyn_engine::policy::member::MemberPolicy;
+use sigyn_engine::policy::roles::Role;
+use sigyn_engine::policy::storage::VaultPolicy;
+use sigyn_engine::policy::storage::VaultPolicyExt;
+use sigyn_engine::vault::{env_file, VaultPaths};
 
 use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 use crate::config::sigyn_home;
@@ -421,7 +422,7 @@ pub fn handle(
             // Include the owner (current user) plus all policy members
             let mut remaining_pubkeys: Vec<(
                 KeyFingerprint,
-                sigyn_core::crypto::keys::X25519PublicKey,
+                sigyn_engine::crypto::keys::X25519PublicKey,
             )> = Vec::new();
 
             // Add the owner/current identity

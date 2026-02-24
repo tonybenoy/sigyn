@@ -82,7 +82,7 @@ fn main() -> Result<()> {
 
 fn cmd_split(identity: &str, threshold: u8, total: u8, output_dir: Option<&str>) -> Result<()> {
     let home = sigyn_home();
-    let store = sigyn_core::identity::keygen::IdentityStore::new(home);
+    let store = sigyn_engine::identity::keygen::IdentityStore::new(home);
 
     // Find identity by name
     let ident = store
@@ -101,7 +101,7 @@ fn cmd_split(identity: &str, threshold: u8, total: u8, output_dir: Option<&str>)
     let enc_key_bytes = loaded.encryption_key().to_bytes();
 
     // Split into shards
-    let shard_set = sigyn_core::identity::split_secret(&enc_key_bytes, threshold, total)
+    let shard_set = sigyn_engine::identity::split_secret(&enc_key_bytes, threshold, total)
         .context("failed to split secret")?;
 
     // Write shards to files
@@ -165,7 +165,7 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
     for path in shard_paths {
         let content =
             std::fs::read_to_string(path).context(format!("failed to read shard: {}", path))?;
-        let shard: sigyn_core::identity::Shard =
+        let shard: sigyn_engine::identity::Shard =
             serde_json::from_str(&content).context(format!("failed to parse shard: {}", path))?;
         shards.push(shard);
     }
@@ -181,7 +181,7 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
         threshold
     );
 
-    let recovered = sigyn_core::identity::reconstruct_secret(&shards)
+    let recovered = sigyn_engine::identity::reconstruct_secret(&shards)
         .context("failed to reconstruct secret from shards")?;
 
     if recovered.len() != 32 {
@@ -196,11 +196,11 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
     enc_key_bytes.copy_from_slice(&recovered);
 
     // Derive X25519 public key from the recovered encryption private key
-    let enc_private = sigyn_core::crypto::keys::X25519PrivateKey::from_bytes(enc_key_bytes);
+    let enc_private = sigyn_engine::crypto::keys::X25519PrivateKey::from_bytes(enc_key_bytes);
     let enc_pubkey = enc_private.public_key();
 
     // Generate a new Ed25519 signing keypair (the old signing key was NOT sharded)
-    let signing_kp = sigyn_core::crypto::keys::SigningKeyPair::generate();
+    let signing_kp = sigyn_engine::crypto::keys::SigningKeyPair::generate();
     let signing_pubkey = signing_kp.verifying_key();
     let signing_private_bytes = signing_kp.to_bytes();
 
@@ -211,13 +211,13 @@ fn cmd_restore(shard_paths: &[String], output: Option<&str>) -> Result<()> {
         anyhow::bail!("passphrases do not match");
     }
 
-    let profile = sigyn_core::identity::IdentityProfile {
+    let profile = sigyn_engine::identity::IdentityProfile {
         name: "recovered".into(),
         email: None,
         created_at: chrono::Utc::now(),
     };
 
-    let wrapped = sigyn_core::identity::WrappedIdentity::wrap(
+    let wrapped = sigyn_engine::identity::WrappedIdentity::wrap(
         &enc_key_bytes,
         &signing_private_bytes,
         enc_pubkey,
@@ -253,7 +253,7 @@ fn cmd_print_shards(shard_paths: &[String]) -> Result<()> {
     for path in shard_paths {
         let content =
             std::fs::read_to_string(path).context(format!("failed to read shard: {}", path))?;
-        let shard: sigyn_core::identity::Shard =
+        let shard: sigyn_engine::identity::Shard =
             serde_json::from_str(&content).context(format!("failed to parse shard: {}", path))?;
 
         println!();
