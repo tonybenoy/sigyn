@@ -8,8 +8,11 @@ license.workspace = true
 name = "sigyn"
 path = "src/main.rs"
 
+[features]
+fast-kdf = ["sigyn-core/fast-kdf"]
+
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.2.1" }
+sigyn-core = { path = "../sigyn-core", version = "0.2.2" }
 
 # CLI
 clap.workspace = true

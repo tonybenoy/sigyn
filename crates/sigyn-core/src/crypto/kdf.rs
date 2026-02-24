@@ -8,8 +8,12 @@ const ARGON2_T_COST: u32 = 4;
 const ARGON2_P_COST: u32 = 4;
 
 fn argon2_instance() -> Argon2<'static> {
-    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
-        .expect("hardcoded argon2 params are valid");
+    let (m, t, p) = if cfg!(feature = "fast-kdf") {
+        (1024, 1, 1)
+    } else {
+        (ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
+    };
+    let params = Params::new(m, t, p, Some(32)).expect("hardcoded argon2 params are valid");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 

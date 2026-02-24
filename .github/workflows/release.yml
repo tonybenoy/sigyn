@@ -59,15 +59,7 @@ jobs:
     name: CI Gate
     needs: check-version
     if: needs.check-version.outputs.exists == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all
-      - run: cargo clippy --all -- -D warnings
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build ${{ matrix.target }}
