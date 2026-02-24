@@ -1,4 +1,4 @@
-use sigyn_core::crypto::envelope::{add_recipient, seal_master_key, unseal_master_key};
+use sigyn_core::crypto::envelope::{seal_master_key, unseal_master_key};
 use sigyn_core::crypto::keys::{KeyFingerprint, X25519PrivateKey};
 use sigyn_core::crypto::vault_cipher::VaultCipher;
 use sigyn_core::delegation::revoke::revoke_member;
