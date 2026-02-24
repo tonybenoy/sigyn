@@ -100,12 +100,13 @@ jobs:
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            export OPENSSL_VENDORED=1
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}
           fi
         shell: bash
+        env:
+          OPENSSL_VENDORED: "1"
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
