@@ -19,13 +19,11 @@
 - [Team Collaboration](./delegation.md)
 - [Git Sync & Conflict Resolution](./sync.md)
 - [Using Forks for Branching](./forks.md)
-- [Secret Rotation & Breach Mode](./audit.md)
-- [Disaster Recovery](./recovery.md)
 
 # Security
 
 - [Security Model](./security.md)
-- [Audit System](./audit.md)
+- [Audit & Rotation](./audit.md)
 - [Disaster Recovery](./recovery.md)
 
 # Reference

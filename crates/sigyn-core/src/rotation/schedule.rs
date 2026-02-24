@@ -81,10 +81,10 @@ mod tests {
 
     #[test]
     fn test_recently_updated_secret_is_not_due() {
-        // Every hour schedule, 0 hours grace
-        let sched = RotationSchedule::new("0 0 * * * *", 0);
-        // Last updated 5 minutes ago -- no hourly boundary has passed
-        let last_updated = Utc::now() - Duration::minutes(5);
+        // Daily schedule at 03:00, 0 hours grace
+        let sched = RotationSchedule::new("0 0 3 * * *", 0);
+        // Last updated 1 minute ago -- no daily boundary can have passed
+        let last_updated = Utc::now() - Duration::minutes(1);
         assert!(!sched.is_due(last_updated));
     }
 
