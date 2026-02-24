@@ -3,42 +3,57 @@
 A step-by-step guide to installing Sigyn, creating your first vault, managing secrets,
 collaborating with team members, and syncing via git.
 
-## Prerequisites
+## Install
 
-- Rust 1.75 or later (`rustup` recommended)
-- git (for sync features)
+### One-liner (recommended)
 
-## Install from Source
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh | sh
+```
 
-Clone the repository and build:
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.ps1 | iex
+```
+
+This downloads the latest pre-built binary for your platform and adds it to your PATH.
+Falls back to building from source if no pre-built binary is available.
+
+### From source
+
+Requires Rust 1.75+ and git:
+
+```bash
+cargo install --git https://github.com/tonybenoy/sigyn.git --bin sigyn sigyn-cli
+cargo install --git https://github.com/tonybenoy/sigyn.git --bin sigyn-recovery sigyn-recovery
+```
+
+Or clone and build locally:
 
 ```bash
 git clone https://github.com/tonybenoy/sigyn.git
 cd sigyn
 cargo build --release
+cp target/release/sigyn target/release/sigyn-recovery ~/.local/bin/
 ```
 
-The build produces two binaries:
-
-```bash
-# Main CLI
-cp target/release/sigyn ~/.local/bin/
-
-# Standalone recovery tool
-cp target/release/sigyn-recovery ~/.local/bin/
-```
-
-Alternatively, install directly via Cargo:
-
-```bash
-cargo install --path crates/sigyn-cli
-cargo install --path crates/sigyn-recovery
-```
-
-Verify the installation:
+### Verify
 
 ```bash
 sigyn --version
+```
+
+### Uninstall
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.ps1 | iex
 ```
 
 ## Create an Identity
@@ -84,6 +99,29 @@ sigyn init --identity alice
 ```
 
 This creates `~/.sigyn/config.toml` with your defaults.
+
+For per-project defaults, run `project init` in your project root:
+
+```bash
+sigyn project init
+```
+
+This interactively creates a `.sigyn.toml` with your vault and identity:
+
+```toml
+[project]
+vault = "myapp"
+env = "dev"
+identity = "alice"
+
+[commands]
+# dev = "npm run dev"
+# app = "./start-server"
+```
+
+Uncomment and edit the `[commands]` section to add named run commands.
+With this file, most commands need no flags at all. Use `--global` to write
+to `~/.sigyn/project.toml` instead (for defaults you don't want in a repo).
 
 ## Create a Vault
 
@@ -180,25 +218,32 @@ sigyn secret list --env dev --reveal
 
 ## Run with Injected Secrets
 
-Launch a process with all secrets from an environment injected as environment variables:
+Launch a process with all secrets from an environment injected as environment variables.
+The `exec` subcommand is the default, so you can omit it:
 
 ```bash
-sigyn run exec --env dev -- ./my-app
+sigyn run -e dev -- ./my-app
 ```
 
 The secrets are passed directly to the child process environment. They are never
 written to disk in plaintext.
 
-Use `--clean` to avoid inheriting the parent shell's environment:
+Use `-c` / `--clean` to avoid inheriting the parent shell's environment:
 
 ```bash
-sigyn run exec --env dev --clean -- node server.js
+sigyn run -e dev -c -- node server.js
 ```
 
-For Docker:
+Use `--prod` or `--staging` as environment shortcuts:
 
 ```bash
-sigyn run exec --env dev -- docker compose up
+sigyn run --prod -- docker compose up
+```
+
+If you have a `.sigyn.toml` with named commands, run them directly:
+
+```bash
+sigyn run dev       # runs the 'dev' command from [commands] table
 ```
 
 ## Export to Dotenv

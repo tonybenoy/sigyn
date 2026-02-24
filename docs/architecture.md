@@ -3,6 +3,62 @@
 This document describes the high-level architecture of Sigyn, a serverless encrypted
 peer-to-peer secret manager implemented in Rust.
 
+## High-Level Architecture
+
+```mermaid
+graph TD
+    subgraph CLI ["sigyn-cli (Binary)"]
+        CLIMain["Main / Clap"]
+        Commands["Commands (vault, secret, etc.)"]
+        Inject["Process Injection"]
+        TUI["Interactive TUI"]
+        Output["Formatting (Table, JSON)"]
+    end
+
+    subgraph Core ["sigyn-core (Library)"]
+        Crypto["Crypto (X25519, ChaCha20)"]
+        Vault["Vault / Storage"]
+        Policy["Policy Engine (RBAC)"]
+        Sync["Sync (CRDT, Git)"]
+        Audit["Audit Log"]
+    end
+
+    subgraph Storage ["Filesystem (~/.sigyn)"]
+        Config["config.toml"]
+        Identities["Identities / Private Keys"]
+        Vaults["Vaults (CBOR, JSONL)"]
+    end
+
+    CLI --> Core
+    CLI --> Storage
+    Core -.-> Storage
+```
+
+## Data Flow
+
+A typical secret read follows this path:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI as sigyn-cli
+    participant Core as sigyn-core
+    participant Disk as Filesystem
+
+    User->>CLI: sigyn secret get KEY --env dev
+    CLI->>Disk: Load config.toml
+    CLI->>User: Prompt for Passphrase
+    CLI->>Disk: Read Identity & Vault Files
+    CLI->>Core: PolicyEngine::evaluate()
+    Core-->>CLI: Access Granted
+    CLI->>Core: unseal_master_key(envelope)
+    Core-->>CLI: Master Key
+    CLI->>Core: decrypt_env(vault_file, master_key)
+    Core-->>CLI: Plaintext Secrets
+    CLI->>Disk: Append Audit Entry
+    CLI->>User: Display Secret Value
+```
+
 ## Cargo Workspace
 
 Sigyn is organized as a Cargo workspace with three crates and an integration test suite:

@@ -11,10 +11,10 @@ pub enum IdentityCommands {
     /// Create a new identity
     Create {
         /// Name for this identity
-        #[arg(long)]
+        #[arg(long, short)]
         name: String,
         /// Email address (optional)
-        #[arg(long)]
+        #[arg(long, short = 'E')]
         email: Option<String>,
     },
     /// List all identities
@@ -40,6 +40,7 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
             if passphrase != confirm {
                 anyhow::bail!("passphrases do not match");
             }
+
             if passphrase.len() < 8 {
                 anyhow::bail!("passphrase must be at least 8 characters");
             }

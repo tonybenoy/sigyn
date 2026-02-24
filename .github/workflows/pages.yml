@@ -36,6 +36,9 @@ jobs:
       - name: Build docs site
         run: mdbook build docs-site
 
+      - name: Generate SEO files (sitemap, robots.txt)
+        run: bash docs-site/copy-docs.sh --post-build
+
       - name: Add CNAME for custom domain
         run: echo "sigyn.org" > docs-site/book/CNAME
 

@@ -7,6 +7,7 @@ Sigyn stores its configuration and data under `~/.sigyn/`.
 ```
 ~/.sigyn/
 ├── config.toml                    # Global configuration
+├── project.toml                   # User-level project defaults (optional)
 ├── identities/
 │   └── <fingerprint>.identity     # Encrypted identity files
 └── vaults/
@@ -35,18 +36,68 @@ default_identity = "alice"
 default_vault = "myapp"
 ```
 
+## Project Config (`.sigyn.toml`)
+
+For per-project defaults, create a `.sigyn.toml` file in your project root. Sigyn
+searches for this file in the current directory and walks up to parent directories.
+
+You can also place the same file at `~/.sigyn/project.toml` as a user-level fallback
+(useful for defaults you don't want to commit to a repo). The project-local file
+takes precedence over the user-level one.
+
+```toml
+[project]
+vault = "myapp"
+env = "dev"
+identity = "alice"
+
+[commands]
+dev = "npm run dev"
+app = "./start-server"
+migrate = "python manage.py migrate"
+```
+
+### `[project]` table
+
+| Key | Description |
+|-----|-------------|
+| `vault` | Default vault for this project |
+| `env` | Default environment for this project |
+| `identity` | Default identity for this project |
+
+### `[commands]` table
+
+Named commands that can be invoked with `sigyn run <name>`. The value is the command
+string to execute with secrets injected. Extra arguments are appended.
+
+```bash
+sigyn run dev              # runs 'npm run dev' with secrets
+sigyn run app --prod       # runs './start-server' with prod env
+sigyn run migrate          # runs 'python manage.py migrate' with secrets
+```
+
+### Resolution priority
+
+Settings are resolved in this order (highest to lowest):
+
+1. CLI flags (`--vault`, `-v`, `--env`, `-e`, etc.)
+2. Project config (`.sigyn.toml` in project directory)
+3. User project config (`~/.sigyn/project.toml`)
+4. Global config (`~/.sigyn/config.toml`)
+5. Hardcoded defaults
+
 ## Global CLI Flags
 
 These flags override config file defaults for a single invocation:
 
-| Flag | Description |
-|------|-------------|
-| `--vault <name>` | Override the default vault |
-| `--env <name>` | Override the default environment |
-| `--identity <name>` | Override the default identity |
-| `--json` | Output as JSON instead of formatted text |
-| `--quiet` | Suppress non-essential output |
-| `--dry-run` | Preview changes without applying |
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--vault <name>` | `-v` | Override the default vault |
+| `--env <name>` | `-e` | Override the default environment |
+| `--identity <name>` | `-i` | Override the default identity |
+| `--json` | | Output as JSON instead of formatted text |
+| `--quiet` | | Suppress non-essential output |
+| `--dry-run` | | Preview changes without applying |
 
 ## vault.toml
 

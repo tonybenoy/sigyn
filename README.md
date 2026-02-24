@@ -39,6 +39,7 @@ what Sigyn is about.
 - **Fork system** -- leashed and unleashed forks for team branches and experimentation.
 - **Rotation scheduling** -- cron-based automatic rotation with breach mode for emergency re-key.
 - **Import/export** -- bring secrets in from Doppler, AWS Secrets Manager, GCP Secret Manager, 1Password, or `.env` files; export to dotenv, JSON, Kubernetes secrets, Docker env, or shell eval.
+- **Project config** -- `.sigyn.toml` for per-project vault, environment, identity defaults, and named run commands.
 - **Process injection** -- `sigyn run -- cmd` injects secrets as environment variables without writing them to disk.
 - **Unix socket server** -- programmatic access for scripts and CI pipelines.
 - **Interactive TUI** -- ratatui-powered dashboard for browsing and managing secrets.
@@ -49,34 +50,82 @@ what Sigyn is about.
 
 ## Quick start
 
-### Install from source
+### Install
 
 ```bash
-# Requires Rust 1.75+
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.ps1 | iex
+```
+
+```bash
+# Or build from source (requires Rust 1.75+)
 cargo install --path crates/sigyn-cli
+```
+
+### Uninstall
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.ps1 | iex
 ```
 
 ### Basic usage
 
 ```bash
 # Create an identity (keypair)
-sigyn identity create --name alice
+sigyn identity create -n alice
 
 # Create a vault for your project
 sigyn vault create myapp
 
-# Store secrets
-sigyn secret set DATABASE_URL "postgres://localhost/myapp" --env dev
-sigyn secret set API_KEY "sk-..." --env dev
+# Store secrets (use -v for vault, -e for env, -i for identity)
+sigyn secret set DATABASE_URL "postgres://localhost/myapp" -v myapp -e dev
+sigyn secret set API_KEY "sk-..." -e dev
 
 # Retrieve a secret
-sigyn secret get DATABASE_URL --env dev
+sigyn secret get DATABASE_URL -e dev
 
 # List all secrets in an environment
-sigyn secret list --env dev
+sigyn secret list -e dev
 
 # Inject secrets into a process (never written to disk)
-sigyn run exec --env dev -- ./start-server
+sigyn run -e dev -- ./start-server
+
+# Or use a project config for zero-flag workflows (see below)
+```
+
+### Project config (`.sigyn.toml`)
+
+Drop a `.sigyn.toml` in your project root to set per-project defaults:
+
+```toml
+[project]
+vault = "myapp"
+env = "dev"
+identity = "alice"
+
+[commands]
+dev = "npm run dev"
+app = "./start-server"
+migrate = "python manage.py migrate"
+```
+
+Then simply:
+
+```bash
+sigyn run dev          # runs 'npm run dev' with secrets injected
+sigyn run app --prod   # runs './start-server' with prod secrets
+sigyn secret list      # uses vault/env/identity from .sigyn.toml
 ```
 
 ### Sync via Git
@@ -119,6 +168,7 @@ sigyn <command>
 | `audit` | View and verify the signed audit trail |
 | `sync` | Push, pull, and resolve sync conflicts |
 | `fork` | Create and manage vault forks |
+| `project` | Initialize and manage project config (`.sigyn.toml`) |
 | `run` | Inject secrets into processes, export, or serve via socket |
 | `rotate` | Rotate secrets, schedule rotation, breach mode |
 | `import` | Import from Doppler, AWS, GCP, 1Password, dotenv, JSON |
@@ -182,6 +232,40 @@ cargo test
 
 Please ensure `cargo clippy` and `cargo test` pass before submitting a
 pull request. The CI pipeline enforces both.
+
+## Documentation
+
+- [**Getting Started**](docs/getting-started.md) — install and use Sigyn
+- [**CLI Reference**](docs/cli-reference.md) — complete command documentation
+- [**Examples**](docs/examples.md) — real-world recipes and workflows
+- [**FAQ**](docs/FAQ.md) — frequently asked questions
+- [**Architecture**](docs/architecture.md) — deep dive into how it works
+- [**Security Model**](docs/security.md) — crypto primitives and threat model
+- [**Development Guide**](docs/DEVELOPMENT.md) — hacking on Sigyn
+- [**Contributing**](CONTRIBUTING.md) — how to contribute
+
+---
+
+## Developer Quick Start
+
+If you want to contribute to Sigyn, here is how to get started:
+
+```bash
+# Clone the repo
+git clone https://github.com/tonybenoy/sigyn.git
+cd sigyn
+
+# Run all tests
+cargo test
+
+# Run the CLI from source
+cargo run -- vault list
+
+# Check for linting issues
+cargo clippy -- -D warnings
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 
 ---
 

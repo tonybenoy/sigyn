@@ -10,14 +10,16 @@ sigyn <COMMAND> [OPTIONS]
 
 These flags can be used with any subcommand:
 
-| Flag | Description |
-|---|---|
-| `--vault <NAME>` | Vault name (overrides default from config) |
-| `--env <NAME>` | Environment name (overrides default from config) |
-| `--identity <NAME>` | Identity name or fingerprint (overrides default) |
-| `--json` | Output as JSON |
-| `--quiet` | Suppress non-essential output |
-| `--dry-run` | Preview changes without applying |
+| Flag | Short | Description |
+|---|---|---|
+| `--vault <NAME>` | `-v` | Vault name (overrides default from config) |
+| `--env <NAME>` | `-e` | Environment name (overrides default from config) |
+| `--identity <NAME>` | `-i` | Identity name or fingerprint (overrides default) |
+| `--json` | | Output as JSON |
+| `--quiet` | | Suppress non-essential output |
+| `--dry-run` | | Preview changes without applying |
+
+**Resolution priority:** CLI flags > `.sigyn.toml` (project dir) > `~/.sigyn/project.toml` > `~/.sigyn/config.toml` > defaults.
 
 ## identity (alias: id)
 
@@ -32,10 +34,10 @@ sigyn identity create --name alice
 sigyn identity create --name alice --email alice@example.com
 ```
 
-| Flag | Description |
-|---|---|
-| `--name <NAME>` | Required. Name for this identity |
-| `--email <EMAIL>` | Optional email address |
+| Flag | Short | Description |
+|---|---|---|
+| `--name <NAME>` | `-n` | Required. Name for this identity |
+| `--email <EMAIL>` | `-E` | Optional email address |
 
 Prompts for a passphrase (minimum 8 characters) with confirmation.
 
@@ -161,10 +163,10 @@ sigyn secret list --env dev
 sigyn secret list --env dev --reveal
 ```
 
-| Flag | Description |
-|---|---|
-| `--env, -e <ENV>` | Target environment (default: dev) |
-| `--reveal` | Show decrypted values instead of masked output |
+| Flag | Short | Description |
+|---|---|---|
+| `--env` | `-e` | Target environment (default: dev) |
+| `--reveal` | `-r` | Show decrypted values instead of masked output |
 
 ### secret remove (alias: rm)
 
@@ -185,11 +187,11 @@ sigyn secret generate API_TOKEN --env dev --length 64 --type hex
 sigyn secret generate SESSION_ID --env dev --type uuid
 ```
 
-| Flag | Description |
-|---|---|
-| `--length <N>` | Length of generated value (default: 32) |
-| `--type <TYPE>` | Generation type: `password`, `uuid`, `hex`, `base64`, `alphanumeric` (default: password) |
-| `--env, -e <ENV>` | Target environment (default: dev) |
+| Flag | Short | Description |
+|---|---|---|
+| `--length` | `-l` | Length of generated value (default: 32) |
+| `--type` | `-t` | Generation type: `password`, `uuid`, `hex`, `base64`, `alphanumeric` (default: password) |
+| `--env` | `-e` | Target environment (default: dev) |
 
 ### secret history
 
@@ -549,25 +551,73 @@ Show the status of a specific fork.
 sigyn fork status feature-branch
 ```
 
+## project
+
+Manage project-level configuration.
+
+### project init
+
+Generate a `.sigyn.toml` in the current directory. Interactively prompts to select
+a vault and identity from those available on the machine.
+
+```bash
+sigyn project init                          # interactive
+sigyn project init -v myapp -i alice        # non-interactive
+sigyn project init --global                 # write to ~/.sigyn/project.toml instead
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--vault` | `-v` | Vault name (skips prompt) |
+| `--env` | `-e` | Environment name (default: dev) |
+| `--identity` | `-i` | Identity name (skips prompt) |
+| `--global` | | Write to `~/.sigyn/project.toml` instead of `./.sigyn.toml` |
+
 ## run
 
 Run processes with injected secrets or export secrets in various formats.
 
-### run exec
+The `exec` subcommand is the default -- you can omit it:
+
+```bash
+# These are equivalent:
+sigyn run -- ./my-app
+sigyn run exec -- ./my-app
+```
+
+### run (exec)
 
 Execute a command with secrets injected as environment variables. Secrets are never
 written to disk in plaintext.
 
 ```bash
-sigyn run exec --env dev -- ./my-app
-sigyn run exec --env prod -- docker compose up
-sigyn run exec --env dev --clean -- node server.js
+sigyn run -e dev -- ./my-app
+sigyn run --prod -- docker compose up
+sigyn run -e dev -c -- node server.js
 ```
 
-| Flag | Description |
-|---|---|
-| `--env, -e <ENV>` | Environment to load secrets from |
-| `--clean` | Do not inherit the parent process environment |
+| Flag | Short | Description |
+|---|---|---|
+| `--env` | `-e` | Environment to load secrets from |
+| `--clean` | `-c` | Do not inherit the parent process environment |
+| `--prod` | | Shorthand for `--env prod` |
+| `--staging` | | Shorthand for `--env staging` |
+
+### Named commands
+
+If a `.sigyn.toml` is present with a `[commands]` table, you can run named commands:
+
+```toml
+# .sigyn.toml
+[commands]
+dev = "npm run dev"
+app = "./my-app"
+```
+
+```bash
+sigyn run dev              # runs 'npm run dev' with secrets injected
+sigyn run app --prod       # runs './my-app' with prod env secrets
+```
 
 ### run export
 
@@ -581,11 +631,11 @@ sigyn run export --env dev --format docker
 sigyn run export --env dev --format shell
 ```
 
-| Flag | Description |
-|---|---|
-| `--env, -e <ENV>` | Environment to export |
-| `--format, -f <FMT>` | Output format: `dotenv`, `json`, `shell`, `docker`, `k8s` (default: dotenv) |
-| `--name <NAME>` | Resource name for k8s format (default: app-secrets) |
+| Flag | Short | Description |
+|---|---|---|
+| `--env` | `-e` | Environment to export |
+| `--format` | `-f` | Output format: `dotenv`, `json`, `shell`, `docker`, `k8s` (default: dotenv) |
+| `--name` | | Resource name for k8s format (default: app-secrets) |
 
 ### run serve
 

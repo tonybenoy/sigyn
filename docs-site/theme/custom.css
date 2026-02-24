@@ -1,0 +1,9 @@
+/* Improve readability for SEO content */
+.content main {
+    max-width: 800px;
+}
+
+/* FAQ styling for better scannability */
+.content h3 {
+    margin-top: 1.5em;
+}

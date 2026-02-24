@@ -41,7 +41,7 @@ pub enum SecretCommands {
         #[arg(long, short)]
         env: Option<String>,
         /// Show values (default: hidden)
-        #[arg(long)]
+        #[arg(long, short)]
         reveal: bool,
     },
     /// Remove a secret
@@ -58,10 +58,10 @@ pub enum SecretCommands {
         /// Secret key name
         key: String,
         /// Length of generated value
-        #[arg(long, default_value = "32")]
+        #[arg(long, short, default_value = "32")]
         length: usize,
         /// Generation type: password, uuid, hex, base64, alphanumeric
-        #[arg(long, default_value = "password")]
+        #[arg(long, short, default_value = "password")]
         r#type: String,
         /// Environment
         #[arg(long, short)]
@@ -89,18 +89,25 @@ pub fn unlock_vault(
     let store = IdentityStore::new(home.clone());
     let paths = VaultPaths::new(home);
     let config = crate::config::load_config();
+    let project = crate::project_config::load_project_config();
+    let project_settings = project.as_ref().and_then(|p| p.project.as_ref());
 
+    // Priority: CLI flags > project config > global config > defaults
     let vault_name = vault_name
         .map(String::from)
+        .or_else(|| project_settings.and_then(|p| p.vault.clone()))
         .or(config.default_vault)
         .ok_or_else(|| anyhow::anyhow!("no vault specified; use --vault or set default"))?;
 
     let env_name = env_name
         .map(String::from)
+        .or_else(|| project_settings.and_then(|p| p.env.clone()))
         .or(config.default_env)
         .unwrap_or_else(|| "dev".into());
 
-    let loaded = load_identity(&store, identity_name)?;
+    let identity_from_project = project_settings.and_then(|p| p.identity.clone());
+    let effective_identity = identity_name.or(identity_from_project.as_deref());
+    let loaded = load_identity(&store, effective_identity)?;
     let fingerprint = loaded.identity.fingerprint.clone();
 
     let manifest_content = std::fs::read_to_string(paths.manifest_path(&vault_name))

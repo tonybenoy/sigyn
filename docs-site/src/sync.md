@@ -1,85 +1,121 @@
-# Synchronization
+# Sync
 
-This document describes how Sigyn synchronizes vault data between machines and
-team members.
+This document describes how Sigyn synchronizes vault data between machines, including
+the git-based transport, conflict detection via vector clocks, CRDT-based resolution,
+and LAN peer discovery.
 
-## Overview
+## Design Principles
 
-Sigyn's sync system is designed around three principles:
+- **Encrypted at rest**: the sync engine operates on encrypted CBOR blobs. It never
+  needs the master key. A git remote (or any file synchronization tool) can host
+  Sigyn vaults without having access to the plaintext secrets.
+- **Vaults are directories**: each vault is a self-contained directory containing
+  `vault.toml`, `members.cbor`, `policy.cbor`, `envs/*.vault`, `audit.log.json`,
+  and `forks.cbor`. This maps naturally to git repositories.
+- **No central server**: Sigyn is peer-to-peer. Any member can push/pull to a shared
+  git remote. LAN peers can discover each other via mDNS.
 
-1. **Encrypted at rest**: the sync engine operates on encrypted CBOR blobs. It never
-   needs the master key. This means vault data can be stored in any git repository
-   (including public ones) without exposing secrets.
-2. **Conflict-aware**: concurrent modifications by different members are detected
-   using vector clocks and resolved using configurable strategies.
-3. **Git-native**: vaults are directories of files that can be committed, pushed,
-   and pulled using standard git workflows.
+## On-Disk Layout
 
-## Git-Based Sync
-
-Each vault is a directory under `~/.sigyn/vaults/<name>/` containing files that map
-directly to git-trackable artifacts:
+The files synced for each vault:
 
 ```
-vaults/myapp/
-  vault.toml        # Vault metadata
-  members.cbor      # Encrypted envelope header
-  policy.cbor       # Encrypted policy
+~/.sigyn/vaults/myapp/
+  vault.toml        # Vault metadata (TOML, human-readable)
+  members.cbor      # Envelope header with encrypted master key slots
+  policy.cbor       # Encrypted RBAC policy
   envs/
-    dev.vault       # Encrypted environment
+    dev.vault       # Encrypted environment (CBOR)
     staging.vault
     prod.vault
-  audit.log.json    # Append-only audit trail
+  audit.log.json    # Hash-chained audit trail (JSON Lines)
   forks.cbor        # Fork metadata
 ```
 
-All `.cbor` and `.vault` files are encrypted. The sync engine pushes and pulls
-these files without decrypting them.
+All `.cbor` and `.vault` files are encrypted with ChaCha20-Poly1305. The sync engine
+pushes and pulls these opaque blobs without any decryption.
 
-### Configuration
+## Git-Based Sync
 
-Set up a remote for sync:
+Sigyn uses `git2` (libgit2 Rust bindings) for sync operations. Each vault directory
+can be initialized as a git repository via `GitSyncEngine`.
 
-```bash
-sigyn sync configure --remote git@github.com:team/secrets.git
+### GitSyncEngine
+
+The engine operates on the vault directory:
+
+```rust
+GitSyncEngine {
+    vault_path: PathBuf,
+}
 ```
 
-### Push and Pull
+Key methods:
+
+| Method | Description |
+|---|---|
+| `init()` | Initialize a git repository in the vault directory |
+| `stage_all()` | Stage all changed files (`git add *`) |
+| `commit(message)` | Create a commit with staged changes |
+| `push(remote, branch)` | Push to a remote (`refs/heads/branch`) |
+| `pull(remote, branch)` | Fetch and fast-forward merge |
+| `sync(remote, branch, message)` | Pull, stage, commit, push in one operation |
+| `has_changes()` | Check for uncommitted changes |
+| `status()` | Compute sync status relative to remote |
+
+### Sync Status
+
+The engine computes sync status by comparing local HEAD with `refs/remotes/origin/main`:
+
+| Status | Meaning |
+|---|---|
+| `NeverSynced` | No remote configured or no commits yet |
+| `UpToDate` | Local and remote are at the same commit |
+| `LocalAhead(n)` | Local has n commits not yet pushed |
+| `RemoteAhead(n)` | Remote has n commits not yet pulled |
+| `Diverged` | Both local and remote have new commits |
+
+### Pull Results
+
+A pull operation can result in:
+
+| Result | Meaning |
+|---|---|
+| `UpToDate` | Nothing to pull |
+| `FastForward` | Remote changes applied cleanly |
+| `Conflict` | Diverged histories; needs resolution |
+
+### Commands
 
 ```bash
-# Push local changes to the remote repository
+# Configure a remote
+sigyn sync configure --remote-url git@github.com:team/secrets.git
+
+# Push local changes
 sigyn sync push
+sigyn sync push --remote origin --branch main
 
-# Pull remote changes and merge locally
+# Pull remote changes
 sigyn sync pull
-```
+sigyn sync pull --remote origin --branch main
 
-The push/pull operations are wrappers around git operations (add, commit, push, pull)
-that handle the vault directory structure and conflict detection.
-
-### Status
-
-Check what has changed locally and remotely:
-
-```bash
+# Check status
 sigyn sync status
-```
 
-Output shows:
-- Local changes not yet pushed
-- Remote changes not yet pulled
-- Detected conflicts (if any)
+# Enable auto-sync
+sigyn sync configure --auto-sync true
+```
 
 ## Vector Clocks
 
-Sigyn uses vector clocks to track the causal ordering of modifications across
-members. Each member maintains a logical clock, identified by their key fingerprint.
+Sigyn uses vector clocks to track causal ordering of secret updates across nodes.
+Each node is identified by its BLAKE3 key fingerprint.
 
 ### Structure
 
 ```rust
-pub struct VectorClock {
-    pub clocks: HashMap<String, u64>,  // fingerprint_hex -> counter
+VectorClock {
+    clocks: HashMap<String, u64>,  // fingerprint_hex -> counter
 }
 ```
 
@@ -89,8 +125,8 @@ pub struct VectorClock {
 |---|---|
 | `tick(node_id)` | Increment this node's counter by 1 |
 | `merge(other)` | Take the component-wise maximum of two clocks |
-| `happened_before(other)` | Returns true if this clock causally precedes the other |
-| `concurrent_with(other)` | Returns true if neither clock precedes the other |
+| `happened_before(other)` | True if this clock causally precedes the other |
+| `concurrent_with(other)` | True if neither clock precedes the other (conflict) |
 
 ### Causal Ordering
 
@@ -99,10 +135,8 @@ Given two vector clocks A and B:
 - **A happened-before B**: every component of A is less than or equal to the
   corresponding component of B, and at least one is strictly less.
 - **B happened-before A**: the reverse.
-- **Concurrent**: neither happened-before the other (there exist components where
-  A > B and components where B > A).
-
-When two modifications are concurrent, a conflict is detected and must be resolved.
+- **Concurrent**: neither happened-before the other. This indicates a conflict --
+  two members modified the same key independently.
 
 ### Example
 
@@ -116,227 +150,187 @@ Bob (who has seen Alice's write) writes API_KEY:
 Alice (who has NOT seen Bob's write) writes API_KEY:
   Clock: { alice: 2 }
 
-Result: Alice's { alice: 2 } and Bob's { alice: 1, bob: 1 } are concurrent.
-  -> Conflict detected on API_KEY
+Alice's { alice: 2 } and Bob's { alice: 1, bob: 1 } are concurrent.
+  -> Conflict detected on API_KEY.
+```
+
+After sync, the clocks are merged:
+
+```
+Merged: { alice: 2, bob: 1 }
 ```
 
 ## LWW-Map CRDT
 
-Sigyn uses a Last-Write-Wins Map (LWW-Map) as its conflict-free replicated data type
-for automatic convergence of non-conflicting changes.
-
-### Structure
+For automatic conflict resolution, Sigyn uses a Last-Writer-Wins Map (LWW-Map). Each
+entry in the map tracks metadata alongside the value:
 
 ```rust
-pub struct LwwMap<V> {
-    pub entries: HashMap<String, LwwEntry<V>>,
+LwwEntry<V> {
+    value: V,                           // The secret value (encrypted)
+    timestamp: DateTime<Utc>,            // When it was written
+    clock: VectorClock,                  // Causal ordering
+    writer: String,                      // Fingerprint of the writer
 }
 
-pub struct LwwEntry<V> {
-    pub value: V,
-    pub timestamp: DateTime<Utc>,
-    pub clock: VectorClock,
-    pub writer: String,  // fingerprint of the writer
+LwwMap<V> {
+    entries: HashMap<String, LwwEntry<V>>,
 }
 ```
 
-Each entry in the map tracks:
-- The current value
-- A UTC timestamp of when it was written
-- The vector clock at the time of writing
-- The fingerprint of the member who wrote it
-
-### Merge Behavior
+### Merge Semantics
 
 When merging two LWW-Maps (e.g., during `sigyn sync pull`):
 
-1. For each key present in both maps, compare timestamps.
-2. The entry with the later timestamp wins.
-3. Keys present in only one map are added to the merged result.
-
-This provides automatic convergence for the common case where different members
-modify different keys. Conflicts (same key modified concurrently) are detected
-by comparing vector clocks and escalated to the conflict resolution system.
-
-## Conflict Detection
-
-A conflict occurs when:
-
-1. Two members modify the same key in the same environment.
-2. Their vector clocks are concurrent (neither happened-before the other).
-
-### Conflict Structure
+- For each key present in both maps, the entry with the **later timestamp** wins.
+- Keys present in only one map are copied to the merged result.
 
 ```rust
-pub struct Conflict {
-    pub key: String,
-    pub env: String,
-    pub local_value: String,
-    pub remote_value: String,
-    pub local_clock: VectorClock,
-    pub remote_clock: VectorClock,
+fn merge(&mut self, other: &LwwMap<V>) {
+    for (key, other_entry) in &other.entries {
+        match self.entries.get(key) {
+            Some(local_entry) => {
+                if other_entry.timestamp > local_entry.timestamp {
+                    self.entries.insert(key.clone(), other_entry.clone());
+                }
+            }
+            None => {
+                self.entries.insert(key.clone(), other_entry.clone());
+            }
+        }
+    }
 }
 ```
 
-## Conflict Resolution Strategies
+This provides **automatic convergence**: all nodes that receive the same set of
+updates will arrive at the same state, regardless of the order in which they
+receive them.
 
-Sigyn supports six conflict resolution strategies:
+## Conflict Detection and Resolution
+
+When vector clocks indicate concurrent modifications to the same key, Sigyn records
+a `Conflict`:
+
+```rust
+Conflict {
+    key: String,
+    env: String,
+    local_value: String,
+    remote_value: String,
+    local_clock: VectorClock,
+    remote_clock: VectorClock,
+}
+```
+
+### Resolution Strategies
+
+Conflicts can be resolved using one of six strategies:
 
 | Strategy | Description |
 |---|---|
-| `TakeLocal` | Keep the local value, discard the remote |
-| `TakeRemote` | Keep the remote value, discard the local |
-| `TakeLatestTimestamp` | Keep whichever value has the later UTC timestamp |
-| `TakeHigherRole` | Keep the value written by the member with the higher role level |
-| `Merge(custom)` | Use a custom merged value provided by the user |
-| `Defer` | Leave the conflict unresolved for later manual resolution |
+| `TakeLocal` | Keep the local value, discard remote |
+| `TakeRemote` | Keep the remote value, discard local |
+| `TakeLatestTimestamp` | Keep whichever value has the later UTC timestamp (LWW) |
+| `TakeHigherRole` | Keep the value written by the member with the higher RBAC role level |
+| `Merge(value)` | Provide a custom merged value |
+| `Defer` | Skip resolution; the conflict remains until resolved manually |
 
-### Automatic Resolution
+### Automatic vs Manual Resolution
 
-By default, `TakeLatestTimestamp` is used for automatic resolution during
-`sigyn sync pull`. This can be configured:
+The LWW-Map CRDT resolves non-conflicting updates automatically. When vector clocks
+detect a true concurrent write (same key modified on two machines without syncing),
+the conflict is surfaced to the user.
 
-```bash
-sigyn sync configure --conflict-strategy take-latest
-```
-
-### Manual Resolution
-
-When automatic resolution is not appropriate (or when using the `Defer` strategy),
-conflicts must be resolved manually:
+Resolve manually:
 
 ```bash
-# List unresolved conflicts
+# List conflicts
 sigyn sync status
 
 # Resolve a specific conflict
-sigyn sync resolve --key DATABASE_URL --env dev --strategy take-local
-
-# Resolve with a custom value
-sigyn sync resolve --key DATABASE_URL --env dev --strategy merge --value 'postgres://new-host/db'
+sigyn sync resolve DATABASE_URL --strategy local
+sigyn sync resolve API_KEY --strategy remote
+sigyn sync resolve CONFIG --strategy latest
 ```
 
 ## LAN Peer Discovery
 
-For teams on the same network, Sigyn supports file-based peer advertising for
-LAN discovery.
+Sigyn includes mDNS-based LAN peer discovery via the `sync::mdns` module. When
+enabled, Sigyn nodes on the same local network can discover each other and sync
+directly without a central git remote.
 
-### How It Works
+This is useful for:
 
-1. Each Sigyn instance advertises its presence by writing a peer file to a shared
-   location (configurable).
-2. The peer file contains: fingerprint, hostname, IP address, last-seen timestamp.
-3. Other instances periodically scan for peer files.
-4. Stale peer entries (not updated within a configurable window) are pruned automatically.
-
-### Commands
-
-```bash
-# List discovered peers
-sigyn sync peers
-
-# Enable/disable LAN discovery
-sigyn sync configure --lan-discovery on
-```
-
-## Sync Commands Reference
-
-### sync push
-
-Push local vault changes to the configured remote.
-
-```bash
-sigyn sync push
-```
-
-Options:
-- `--force`: overwrite remote changes (use with caution)
-- `--dry-run`: show what would be pushed without actually pushing
-
-### sync pull
-
-Pull and merge remote changes.
-
-```bash
-sigyn sync pull
-```
-
-Options:
-- `--conflict-strategy <strategy>`: override the default conflict resolution strategy for this pull
-- `--dry-run`: show what would change without applying
-
-### sync status
-
-Show the current sync state.
-
-```bash
-sigyn sync status
-```
-
-Displays:
-- Number of local changes pending push
-- Number of remote changes pending pull
-- List of unresolved conflicts
-- Last sync timestamp
-
-### sync resolve
-
-Manually resolve a conflict.
-
-```bash
-sigyn sync resolve --key <KEY> --env <ENV> --strategy <STRATEGY>
-```
-
-### sync peers
-
-List known peers.
+- Teams working in the same office.
+- Development environments without internet access.
+- Fast local sync without round-tripping through a remote server.
 
 ```bash
 sigyn sync peers
-```
-
-### sync configure
-
-Set sync configuration.
-
-```bash
-sigyn sync configure --remote <URL>
-sigyn sync configure --conflict-strategy <STRATEGY>
-sigyn sync configure --lan-discovery on|off
 ```
 
 ## Security Considerations
 
-- **No plaintext in transit**: all synced files are encrypted CBOR blobs. The git
-  remote (even if public) never sees plaintext secrets.
-- **No master key needed for sync**: the sync engine only moves encrypted files.
-  Decryption happens locally after pull.
-- **Audit trail integrity**: the hash-chained audit log is synced alongside vault
-  data. Chain verification (`sigyn audit verify`) detects tampering during transit.
-- **Vector clocks prevent silent overwrites**: concurrent modifications are always
-  detected and surfaced, never silently lost.
+### Sync Never Needs the Master Key
 
-## Typical Workflow
+All vault files are encrypted at rest. The sync layer operates on opaque encrypted
+blobs. A git remote hosting Sigyn vaults cannot read any secret values -- it only
+sees CBOR-encoded ciphertext.
+
+### Audit Log Integrity Across Sync
+
+The hash-chained audit log is included in sync. After pulling, you can verify the
+chain to detect any tampering that may have occurred on the remote:
 
 ```bash
-# Morning: pull latest changes from the team
 sigyn sync pull
+sigyn audit verify
+```
 
-# Work: make changes to secrets
-sigyn secret set NEW_API_KEY 'sk-...' --env dev
+### Revocation Propagation
 
-# End of day: push changes
+When a member is revoked on one machine, the updated `policy.cbor` and `members.cbor`
+(with the revoked slot removed and master key rotated) are synced to all other members
+on the next push/pull cycle. The revoked member's slot is no longer present in the
+envelope header, so they cannot decrypt any data even if they pull the latest files.
+
+### Vector Clocks Prevent Silent Overwrites
+
+Concurrent modifications are always detected and surfaced via the conflict system.
+No data is silently overwritten during sync.
+
+## Workflow Example
+
+A typical team workflow:
+
+```bash
+# Alice creates a vault and pushes
+sigyn vault create myapp
+sigyn secret set DATABASE_URL 'postgres://...' --env dev
+sigyn sync configure --remote-url git@github.com:team/secrets.git
 sigyn sync push
 
-# If conflicts are reported during pull:
-sigyn sync status
-sigyn sync resolve --key API_KEY --env dev --strategy take-remote
+# Bob clones and pulls
+sigyn sync pull --vault myapp
+
+# Bob adds a secret and pushes
+sigyn secret set API_KEY 'sk-...' --env dev
+sigyn sync push
+
+# Alice pulls Bob's changes
+sigyn sync pull
+sigyn secret list --env dev    # sees both DATABASE_URL and API_KEY
+
+# If both Alice and Bob modify the same key simultaneously:
+sigyn sync pull
+# Output: Conflict detected on API_KEY (dev)
+sigyn sync resolve API_KEY --strategy latest
 sigyn sync push
 ```
 
 ## Related Documentation
 
-- [Architecture](architecture.md) -- sync module structure and CRDT implementation
-- [Security Model](security.md) -- encryption guarantees for synced data
-- [CLI Reference](cli-reference.md) -- full sync command reference
-- [Delegation](delegation.md) -- how delegation changes propagate via sync
+- [Architecture](architecture.md) -- on-disk layout and module overview
+- [Security Model](security.md) -- encryption and access control
+- [Delegation](delegation.md) -- how revocations affect sync
+- [CLI Reference](cli-reference.md) -- complete command reference

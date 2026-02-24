@@ -1,7 +1,7 @@
 [book]
 title = "Sigyn Documentation"
 authors = ["Sigyn Contributors"]
-description = "Serverless encrypted P2P secret manager"
+description = "Sigyn is an open-source, serverless, encrypted, peer-to-peer secret manager. Manage API keys, database credentials, and secrets with end-to-end encryption, RBAC, and git-native sync — no server required."
 src = "src"
 language = "en"
 
@@ -11,9 +11,11 @@ build-dir = "book"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
+site-url = "https://sigyn.org/"
 git-repository-url = "https://github.com/tonybenoy/sigyn"
 edit-url-template = "https://github.com/tonybenoy/sigyn/edit/main/docs-site/src/{path}"
 no-section-label = false
+additional-css = ["theme/custom.css"]
 
 [output.html.search]
 enable = true

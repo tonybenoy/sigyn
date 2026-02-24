@@ -6,6 +6,7 @@ mod inject;
 #[allow(dead_code)]
 mod notifications;
 mod output;
+mod project_config;
 #[allow(dead_code)]
 mod tui;
 
@@ -23,11 +24,11 @@ use clap::{Parser, Subcommand};
         delegation trees with cascade revocation, hash-chained audit trails, and \
         Shamir-based disaster recovery.\n\n\
         Quick start:\n  \
-        sigyn identity create --name alice\n  \
+        sigyn identity create -n alice\n  \
         sigyn vault create myapp\n  \
-        sigyn secret set DATABASE_URL 'postgres://...' --env dev\n  \
-        sigyn secret get DATABASE_URL --env dev\n  \
-        sigyn run exec --env dev -- ./myapp",
+        sigyn secret set DATABASE_URL 'postgres://...' -v myapp -e dev\n  \
+        sigyn secret get DATABASE_URL -e dev\n  \
+        sigyn run -e dev -- ./myapp",
     after_help = "Use 'sigyn <command> --help' for more information about a command.\n\
         Config: ~/.sigyn/config.toml"
 )]
@@ -36,15 +37,15 @@ struct Cli {
     command: Commands,
 
     /// Vault name
-    #[arg(long, global = true)]
+    #[arg(long, short = 'v', global = true)]
     vault: Option<String>,
 
     /// Environment name
-    #[arg(long, global = true)]
+    #[arg(long, short = 'e', global = true)]
     env: Option<String>,
 
     /// Identity name or fingerprint
-    #[arg(long, global = true)]
+    #[arg(long, short = 'i', global = true)]
     identity: Option<String>,
 
     /// Output as JSON
@@ -88,6 +89,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
     },
+    /// Manage project config (.sigyn.toml)
+    Project {
+        #[command(subcommand)]
+        command: commands::project::ProjectCommands,
+    },
     /// Show current status
     Status,
     /// Run health checks
@@ -117,10 +123,7 @@ enum Commands {
         command: commands::fork::ForkCommands,
     },
     /// Run commands with injected secrets / export secrets
-    Run {
-        #[command(subcommand)]
-        command: commands::run::RunCommands,
-    },
+    Run(commands::run::RunArgs),
     /// Rotate secrets and manage lifecycle
     Rotate {
         #[command(subcommand)]
@@ -166,6 +169,9 @@ fn main() -> Result<()> {
         Commands::Policy { command } => {
             commands::policy::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
+        Commands::Project { command } => {
+            commands::project::handle(command, json)?;
+        }
         Commands::Status => {
             commands::status::handle(json)?;
         }
@@ -196,8 +202,8 @@ fn main() -> Result<()> {
         Commands::Fork { command } => {
             commands::fork::handle(command, cli.vault.as_deref(), json)?;
         }
-        Commands::Run { command } => {
-            commands::run::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+        Commands::Run(args) => {
+            commands::run::handle(args, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Rotate { command } => {
             commands::rotate::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;

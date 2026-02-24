@@ -5,6 +5,7 @@ pub mod fork;
 pub mod identity;
 pub mod import;
 pub mod policy;
+pub mod project;
 pub mod rotate;
 pub mod run;
 pub mod secret;

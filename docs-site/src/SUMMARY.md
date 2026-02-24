@@ -11,12 +11,16 @@
 - [Environments](./environments.md)
 - [Import and Export](./import-export.md)
 - [Multiple Vaults and Organizations](./multi-vault.md)
+- [Examples](./examples.md)
+- [FAQ](./FAQ.md)
 
-# Collaboration
+# Common Workflows & Examples
 
-- [Delegation and Invitations](./delegation.md)
-- [Sync](./sync.md)
-- [Forks](./forks.md)
+- [Team Collaboration](./delegation.md)
+- [Git Sync & Conflict Resolution](./sync.md)
+- [Using Forks for Branching](./forks.md)
+- [Secret Rotation & Breach Mode](./audit.md)
+- [Disaster Recovery](./recovery.md)
 
 # Security
 
@@ -28,3 +32,8 @@
 
 - [Architecture](./architecture.md)
 - [Configuration](./configuration.md)
+
+# Development
+
+- [Development Guide](./DEVELOPMENT.md)
+- [Contributing](./contributing.md)

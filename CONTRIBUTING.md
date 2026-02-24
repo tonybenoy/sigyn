@@ -1,0 +1,97 @@
+# Contributing to Sigyn
+
+First off, thank you for considering contributing to Sigyn! It's people like you who make Sigyn such a great tool.
+
+## Code of Conduct
+
+Please be respectful and professional in all interactions.
+
+## How Can I Contribute?
+
+### Reporting Bugs
+
+- Use the GitHub issue tracker.
+- Check if the bug has already been reported.
+- Include a clear description, steps to reproduce, and your environment (OS, Rust version).
+
+### Suggesting Enhancements
+
+- Open a GitHub issue to discuss the enhancement.
+- Provide a clear use case for why this feature is needed.
+
+### Pull Requests
+
+- Fork the repository.
+- Create a new branch for your feature or bugfix.
+- Ensure your code follows the existing style.
+- **Write tests** for your changes.
+- Ensure all tests pass: `cargo test`
+- Ensure the code is linted: `cargo clippy -- -D warnings`
+- Ensure the code is formatted: `cargo fmt --all -- --check`
+- Submit a pull request.
+
+## Development Setup
+
+### Prerequisites
+
+- Rust 1.75 or later.
+- Git.
+
+### Building from Source
+
+```bash
+git clone https://github.com/tonybenoy/sigyn.git
+cd sigyn
+cargo build
+```
+
+### Running Tests
+
+Run all unit tests:
+
+```bash
+cargo test
+```
+
+Run integration tests:
+
+```bash
+cargo test -p sigyn-integration-tests
+```
+
+### Linting and Formatting
+
+We use `clippy` and `rustfmt` to maintain code quality.
+
+```bash
+cargo clippy -- -D warnings
+cargo fmt --all
+```
+
+## Project Structure
+
+- `crates/sigyn-core`: The core library containing all business logic, cryptography, and data models. It is I/O-free.
+- `crates/sigyn-cli`: The main CLI application.
+- `crates/sigyn-recovery`: A standalone recovery tool.
+- `tests/integration`: Integration tests that exercise the full CLI.
+
+## Adding a New Command
+
+1.  Add the command definition in `crates/sigyn-cli/src/commands/mod.rs` (if it's a new group) or in the relevant subcommand file (e.g., `crates/sigyn-cli/src/commands/secret.rs`).
+2.  Implement the logic in the command file.
+3.  Add an integration test in `tests/integration/` to verify the new command works as expected.
+
+## Documentation
+
+The documentation is located in the `docs/` directory and is served via mdBook from `docs-site/`.
+
+To build the docs site locally:
+
+```bash
+cd docs-site
+mdbook serve
+```
+
+---
+
+Thank you for contributing!
