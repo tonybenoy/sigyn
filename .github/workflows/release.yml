@@ -65,15 +65,18 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: [check-version, ci]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+            vendored-openssl: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+            vendored-openssl: true
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -99,10 +102,14 @@ jobs:
 
       - name: Build
         run: |
+          FEATURES=""
+          if [ "${{ matrix.vendored-openssl }}" = "true" ]; then
+            FEATURES="--features vendored-openssl"
+          fi
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --features vendored-openssl
+            cross build --release --target ${{ matrix.target }} $FEATURES
           else
-            cargo build --release --target ${{ matrix.target }} --features vendored-openssl
+            cargo build --release --target ${{ matrix.target }} $FEATURES
           fi
         shell: bash
 
