@@ -9,7 +9,7 @@ name = "sigyn"
 path = "src/main.rs"
 
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.2.0" }
+sigyn-core = { path = "../sigyn-core", version = "0.2.1" }
 
 # CLI
 clap.workspace = true
