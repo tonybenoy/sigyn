@@ -1,3 +1,4 @@
+#[allow(deprecated)]
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ fn fresh_home() -> TempDir {
     tempfile::tempdir().unwrap()
 }
 
+#[allow(deprecated)]
 fn sigyn(home: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("sigyn").unwrap();
     cmd.env("SIGYN_HOME", home.path())
@@ -50,6 +52,7 @@ fn test_identity_create_duplicate() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn test_identity_create_short_passphrase() {
     let home = fresh_home();
     let mut cmd = Command::cargo_bin("sigyn").unwrap();
