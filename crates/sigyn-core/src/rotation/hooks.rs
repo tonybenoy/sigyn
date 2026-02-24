@@ -46,3 +46,33 @@ pub fn execute_single_hook(hook: &str, env_vars: &[(&str, &str)]) -> Result<bool
         .map_err(|e| SigynError::RotationFailed("hook".into(), e.to_string()))?;
     Ok(status.success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execute_rotation_hooks() {
+        // Use a simple echo command to test
+        let hooks = vec!["echo $SIGYN_ROTATED_KEY".to_string()];
+        let results = execute_rotation_hooks(&hooks, "TEST_KEY", "dev").unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+        assert_eq!(results[0].output.trim(), "TEST_KEY");
+    }
+
+    #[test]
+    fn test_execute_single_hook_with_env() {
+        let env_vars = [("FOO", "BAR"), ("BAZ", "QUX")];
+        let result = execute_single_hook(
+            "test \"$FOO\" = \"BAR\" && test \"$BAZ\" = \"QUX\"",
+            &env_vars,
+        )
+        .unwrap();
+        assert!(result);
+
+        let result = execute_single_hook("test \"$FOO\" = \"WRONG\"", &env_vars).unwrap();
+        assert!(!result);
+    }
+}

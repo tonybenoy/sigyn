@@ -148,7 +148,6 @@ TimeWindow {
     days: [Mon, Tue, Wed, Thu, Fri],
     start_hour: 9,
     end_hour: 17,
-    timezone: "UTC",
 }
 ```
 

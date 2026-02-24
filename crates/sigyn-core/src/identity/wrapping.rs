@@ -49,3 +49,38 @@ impl WrappedIdentity {
         kdf::unwrap_private_key(&self.wrapped_signing_key, passphrase, &self.salt)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::{SigningKeyPair, X25519PublicKey};
+
+    #[test]
+    fn test_wrapped_identity_roundtrip() {
+        let enc_priv = [1u8; 32];
+        let sign_priv = [2u8; 32];
+        let enc_pub = X25519PublicKey([3u8; 32]);
+        let sign_pub = SigningKeyPair::from_bytes(&sign_priv).verifying_key();
+        let profile = IdentityProfile {
+            name: "test".into(),
+            email: None,
+            created_at: chrono::Utc::now(),
+        };
+        let passphrase = "correct passphrase";
+
+        let wrapped = WrappedIdentity::wrap(
+            &enc_priv, &sign_priv, enc_pub, sign_pub, profile, passphrase,
+        )
+        .unwrap();
+
+        // Unwrap with correct passphrase
+        let recovered_enc = wrapped.unwrap_encryption_key(passphrase).unwrap();
+        assert_eq!(recovered_enc, enc_priv);
+
+        let recovered_sign = wrapped.unwrap_signing_key(passphrase).unwrap();
+        assert_eq!(recovered_sign, sign_priv);
+
+        // Unwrap with wrong passphrase
+        assert!(wrapped.unwrap_encryption_key("wrong").is_err());
+    }
+}

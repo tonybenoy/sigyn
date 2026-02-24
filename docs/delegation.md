@@ -59,6 +59,8 @@ Example invitation file:
   "inviter_fingerprint": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   "proposed_role": "contributor",
   "allowed_envs": ["dev", "staging"],
+  "secret_patterns": ["*"],
+  "max_delegation_depth": 0,
   "signature": "<Ed25519 signature bytes>",
   "created_at": "2026-02-23T10:30:00Z"
 }
@@ -287,7 +289,6 @@ TimeWindow {
     days: [Mon, Tue, Wed, Thu, Fri],
     start_hour: 9,
     end_hour: 17,
-    timezone: "UTC",
 }
 ```
 

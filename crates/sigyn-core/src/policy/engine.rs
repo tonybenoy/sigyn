@@ -257,4 +257,103 @@ mod tests {
             PolicyDecision::Deny(_)
         ));
     }
+
+    #[test]
+    fn test_ip_constraints() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([2u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut member_policy = MemberPolicy::new(member.clone(), Role::Contributor);
+
+        let constraints = crate::policy::constraints::Constraints {
+            time_windows: vec![],
+            ip_allowlist: vec!["192.168.1.0/24".into()],
+            expires_at: None,
+        };
+        member_policy.constraints = Some(constraints);
+        policy.add_member(member_policy);
+
+        {
+            let engine = PolicyEngine::new(&policy, &owner);
+
+            // Allowed IP
+            let req = AccessRequest {
+                actor: member.clone(),
+                action: AccessAction::Read,
+                env: "dev".into(),
+                key: None,
+                ip: Some("192.168.1.5".into()),
+            };
+            assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+            // Denied IP
+            let req = AccessRequest {
+                actor: member.clone(),
+                action: AccessAction::Read,
+                env: "dev".into(),
+                key: None,
+                ip: Some("10.0.0.1".into()),
+            };
+            assert!(matches!(
+                engine.evaluate(&req).unwrap(),
+                PolicyDecision::Deny(_)
+            ));
+        }
+
+        // Global IP constraint
+        policy.global_constraints = Some(crate::policy::constraints::Constraints {
+            time_windows: vec![],
+            ip_allowlist: vec!["10.0.0.0/8".into()],
+            expires_at: None,
+        });
+
+        // Now even with member allowed, global denies it
+        let engine = PolicyEngine::new(&policy, &owner);
+        let req = AccessRequest {
+            actor: member,
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            ip: Some("192.168.1.5".into()),
+        };
+        assert!(matches!(
+            engine.evaluate(&req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_env_restrictions() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([2u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut member_policy = MemberPolicy::new(member.clone(), Role::Contributor);
+        member_policy.allowed_envs = vec!["dev".into(), "staging".into()];
+        policy.add_member(member_policy);
+
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Allowed env
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            ip: None,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+        // Denied env
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "prod".into(),
+            key: None,
+            ip: None,
+        };
+        assert!(matches!(
+            engine.evaluate(&req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
 }

@@ -51,3 +51,38 @@ pub fn load_project_config() -> Option<ProjectConfig> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_find_project_config() {
+        let root = tempdir().unwrap();
+        let project_dir = root.path().join("myproject");
+        let sub_dir = project_dir.join("src").join("utils");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        let config_content = r#"
+[project]
+vault = "myvault"
+env = "dev"
+"#;
+        fs::write(project_dir.join(".sigyn.toml"), config_content).unwrap();
+
+        // Should find it from sub-directory
+        let (config, found_dir) = find_project_config(&sub_dir).expect("should find config");
+        assert_eq!(found_dir, project_dir);
+        assert_eq!(config.project.unwrap().vault, Some("myvault".into()));
+
+        // Should find it from project directory
+        let (config, found_dir) = find_project_config(&project_dir).expect("should find config");
+        assert_eq!(found_dir, project_dir);
+        assert_eq!(config.project.unwrap().env, Some("dev".into()));
+
+        // Should NOT find it from root
+        assert!(find_project_config(root.path()).is_none());
+    }
+}

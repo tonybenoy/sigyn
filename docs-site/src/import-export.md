@@ -94,7 +94,7 @@ sigyn run exec --env prod -- docker compose up
 For programmatic access, Sigyn can serve secrets over a Unix domain socket:
 
 ```bash
-sigyn run serve --env dev --socket /tmp/sigyn.sock
+sigyn run serve --env dev --socket ~/.sigyn/sigyn.sock
 ```
 
 Clients connect and use a simple text protocol:
