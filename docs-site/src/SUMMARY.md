@@ -11,6 +11,7 @@
 - [Environments](./environments.md)
 - [Import and Export](./import-export.md)
 - [Multiple Vaults and Organizations](./multi-vault.md)
+- [Organizations](./organizations.md)
 - [Examples](./examples.md)
 - [FAQ](./FAQ.md)
 

@@ -819,6 +819,114 @@ sigyn import 1password --vault "Dev Secrets" --item "API Keys" --env dev
 sigyn import op --vault Production --item "Database Creds" --env prod
 ```
 
+## org
+
+Manage hierarchical organizations. See [Organizations](organizations.md) for the full
+design document.
+
+### org create
+
+Create a root organization. The caller becomes the owner.
+
+```bash
+sigyn org create acme
+```
+
+Creates `~/.sigyn/orgs/acme/` with `node.toml`, `members.cbor`, and `policy.cbor`.
+
+### org node create
+
+Add a child node to an existing org path.
+
+```bash
+sigyn org node create platform --parent acme --type division
+sigyn org node create web --parent acme/platform --type team
+```
+
+| Flag | Description |
+|---|---|
+| `--parent <PATH>` | Parent org path (e.g., `acme` or `acme/platform`) |
+| `--type <TYPE>` | Node type string (default: `team`) |
+
+### org node remove
+
+Remove an empty node (no children, no linked vaults).
+
+```bash
+sigyn org node remove acme/platform/web
+```
+
+### org tree
+
+Display the hierarchy tree.
+
+```bash
+sigyn org tree
+sigyn org tree --org acme
+```
+
+### org info
+
+Show node metadata (UUID, type, owner, children, linked vaults, git remote).
+
+```bash
+sigyn org info acme/platform/web
+```
+
+### org policy show
+
+Display the RBAC policy at a hierarchy node.
+
+```bash
+sigyn org policy show --path acme
+```
+
+### org policy member-add
+
+Add a member at a hierarchy level. Permissions cascade to child nodes via inheritance.
+
+```bash
+sigyn org policy member-add <fingerprint> --role admin --path acme
+```
+
+| Flag | Description |
+|---|---|
+| `--role <ROLE>` | Role to assign: `readonly`, `auditor`, `operator`, `contributor`, `manager`, `admin`, `owner` |
+| `--path <PATH>` | Org path where the membership applies |
+
+### org policy member-remove
+
+Remove a member from a hierarchy level.
+
+```bash
+sigyn org policy member-remove <fingerprint> --path acme
+```
+
+### org policy effective
+
+Show the merged effective permissions for a member by walking the chain from the
+target node to the root org.
+
+```bash
+sigyn org policy effective <fingerprint> --path acme/platform/web
+```
+
+### org sync configure
+
+Set the git remote for a hierarchy node. Child nodes without an explicit remote
+inherit from the nearest ancestor.
+
+```bash
+sigyn org sync configure --path acme --remote-url git@github.com:acme/secrets.git
+sigyn org sync configure --path acme/platform/web --remote-url git@github.com:acme/web.git --branch develop
+```
+
+| Flag | Description |
+|---|---|
+| `--path <PATH>` | Org path to configure |
+| `--remote-url <URL>` | Git remote URL |
+| `--branch <NAME>` | Branch name (default: `main`) |
+
 ## recovery
 
 Disaster recovery via the standalone `sigyn-recovery` binary.
@@ -894,6 +1002,15 @@ sigyn init
 sigyn init --identity alice --vault myapp
 ```
 
+### update
+
+Self-update to the latest release. Downloads the appropriate binary for the current
+platform and verifies the checksum before replacing the running binary.
+
+```bash
+sigyn update
+```
+
 ### completions
 
 Generate shell completion scripts.
@@ -912,5 +1029,6 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`.
 - [Getting Started](getting-started.md) -- step-by-step tutorial
 - [Architecture](architecture.md) -- project structure and design decisions
 - [Security Model](security.md) -- cryptographic primitives and threat model
+- [Organizations](organizations.md) -- hierarchical org structure and inherited RBAC
 - [Delegation](delegation.md) -- invitation and revocation system
 - [Sync](sync.md) -- synchronization and conflict resolution

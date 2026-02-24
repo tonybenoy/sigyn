@@ -132,31 +132,7 @@ sigyn secret list      # uses vault/env/identity from .sigyn.toml
 
 ### Organizations
 
-Group vaults into a hierarchical org structure with inherited RBAC:
-
-```bash
-# Create an org and sub-teams
-sigyn org create acme
-sigyn org node create platform --parent acme --type division
-sigyn org node create web --parent acme/platform --type team
-
-# Create a vault under an org node
-sigyn vault create myapp --org acme/platform/web
-
-# Link an existing vault to an org
-sigyn vault attach legacy-app --org acme
-
-# View the hierarchy
-sigyn org tree
-
-# Add an org-level admin (inherits access to all child nodes and vaults)
-sigyn org policy member-add <fingerprint> --role admin --path acme
-
-# Check effective permissions
-sigyn org policy effective <fingerprint> --path acme/platform/web
-```
-
-Members added at a higher org level automatically gain access to all child nodes and vaults. The highest role across all levels wins, and environment/pattern permissions are unioned.
+Group vaults into a hierarchical org structure with inherited RBAC. See [Organizations](docs/organizations.md) for details.
 
 ### Sync via Git
 
@@ -275,6 +251,7 @@ pull request. The CI pipeline enforces both.
 - [**Architecture**](docs/architecture.md) — deep dive into how it works
 - [**Security Model**](docs/security.md) — crypto primitives and threat model
 - [**Development Guide**](docs/DEVELOPMENT.md) — hacking on Sigyn
+- [**Organizations**](docs/organizations.md) — hierarchical org structure and inherited RBAC
 - [**Contributing**](CONTRIBUTING.md) — how to contribute
 
 ---
