@@ -11,6 +11,9 @@ pub struct VaultManifest {
     pub environments: Vec<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub description: Option<String>,
+    /// Optional org hierarchy path this vault belongs to, e.g. "acme/platform/web".
+    #[serde(default)]
+    pub org_path: Option<String>,
 }
 
 impl VaultManifest {
@@ -22,6 +25,7 @@ impl VaultManifest {
             environments: vec!["dev".into(), "staging".into(), "prod".into()],
             created_at: chrono::Utc::now(),
             description: None,
+            org_path: None,
         }
     }
 

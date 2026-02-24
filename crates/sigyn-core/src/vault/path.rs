@@ -69,6 +69,26 @@ impl VaultPaths {
         names.sort();
         Ok(names)
     }
+
+    /// List vaults that belong to a given org path.
+    /// Scans all vaults and returns those whose manifest `org_path` matches or is a descendant.
+    pub fn list_vaults_for_org(&self, org_path: &str) -> crate::Result<Vec<String>> {
+        let all_vaults = self.list_vaults()?;
+        let mut matching = Vec::new();
+        for name in all_vaults {
+            let manifest_path = self.manifest_path(&name);
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(manifest) = super::manifest::VaultManifest::from_toml(&content) {
+                    if let Some(ref vp) = manifest.org_path {
+                        if vp == org_path || vp.starts_with(&format!("{}/", org_path)) {
+                            matching.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(matching)
+    }
 }
 
 #[cfg(test)]

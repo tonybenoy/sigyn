@@ -66,6 +66,16 @@ pub enum SigynError {
     #[error("member not found: {0}")]
     MemberNotFound(String),
 
+    // Hierarchy errors
+    #[error("node not found: {0}")]
+    NodeNotFound(String),
+    #[error("node already exists: {0}")]
+    NodeAlreadyExists(String),
+    #[error("invalid org path: {0}")]
+    InvalidOrgPath(String),
+    #[error("hierarchy cycle detected: {0}")]
+    HierarchyCycle(String),
+
     // Delegation errors
     #[error("invalid invitation: {0}")]
     InvalidInvitation(String),

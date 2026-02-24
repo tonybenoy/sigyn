@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.75"
@@ -62,6 +62,11 @@ cron = "0.15"
 
 # HTTP
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+
+# Archive / Hash (for self-update)
+flate2 = "1"
+tar = "0.4"
+hex = "0.4"
 
 # Other
 indexmap = { version = "2.7", features = ["serde"] }

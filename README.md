@@ -44,6 +44,8 @@ what Sigyn is about.
 - **Process injection** -- `sigyn run -- cmd` injects secrets as environment variables without writing them to disk.
 - **Unix socket server** -- programmatic access for scripts and CI pipelines.
 - **Interactive TUI** -- ratatui-powered dashboard for browsing and managing secrets.
+- **Hierarchical organizations** -- nested org/division/team hierarchy with inherited RBAC (highest role wins), per-level encryption, cascading member management, and configurable git remotes at any level.
+- **Self-update** -- `sigyn update` downloads and installs the latest release with checksum verification.
 - **Shell completions** -- bash, zsh, fish, and PowerShell.
 
 ---
@@ -128,6 +130,34 @@ sigyn run app --prod   # runs './start-server' with prod secrets
 sigyn secret list      # uses vault/env/identity from .sigyn.toml
 ```
 
+### Organizations
+
+Group vaults into a hierarchical org structure with inherited RBAC:
+
+```bash
+# Create an org and sub-teams
+sigyn org create acme
+sigyn org node create platform --parent acme --type division
+sigyn org node create web --parent acme/platform --type team
+
+# Create a vault under an org node
+sigyn vault create myapp --org acme/platform/web
+
+# Link an existing vault to an org
+sigyn vault attach legacy-app --org acme
+
+# View the hierarchy
+sigyn org tree
+
+# Add an org-level admin (inherits access to all child nodes and vaults)
+sigyn org policy member-add <fingerprint> --role admin --path acme
+
+# Check effective permissions
+sigyn org policy effective <fingerprint> --path acme/platform/web
+```
+
+Members added at a higher org level automatically gain access to all child nodes and vaults. The highest role across all levels wins, and environment/pattern permissions are unioned.
+
 ### Sync via Git
 
 ```bash
@@ -165,6 +195,7 @@ sigyn <command>
 | `env` | Manage environments (create, list, promote) |
 | `policy` | Configure RBAC policies and constraints |
 | `mfa` | Manage TOTP-based multi-factor authentication |
+| `org` | Manage organizations and hierarchy (create, tree, policy, sync) |
 | `delegation` | Invite members, revoke access, view delegation tree |
 | `audit` | View and verify the signed audit trail |
 | `sync` | Push, pull, and resolve sync conflicts |
@@ -174,6 +205,7 @@ sigyn <command>
 | `rotate` | Rotate secrets, schedule rotation, breach mode |
 | `import` | Import from Doppler, AWS, GCP, 1Password, dotenv, JSON |
 | `tui` | Launch the interactive TUI dashboard |
+| `update` | Self-update to the latest release |
 | `doctor` | Run health checks |
 | `status` | Show current vault and environment info |
 | `init` | Initialize default configuration |

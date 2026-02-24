@@ -4,6 +4,7 @@ pub mod delegation;
 pub mod environment;
 pub mod error;
 pub mod forks;
+pub mod hierarchy;
 pub mod identity;
 pub mod policy;
 pub mod rotation;

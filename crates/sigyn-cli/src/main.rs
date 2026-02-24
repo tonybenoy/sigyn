@@ -88,6 +88,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
     },
+    /// Manage organizations and hierarchy
+    Org {
+        #[command(subcommand)]
+        command: commands::org::OrgCommands,
+    },
     /// Manage project config (.sigyn.toml)
     Project {
         #[command(subcommand)]
@@ -144,6 +149,8 @@ enum Commands {
         #[command(subcommand)]
         command: commands::import::ImportCommands,
     },
+    /// Update sigyn to the latest release
+    Update(commands::update::UpdateArgs),
     /// Generate shell completions
     Completions {
         /// Shell to generate for: bash, zsh, fish, powershell
@@ -178,6 +185,9 @@ fn main() -> Result<()> {
         }
         Commands::Policy { command } => {
             commands::policy::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+        }
+        Commands::Org { command } => {
+            commands::org::handle(command, cli.identity.as_deref(), json)?;
         }
         Commands::Project { command } => {
             commands::project::handle(command, json)?;
@@ -237,6 +247,9 @@ fn main() -> Result<()> {
         }
         Commands::Import { command } => {
             commands::import::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+        }
+        Commands::Update(args) => {
+            commands::update::handle(args, json)?;
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;
