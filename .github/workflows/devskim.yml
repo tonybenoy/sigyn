@@ -33,7 +33,8 @@ jobs:
           # DS162092: localhost references are test data only
           # DS173237: hex fingerprints in tests are not real secrets/tokens
           # DS137138: sitemap XML namespace URL is a standard URI, not an API endpoint
-          exclude-rules: "DS440100,DS126858,DS162092,DS173237,DS137138"
+          # DS187371: ChaCha20-Poly1305 is a modern AEAD cipher, not a weak cipher mode
+          exclude-rules: "DS440100,DS126858,DS162092,DS173237,DS137138,DS187371"
 
       - name: Upload DevSkim scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3

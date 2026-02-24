@@ -31,6 +31,8 @@ multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
 deny = []
+# Allow workspace path dependencies (treated as wildcards by cargo-deny)
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

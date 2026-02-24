@@ -78,3 +78,10 @@ proptest = "1.5"
 lto = true
 strip = true
 codegen-units = 1
+
+# Speed up test compilation: don't inherit aggressive release settings
+[profile.dev]
+codegen-units = 16
+
+[profile.test]
+codegen-units = 16

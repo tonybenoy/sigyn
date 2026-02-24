@@ -7,6 +7,10 @@ on:
       - "Cargo.toml"
       - "crates/*/Cargo.toml"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
