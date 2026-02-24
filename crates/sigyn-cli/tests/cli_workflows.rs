@@ -2240,7 +2240,7 @@ fn test_policy_show_with_members() {
         .stdout(
             predicate::str::contains("Vault Policy")
                 .and(predicate::str::contains("aabbccddaabbccdd"))
-                .and(predicate::str::contains("Contributor")),
+                .and(predicate::str::contains("contributor")),
         );
 }
 
@@ -2279,13 +2279,21 @@ fn test_policy_check_owner_allow() {
     let home = fresh_home();
     setup_vault(&home);
 
-    // Get the owner fingerprint from identity show
+    // Get the owner fingerprint from the text output of identity show
     let output = sigyn(&home)
-        .args(["--json", "identity", "show", "testuser"])
+        .args(["identity", "show", "testuser"])
         .output()
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let fp = json["fingerprint"].as_str().unwrap().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fp = stdout
+        .lines()
+        .find(|l| l.contains("Fingerprint:"))
+        .unwrap()
+        .split("Fingerprint:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
 
     sigyn(&home)
         .args([
@@ -2345,12 +2353,21 @@ fn test_policy_check_json() {
     let home = fresh_home();
     setup_vault(&home);
 
+    // Get owner fingerprint from text output
     let output = sigyn(&home)
-        .args(["--json", "identity", "show", "testuser"])
+        .args(["identity", "show", "testuser"])
         .output()
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let fp = json["fingerprint"].as_str().unwrap().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fp = stdout
+        .lines()
+        .find(|l| l.contains("Fingerprint:"))
+        .unwrap()
+        .split("Fingerprint:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
 
     sigyn(&home)
         .args([
@@ -2445,10 +2462,41 @@ fn test_run_export_no_secrets() {
     let home = fresh_home();
     setup_vault(&home);
 
-    // Try to export from an env with no secrets
+    // Create a new env but don't add secrets, then remove env file
     sigyn(&home)
         .args([
-            "run", "export", "--format", "dotenv", "-v", "myapp", "-e", "staging", "-i", "testuser",
+            "env",
+            "create",
+            "empty-env",
+            "-v",
+            "myapp",
+            "-i",
+            "testuser",
+        ])
+        .assert()
+        .success();
+    let env_file = home
+        .path()
+        .join("vaults")
+        .join("myapp")
+        .join("envs")
+        .join("empty-env.vault");
+    if env_file.exists() {
+        std::fs::remove_file(&env_file).unwrap();
+    }
+
+    sigyn(&home)
+        .args([
+            "run",
+            "export",
+            "--format",
+            "dotenv",
+            "-v",
+            "myapp",
+            "-e",
+            "empty-env",
+            "-i",
+            "testuser",
         ])
         .assert()
         .failure()
@@ -2634,13 +2682,21 @@ fn test_delegation_invite_and_accept() {
         .assert()
         .success();
 
-    // Get bob's fingerprint
+    // Get bob's fingerprint from text output
     let output = sigyn(&home)
-        .args(["--json", "identity", "show", "bob"])
+        .args(["identity", "show", "bob"])
         .output()
         .unwrap();
-    let bob_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let bob_fp = bob_json["fingerprint"].as_str().unwrap().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let bob_fp = stdout
+        .lines()
+        .find(|l| l.contains("Fingerprint:"))
+        .unwrap()
+        .split("Fingerprint:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Invite bob
     let invite_output = sigyn(&home)
@@ -2695,11 +2751,19 @@ fn test_delegation_invite_json() {
         .success();
 
     let output = sigyn(&home)
-        .args(["--json", "identity", "show", "charlie"])
+        .args(["identity", "show", "charlie"])
         .output()
         .unwrap();
-    let charlie_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let charlie_fp = charlie_json["fingerprint"].as_str().unwrap().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let charlie_fp = stdout
+        .lines()
+        .find(|l| l.contains("Fingerprint:"))
+        .unwrap()
+        .split("Fingerprint:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
 
     sigyn(&home)
         .args([

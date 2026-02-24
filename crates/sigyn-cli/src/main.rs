@@ -214,7 +214,12 @@ fn main() -> Result<()> {
             commands::rotate::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Delegation { command } => {
-            commands::delegation::handle(command, cli.vault.as_deref(), json)?;
+            commands::delegation::handle(
+                command,
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+            )?;
         }
         Commands::Mfa { command } => {
             commands::mfa::handle(command, cli.identity.as_deref(), json)?;

@@ -132,12 +132,17 @@ fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
     }
 }
 
-pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Result<()> {
+pub fn handle(
+    cmd: DelegationCommands,
+    vault: Option<&str>,
+    identity: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let vault_name = vault.unwrap_or("default");
 
     match cmd {
         DelegationCommands::Tree => {
-            let ctx = unlock_vault(None, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
 
             let trees = build_delegation_tree(&ctx.policy, &ctx.manifest.owner);
 
@@ -172,7 +177,7 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             }
         }
         DelegationCommands::Invite { pubkey, role, envs } => {
-            let ctx = unlock_vault(None, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             let role_enum = Role::from_str_name(&role).ok_or_else(|| {
@@ -391,7 +396,7 @@ pub fn handle(cmd: DelegationCommands, vault: Option<&str>, json: bool) -> Resul
             fingerprint,
             cascade,
         } => {
-            let ctx = unlock_vault(None, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             let target_fp = KeyFingerprint::from_hex(&fingerprint)
