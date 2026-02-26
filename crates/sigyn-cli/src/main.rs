@@ -1,3 +1,4 @@
+#[cfg(unix)]
 mod agent;
 mod commands;
 mod config;
@@ -190,7 +191,8 @@ enum Commands {
         /// Shell to generate for: bash, zsh, fish, powershell
         shell: String,
     },
-    /// Manage the passphrase agent (caches decrypted keys)
+    /// Manage the passphrase agent (caches decrypted keys) [Unix only]
+    #[cfg(unix)]
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
@@ -240,6 +242,7 @@ enum Commands {
     },
 }
 
+#[cfg(unix)]
 #[derive(Subcommand)]
 enum AgentCommands {
     /// Start the passphrase agent daemon
@@ -465,6 +468,7 @@ fn main() -> Result<()> {
             })?;
             generate(shell, &mut Cli::command(), "sigyn", &mut std::io::stdout());
         }
+        #[cfg(unix)]
         Commands::Agent { command } => match command {
             AgentCommands::Start { timeout } => {
                 agent::handle_start(timeout * 60, json)?;

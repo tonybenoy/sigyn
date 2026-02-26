@@ -4,18 +4,55 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditAction {
     VaultCreated,
-    SecretRead { key: String },
-    SecretWritten { key: String },
-    SecretDeleted { key: String },
-    MemberInvited { fingerprint: KeyFingerprint },
-    MemberRevoked { fingerprint: KeyFingerprint },
+    SecretRead {
+        key: String,
+    },
+    SecretWritten {
+        key: String,
+    },
+    SecretDeleted {
+        key: String,
+    },
+    MemberInvited {
+        fingerprint: KeyFingerprint,
+    },
+    MemberRevoked {
+        fingerprint: KeyFingerprint,
+    },
     PolicyChanged,
     MasterKeyRotated,
-    ForkCreated { fork_id: uuid::Uuid },
-    EnvironmentCreated { name: String },
-    EnvironmentPromoted { source: String, target: String },
+    ForkCreated {
+        fork_id: uuid::Uuid,
+    },
+    EnvironmentCreated {
+        name: String,
+    },
+    EnvironmentPromoted {
+        source: String,
+        target: String,
+    },
     BreakGlassActivated,
-    IdentityCreated { fingerprint: KeyFingerprint },
+    IdentityCreated {
+        fingerprint: KeyFingerprint,
+    },
+    /// Secrets exported via `sigyn run export`
+    SecretsExported {
+        env: String,
+        format: String,
+    },
+    /// Secrets injected into a child process via `sigyn run exec`
+    SecretsInjected {
+        env: String,
+        command: String,
+    },
+    /// Secrets served over a Unix socket via `sigyn run serve`
+    SecretsServed {
+        env: String,
+    },
+    /// Secrets listed via `sigyn secret list`
+    SecretsListed {
+        env: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

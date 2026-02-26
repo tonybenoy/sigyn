@@ -158,6 +158,33 @@ fn save_org_manifest(
     Ok(())
 }
 
+/// Look up the verifying key for a node's owner. Tries local identity store first,
+/// then falls back to the loaded identity if it is the owner.
+fn resolve_owner_verifying_key(
+    manifest: &NodeManifest,
+    loaded: &sigyn_engine::identity::LoadedIdentity,
+    store: &IdentityStore,
+) -> sigyn_engine::crypto::keys::VerifyingKeyWrapper {
+    if loaded.identity.fingerprint == manifest.owner {
+        return loaded.identity.signing_pubkey.clone();
+    }
+    if let Ok(identities) = store.list() {
+        if let Some(owner_id) = identities
+            .iter()
+            .find(|id| id.fingerprint == manifest.owner)
+        {
+            return owner_id.signing_pubkey.clone();
+        }
+    }
+    // Fall back — this may fail verification, but we warn
+    eprintln!(
+        "{} owner identity {} not found locally; policy verification may fail",
+        console::style("warning:").yellow().bold(),
+        manifest.owner.to_hex()
+    );
+    loaded.identity.signing_pubkey.clone()
+}
+
 pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()> {
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());
@@ -465,22 +492,20 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 let loaded = load_identity(&store, identity)?;
                 let manifest = load_org_manifest(&manifest_path)?;
+                let owner_vk = resolve_owner_verifying_key(&manifest, &loaded, &store);
 
-                // Unseal to read policy (verify header signature)
+                // Unseal to read policy (verify header signature with owner's key)
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header = envelope::verify_and_load_header(
-                    &header_bytes,
-                    manifest.node_id,
-                    &loaded.identity.signing_pubkey,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
+                let header =
+                    envelope::verify_and_load_header(&header_bytes, manifest.node_id, &owner_vk)
+                        .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let policy = VaultPolicy::load_signed(
                     &hierarchy_paths.policy_path(&org_path),
                     &cipher,
-                    &loaded.identity.signing_pubkey,
+                    &owner_vk,
                     &manifest.node_id,
                 )?;
 
@@ -535,27 +560,25 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 let loaded = load_identity(&store, identity)?;
                 let manifest = load_org_manifest(&manifest_path)?;
+                let owner_vk = resolve_owner_verifying_key(&manifest, &loaded, &store);
 
                 let role = sigyn_engine::policy::Role::from_str_name(&role)
                     .ok_or_else(|| anyhow::anyhow!("unknown role: use readonly, auditor, operator, contributor, manager, admin, owner"))?;
 
                 let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
-                // Unseal to modify policy (verify header signature)
+                // Unseal to modify policy (verify header signature with owner's key)
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header = envelope::verify_and_load_header(
-                    &header_bytes,
-                    manifest.node_id,
-                    &loaded.identity.signing_pubkey,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
+                let header =
+                    envelope::verify_and_load_header(&header_bytes, manifest.node_id, &owner_vk)
+                        .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let mut policy = VaultPolicy::load_signed(
                     &hierarchy_paths.policy_path(&org_path),
                     &cipher,
-                    &loaded.identity.signing_pubkey,
+                    &owner_vk,
                     &manifest.node_id,
                 )?;
 
@@ -593,23 +616,21 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 let loaded = load_identity(&store, identity)?;
                 let manifest = load_org_manifest(&manifest_path)?;
+                let owner_vk = resolve_owner_verifying_key(&manifest, &loaded, &store);
 
                 let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header = envelope::verify_and_load_header(
-                    &header_bytes,
-                    manifest.node_id,
-                    &loaded.identity.signing_pubkey,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
+                let header =
+                    envelope::verify_and_load_header(&header_bytes, manifest.node_id, &owner_vk)
+                        .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let mut policy = VaultPolicy::load_signed(
                     &hierarchy_paths.policy_path(&org_path),
                     &cipher,
-                    &loaded.identity.signing_pubkey,
+                    &owner_vk,
                     &manifest.node_id,
                 )?;
 
@@ -658,12 +679,13 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                         continue;
                     }
                     let manifest = load_org_manifest(&mp)?;
+                    let owner_vk = resolve_owner_verifying_key(&manifest, &loaded, &store);
 
                     let header_bytes = std::fs::read(hierarchy_paths.members_path(cp))?;
                     let header = envelope::verify_and_load_header(
                         &header_bytes,
                         manifest.node_id,
-                        &loaded.identity.signing_pubkey,
+                        &owner_vk,
                     )
                     .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                     let master_key = envelope::unseal_vault_key(
@@ -675,7 +697,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     let policy = VaultPolicy::load_signed(
                         &hierarchy_paths.policy_path(cp),
                         &cipher,
-                        &loaded.identity.signing_pubkey,
+                        &owner_vk,
                         &manifest.node_id,
                     )?;
 

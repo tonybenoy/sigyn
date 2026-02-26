@@ -292,6 +292,11 @@ pub fn unlock_vault(
     let loaded = load_identity(&store, effective_identity)?;
     let fingerprint = loaded.identity.fingerprint.clone();
 
+    // Verify no symlinks in vault path to prevent symlink-based attacks
+    paths
+        .safe_vault_dir(&vault_name)
+        .map_err(|e| anyhow::anyhow!("vault path security check failed: {}", e))?;
+
     // Read manifest data first (gives better "vault not found" error)
     let manifest_data = std::fs::read(paths.manifest_path(&vault_name))
         .context(format!("vault '{}' not found", vault_name))?;
@@ -364,7 +369,43 @@ pub fn unlock_vault(
                 let local_state = pin_store.entry_mut(&vault_name);
                 match &local_state.pin {
                     None => {
-                        // First access: pin the owner
+                        // First access: print prominent warning about TOFU pinning
+                        eprintln!(
+                            "\n{}\n{}\n{}\n",
+                            style("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                                .yellow()
+                                .bold(),
+                            style("@  FIRST ACCESS: Pinning vault owner    @")
+                                .yellow()
+                                .bold(),
+                            style("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                                .yellow()
+                                .bold(),
+                        );
+                        eprintln!("  Vault:       {}", style(&vault_name).bold());
+                        eprintln!("  Owner:       {}", style(manifest.owner.to_hex()).cyan());
+                        eprintln!(
+                            "  {} Verify this fingerprint with the vault owner out-of-band.",
+                            style("!").red().bold()
+                        );
+                        eprintln!();
+
+                        // If SIGYN_VERIFY_OWNER is set, verify against it before pinning
+                        if let Ok(expected) = std::env::var("SIGYN_VERIFY_OWNER") {
+                            if manifest.owner.to_hex() != expected {
+                                anyhow::bail!(
+                                    "owner verification failed: expected {}, found {}.\n  \
+                                     Unset SIGYN_VERIFY_OWNER to skip this check.",
+                                    expected,
+                                    manifest.owner.to_hex()
+                                );
+                            }
+                            eprintln!(
+                                "  {} Owner fingerprint verified via SIGYN_VERIFY_OWNER",
+                                style("✓").green().bold()
+                            );
+                        }
+
                         local_state.pin = Some(sigyn_engine::vault::VaultPin {
                             vault_id,
                             owner_fingerprint: manifest.owner.clone(),
@@ -443,14 +484,73 @@ pub fn unlock_vault(
     // Resolve env prefix matching against manifest environments
     let env_name = resolve_env_name(&env_name, &manifest)?;
 
-    // Load policy (returns empty policy if file doesn't exist)
+    // Determine the vault owner's verifying key for policy signature verification.
+    // We already verified the header with this key above; reuse the same lookup.
+    let owner_verifying_key: sigyn_engine::crypto::keys::VerifyingKeyWrapper = {
+        if loaded.identity.fingerprint == manifest.owner {
+            loaded.identity.signing_pubkey.clone()
+        } else if let Some(owner_id) = identities
+            .iter()
+            .find(|id| id.fingerprint == manifest.owner)
+        {
+            owner_id.signing_pubkey.clone()
+        } else {
+            // Fall back to TOFU pin if available
+            let home = sigyn_home();
+            let dk = sigyn_engine::device::load_or_create_device_key(&home).ok();
+            let pin_key = dk.and_then(|dk| {
+                sigyn_engine::vault::local_state::load_pinned_store(&home, &dk)
+                    .ok()
+                    .and_then(|store| {
+                        store.get(&vault_name).and_then(|ls| {
+                            ls.pin.as_ref().and_then(|p| {
+                                if p.owner_signing_pubkey_bytes.len() == 32 {
+                                    let mut arr = [0u8; 32];
+                                    arr.copy_from_slice(&p.owner_signing_pubkey_bytes);
+                                    sigyn_engine::crypto::keys::VerifyingKeyWrapper::from_bytes(
+                                        &arr,
+                                    )
+                                    .ok()
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    })
+            });
+            match pin_key {
+                Some(k) => k,
+                None => {
+                    eprintln!(
+                        "{} cannot determine vault owner's signing key for policy verification",
+                        console::style("warning:").yellow().bold()
+                    );
+                    loaded.identity.signing_pubkey.clone()
+                }
+            }
+        }
+    };
+
+    // Load policy — verify signature with the owner's key, not the current user's.
     let policy = VaultPolicy::load_signed(
         &paths.policy_path(&vault_name),
         &vault_cipher,
-        &loaded.identity.signing_pubkey,
+        &owner_verifying_key,
         &manifest.vault_id,
     )
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "{} policy signature verification failed: {}",
+            console::style("warning:").yellow().bold(),
+            e
+        );
+        eprintln!(
+            "{} falling back to unsigned policy load",
+            console::style("warning:").yellow().bold()
+        );
+        VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &vault_cipher)
+            .unwrap_or_default()
+    });
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();
@@ -498,7 +598,7 @@ pub fn check_access(
     let decision = if let Some(ref org_path_str) = ctx.manifest.org_path {
         // Hierarchical evaluation: build policy chain from vault → root org
         let home = crate::config::sigyn_home();
-        let hierarchy_paths = sigyn_engine::hierarchy::path::HierarchyPaths::new(home);
+        let hierarchy_paths = sigyn_engine::hierarchy::path::HierarchyPaths::new(home.clone());
 
         if let Ok(org_path) = sigyn_engine::hierarchy::path::OrgPath::parse(org_path_str) {
             let mut chain = Vec::new();
@@ -519,13 +619,29 @@ pub fn check_access(
                     continue;
                 }
                 if let Ok(manifest) = super::org::load_org_manifest_path(&mp) {
+                    // Look up the org node owner's verifying key
+                    let org_owner_vk = if ctx.loaded_identity.identity.fingerprint == manifest.owner
+                    {
+                        ctx.loaded_identity.identity.signing_pubkey.clone()
+                    } else {
+                        let store2 =
+                            sigyn_engine::identity::keygen::IdentityStore::new(home.clone());
+                        store2
+                            .list()
+                            .ok()
+                            .and_then(|ids| {
+                                ids.into_iter().find(|id| id.fingerprint == manifest.owner)
+                            })
+                            .map(|id| id.signing_pubkey)
+                            .unwrap_or_else(|| ctx.loaded_identity.identity.signing_pubkey.clone())
+                    };
                     let members_p = hierarchy_paths.members_path(cp);
                     if members_p.exists() {
                         if let Ok(hdr_bytes) = std::fs::read(&members_p) {
                             if let Ok(header) = envelope::verify_and_load_header(
                                 &hdr_bytes,
                                 manifest.node_id,
-                                &ctx.loaded_identity.identity.signing_pubkey,
+                                &org_owner_vk,
                             ) {
                                 if let Ok(mk) = envelope::unseal_vault_key(
                                     &header,
@@ -537,7 +653,7 @@ pub fn check_access(
                                     if let Ok(policy) = VaultPolicy::load_signed(
                                         &hierarchy_paths.policy_path(cp),
                                         &cipher,
-                                        &ctx.loaded_identity.identity.signing_pubkey,
+                                        &org_owner_vk,
                                         &manifest.node_id,
                                     ) {
                                         chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
@@ -885,6 +1001,15 @@ pub fn handle(
         SecretCommands::List { env, reveal } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Read, None)?;
+
+            // Audit the list operation
+            audit(
+                &ctx,
+                AuditAction::SecretsListed {
+                    env: ctx.env_name.clone(),
+                },
+                AuditOutcome::Success,
+            );
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             if !env_path.exists() {

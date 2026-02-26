@@ -151,7 +151,8 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
     let identity = resolve_identity(store, name_or_fp)?;
     let fp_hex = identity.fingerprint.to_hex();
 
-    // Check if the agent has our key cached
+    // Check if the agent has our key cached (Unix only)
+    #[cfg(unix)]
     if let Some(_key_material) = crate::agent::try_agent_unlock(&fp_hex) {
         // Agent has the key — load via passphrase from agent
         // For now, we still need the passphrase to load via the store,
@@ -170,7 +171,8 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
     passphrase.zeroize();
     let loaded = loaded?;
 
-    // Cache in agent for future use (best-effort)
+    // Cache in agent for future use (best-effort, Unix only)
+    #[cfg(unix)]
     if crate::agent::get_agent_socket().is_some() {
         let signing_bytes = loaded.signing_key().to_bytes();
         let encryption_bytes = loaded.encryption_key().to_bytes();

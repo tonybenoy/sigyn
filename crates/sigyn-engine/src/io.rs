@@ -49,6 +49,11 @@ pub fn safe_resolve(base: &Path, target: &Path) -> Result<PathBuf> {
 }
 
 /// Walk up the path components and reject if any existing component is a symlink.
+/// Used by `atomic_write` and by `VaultPaths::safe_vault_dir`.
+pub fn reject_symlinks_in_vault_path(path: &Path) -> Result<()> {
+    reject_symlinks_in_path(path)
+}
+
 fn reject_symlinks_in_path(path: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {

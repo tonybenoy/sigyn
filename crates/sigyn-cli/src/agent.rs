@@ -90,7 +90,14 @@ impl Drop for AgentState {
 }
 
 /// Returns the socket directory and path for the current user.
+/// Prefers `XDG_RUNTIME_DIR` (already user-owned, 0o700) when available.
 fn agent_socket_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        let p = PathBuf::from(xdg);
+        if p.is_dir() {
+            return p.join("sigyn-agent");
+        }
+    }
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/sigyn-agent-{}", uid))
 }
@@ -99,20 +106,43 @@ fn agent_socket_path() -> PathBuf {
     agent_socket_dir().join("agent.sock")
 }
 
+fn session_token_path() -> PathBuf {
+    agent_socket_dir().join("session.token")
+}
+
+/// Verify that a socket file is owned by the current user.
+fn verify_socket_ownership(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::getuid() };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.uid() == uid,
+        Err(_) => false,
+    }
+}
+
 /// Get the socket path from environment or default location.
+/// Verifies socket ownership before returning.
 pub fn get_agent_socket() -> Option<PathBuf> {
     if let Ok(sock) = std::env::var("SIGYN_AGENT_SOCK") {
         let p = PathBuf::from(sock);
-        if p.exists() {
+        if p.exists() && verify_socket_ownership(&p) {
             return Some(p);
         }
     }
     let default = agent_socket_path();
-    if default.exists() {
+    if default.exists() && verify_socket_ownership(&default) {
         Some(default)
     } else {
         None
     }
+}
+
+/// Read the session token for CACHE command authentication.
+fn read_session_token() -> Option<String> {
+    let path = session_token_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Try to load identity via agent. Returns the base64-encoded key material if cached.
@@ -178,14 +208,17 @@ pub fn agent_passphrase(fingerprint: &str, passphrase: &str) -> Result<Vec<u8>> 
 }
 
 /// Cache a loaded identity's key material in the agent.
+/// Reads the session token from the socket directory for authentication.
 pub fn agent_cache(fingerprint: &str, key_material: &[u8]) -> Result<()> {
     let sock_path = get_agent_socket().ok_or_else(|| anyhow::anyhow!("agent socket not found"))?;
     let mut stream =
         UnixStream::connect(&sock_path).context("failed to connect to agent socket")?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
+    let token =
+        read_session_token().ok_or_else(|| anyhow::anyhow!("agent session token not found"))?;
     let b64 = base64_encode(key_material);
-    writeln!(stream, "CACHE {} {}", fingerprint, b64)?;
+    writeln!(stream, "CACHE {} {} {}", token, fingerprint, b64)?;
     stream.flush()?;
 
     let mut reader = BufReader::new(&stream);
@@ -212,7 +245,12 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Handle a single client connection.
-fn handle_client(stream: UnixStream, state: Arc<Mutex<AgentState>>, home: PathBuf) {
+fn handle_client(
+    stream: UnixStream,
+    state: Arc<Mutex<AgentState>>,
+    home: PathBuf,
+    session_token: Arc<String>,
+) {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
 
@@ -269,15 +307,24 @@ fn handle_client(stream: UnixStream, state: Arc<Mutex<AgentState>>, home: PathBu
                 }
             }
             Some("CACHE") => {
-                let fp = parts.get(1).unwrap_or(&"").to_string();
-                let b64 = parts.get(2).unwrap_or(&"");
-                match base64_decode(b64) {
-                    Ok(material) => {
-                        state.lock().unwrap().insert(fp, material);
-                        let _ = writeln!(writer, "OK");
-                    }
-                    Err(_) => {
-                        let _ = writeln!(writer, "ERR invalid base64");
+                // CACHE requires session token authentication.
+                // Protocol: CACHE <token> <fingerprint> <base64-material>
+                // Re-parse with 4 parts for the token
+                let cache_parts: Vec<&str> = trimmed.splitn(4, ' ').collect();
+                let token = cache_parts.get(1).unwrap_or(&"");
+                if *token != session_token.as_str() {
+                    let _ = writeln!(writer, "ERR unauthorized: invalid session token");
+                } else {
+                    let fp = cache_parts.get(2).unwrap_or(&"").to_string();
+                    let b64 = cache_parts.get(3).unwrap_or(&"");
+                    match base64_decode(b64) {
+                        Ok(material) => {
+                            state.lock().unwrap().insert(fp, material);
+                            let _ = writeln!(writer, "OK");
+                        }
+                        Err(_) => {
+                            let _ = writeln!(writer, "ERR invalid base64");
+                        }
                     }
                 }
             }
@@ -314,13 +361,20 @@ pub fn start_daemon(timeout_secs: u64) -> Result<()> {
     let sock_dir = agent_socket_dir();
     let sock_path = agent_socket_path();
 
-    // Create socket directory with restricted permissions
-    std::fs::create_dir_all(&sock_dir)?;
+    // Create socket directory with restrictive umask to avoid TOCTOU between
+    // create_dir_all and set_permissions. The umask ensures the directory is
+    // created with 0o700 atomically.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sock_dir, std::fs::Permissions::from_mode(0o700))?;
+        let old_umask = unsafe { libc::umask(0o077) };
+        let result = std::fs::create_dir_all(&sock_dir);
+        unsafe {
+            libc::umask(old_umask);
+        }
+        result?;
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&sock_dir)?;
 
     // Remove stale socket
     if sock_path.exists() {
@@ -337,6 +391,22 @@ pub fn start_daemon(timeout_secs: u64) -> Result<()> {
         std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
+    // Generate and store a random session token for CACHE command authentication.
+    // Only processes that can read the token file (same user) can issue CACHE.
+    let mut token_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
+    let session_token = hex::encode(token_bytes);
+    {
+        let token_path = session_token_path();
+        std::fs::write(&token_path, &session_token)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let session_token = Arc::new(session_token);
+
     let state = Arc::new(Mutex::new(AgentState::new(Duration::from_secs(
         timeout_secs,
     ))));
@@ -352,8 +422,9 @@ pub fn start_daemon(timeout_secs: u64) -> Result<()> {
             Ok(stream) => {
                 let state = Arc::clone(&state);
                 let home = home.clone();
+                let token = Arc::clone(&session_token);
                 std::thread::spawn(move || {
-                    handle_client(stream, state, home);
+                    handle_client(stream, state, home, token);
                 });
             }
             Err(e) => {

@@ -90,17 +90,25 @@ pub fn revoke_member(
         policy.remove_member(fp);
     }
 
-    // 6. Remove from vault_key_slots (but don't rotate vault key)
+    // 6. Remove from vault_key_slots then rotate vault key for remaining members
     for fp in &all_revoked {
         envelope::remove_recipient_v2(header, fp);
     }
 
-    // 7. For each affected environment, rotate the env key for remaining members
-    let mut rotated_env_ciphers = BTreeMap::new();
     let non_revoked_pubkeys: Vec<&(KeyFingerprint, X25519PublicKey)> = remaining_pubkeys
         .iter()
         .filter(|(fp, _)| !all_revoked.contains(fp))
         .collect();
+
+    // Rotate vault key so revoked members can no longer decrypt metadata
+    let non_revoked_owned: Vec<(KeyFingerprint, X25519PublicKey)> = non_revoked_pubkeys
+        .iter()
+        .map(|&(fp, pk)| (fp.clone(), pk.clone()))
+        .collect();
+    let new_vault_key = envelope::rotate_vault_key(header, &non_revoked_owned, vault_id)?;
+
+    // 7. For each affected environment, rotate the env key for remaining members
+    let mut rotated_env_ciphers = BTreeMap::new();
 
     for env_name in &affected_envs {
         // Find which remaining members should have access to this env
@@ -122,7 +130,7 @@ pub fn revoke_member(
     let result = RevocationResult {
         directly_revoked: fingerprint.clone(),
         cascade_revoked,
-        new_vault_cipher: None, // Vault key is not rotated in v2
+        new_vault_cipher: Some(VaultCipher::new(new_vault_key)),
         rotated_env_ciphers,
         affected_envs: affected_envs.into_iter().collect(),
     };
@@ -297,7 +305,7 @@ mod tests {
 
         assert_eq!(result.directly_revoked, member_fp);
         assert!(result.cascade_revoked.is_empty());
-        assert!(result.new_vault_cipher.is_none());
+        assert!(result.new_vault_cipher.is_some());
 
         assert_eq!(result.affected_envs.len(), 2);
         assert!(result.affected_envs.contains(&"dev".to_string()));

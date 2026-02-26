@@ -108,7 +108,36 @@ pub fn handle(
             }
 
             let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
-            match log.verify_chain() {
+
+            // Build key lookup from policy members + owner for signature verification
+            let policy_ref = &ctx.policy;
+            let owner_fp = ctx.manifest.owner.clone();
+            let owner_vk = ctx.loaded_identity.identity.signing_pubkey.clone();
+            let home = crate::config::sigyn_home();
+            let id_store = sigyn_engine::identity::keygen::IdentityStore::new(home);
+            let all_identities = id_store.list().unwrap_or_default();
+
+            let lookup = move |actor: &sigyn_engine::crypto::keys::KeyFingerprint|
+                -> Option<sigyn_engine::crypto::keys::VerifyingKeyWrapper> {
+                // Owner always has access
+                if *actor == owner_fp {
+                    return Some(owner_vk.clone());
+                }
+                // Check policy members
+                if policy_ref.get_member(actor).is_some() {
+                    // Look up in local identity store
+                    if let Some(id) = all_identities.iter().find(|id| id.fingerprint == *actor) {
+                        return Some(id.signing_pubkey.clone());
+                    }
+                }
+                // Former members may have legitimate entries — look up anyway
+                all_identities
+                    .iter()
+                    .find(|id| id.fingerprint == *actor)
+                    .map(|id| id.signing_pubkey.clone())
+            };
+
+            match log.verify_chain_with_keys(Some(lookup)) {
                 Ok(count) => {
                     if json {
                         crate::output::print_json(&serde_json::json!({
@@ -220,7 +249,11 @@ pub fn handle(
             .map_err(|e| anyhow::anyhow!("failed to derive witness cipher: {}", e))?;
             let mut witness_log =
                 sigyn_engine::audit::WitnessLog::open(&witnesses_path, witness_cipher)?;
-            witness_log.add_witness(latest.entry_hash, witness_sig)?;
+            witness_log.add_witness_signed(
+                latest.entry_hash,
+                witness_sig,
+                ctx.loaded_identity.signing_key(),
+            )?;
 
             let witness_count = witness_log.witnesses_for(&latest.entry_hash).len();
 

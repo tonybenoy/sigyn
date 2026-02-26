@@ -60,6 +60,15 @@ impl VaultPaths {
         self.base.join("vaults").join(name)
     }
 
+    /// Return the vault directory after verifying no symlinks exist in the path.
+    /// This prevents symlink-based attacks where a vault directory is replaced
+    /// with a symlink pointing to an attacker-controlled location.
+    pub fn safe_vault_dir(&self, name: &str) -> crate::Result<PathBuf> {
+        let dir = self.vault_dir(name);
+        crate::io::reject_symlinks_in_vault_path(&dir)?;
+        Ok(dir)
+    }
+
     pub fn manifest_path(&self, name: &str) -> PathBuf {
         self.vault_dir(name).join("vault.toml")
     }

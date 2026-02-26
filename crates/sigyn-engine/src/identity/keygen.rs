@@ -6,6 +6,11 @@ pub use sigyn_core::identity::keygen::{Identity, LoadedIdentity};
 use sigyn_core::identity::profile::IdentityProfile;
 use sigyn_core::identity::wrapping::WrappedIdentity;
 
+/// Length of the BLAKE3 keyed MAC appended to identity files.
+const IDENTITY_MAC_LEN: usize = 32;
+/// Context for BLAKE3 keyed hash of identity files.
+const IDENTITY_MAC_CONTEXT: &str = "sigyn-identity-file-v1";
+
 pub struct IdentityStore {
     base_dir: PathBuf,
 }
@@ -57,7 +62,12 @@ impl IdentityStore {
             ));
         }
 
-        let data = ciborium_to_vec(&wrapped)?;
+        let cbor_data = ciborium_to_vec(&wrapped)?;
+        // Append BLAKE3 keyed MAC using device key for integrity protection
+        let device_key = crate::device::load_or_create_device_key(&self.base_dir)?;
+        let mac = compute_identity_mac(&cbor_data, &device_key);
+        let mut data = cbor_data;
+        data.extend_from_slice(mac.as_bytes());
         crate::io::atomic_write(&path, &data)?;
 
         Ok(identity)
@@ -69,7 +79,9 @@ impl IdentityStore {
             return Err(SigynError::IdentityNotFound(fingerprint.to_hex()));
         }
 
-        let data = std::fs::read(&path)?;
+        let file_data = std::fs::read(&path)?;
+        // Verify and strip MAC if present
+        let data = self.verify_and_strip_mac(&path, &file_data)?;
         let wrapped: WrappedIdentity = ciborium_from_slice(&data)?;
 
         let enc_bytes = wrapped.unwrap_encryption_key(passphrase)?;
@@ -99,7 +111,8 @@ impl IdentityStore {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "identity") {
-                let data = std::fs::read(&path)?;
+                let file_data = std::fs::read(&path)?;
+                let data = self.verify_and_strip_mac(&path, &file_data)?;
                 let wrapped: WrappedIdentity = ciborium_from_slice(&data)?;
                 identities.push(Identity {
                     fingerprint: wrapped.fingerprint,
@@ -115,6 +128,42 @@ impl IdentityStore {
     pub fn find_by_name(&self, name: &str) -> Result<Option<Identity>> {
         Ok(self.list()?.into_iter().find(|i| i.profile.name == name))
     }
+
+    /// Verify and strip the BLAKE3 keyed MAC from identity file data.
+    /// If the MAC is missing (old format), warn and rewrite the file with a MAC.
+    fn verify_and_strip_mac(&self, path: &std::path::Path, file_data: &[u8]) -> Result<Vec<u8>> {
+        let device_key = crate::device::load_or_create_device_key(&self.base_dir)?;
+
+        // Try with MAC first (new format: cbor_data || mac[32])
+        if file_data.len() > IDENTITY_MAC_LEN {
+            let (cbor_data, mac_bytes) = file_data.split_at(file_data.len() - IDENTITY_MAC_LEN);
+            let expected = compute_identity_mac(cbor_data, &device_key);
+            if expected.as_bytes() == mac_bytes {
+                return Ok(cbor_data.to_vec());
+            }
+        }
+
+        // Try without MAC (old format) — verify it's valid CBOR
+        let _: WrappedIdentity = ciborium_from_slice(file_data)?;
+
+        // Migration: rewrite with MAC appended
+        eprintln!(
+            "warning: identity file {} missing integrity MAC — upgrading",
+            path.display()
+        );
+        let mac = compute_identity_mac(file_data, &device_key);
+        let mut new_data = file_data.to_vec();
+        new_data.extend_from_slice(mac.as_bytes());
+        let _ = crate::io::atomic_write(path, &new_data);
+
+        Ok(file_data.to_vec())
+    }
+}
+
+/// Compute a BLAKE3 keyed MAC for identity file integrity.
+fn compute_identity_mac(data: &[u8], device_key: &[u8; 32]) -> blake3::Hash {
+    let key = blake3::derive_key(IDENTITY_MAC_CONTEXT, device_key);
+    blake3::keyed_hash(&key, data)
 }
 
 fn ciborium_to_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {

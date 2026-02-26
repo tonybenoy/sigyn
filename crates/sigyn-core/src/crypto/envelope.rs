@@ -327,6 +327,27 @@ pub fn rotate_env_key(
     Ok(new_key)
 }
 
+/// Rotate the vault-level key: generate a new random key and re-seal for remaining recipients.
+/// This should be called during revocation to prevent revoked members from decrypting
+/// metadata (manifest, policy) encrypted with the old vault key.
+/// Returns the new 32-byte vault key.
+pub fn rotate_vault_key(
+    header: &mut EnvelopeHeader,
+    remaining_pubkeys: &[(KeyFingerprint, X25519PublicKey)],
+    vault_id: Uuid,
+) -> Result<[u8; 32]> {
+    let mut new_key = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut new_key);
+
+    let mut new_slots = Vec::with_capacity(remaining_pubkeys.len());
+    for (fp, pubkey) in remaining_pubkeys {
+        let aad = slot_aad(fp, &vault_id);
+        new_slots.push(make_slot(&new_key, pubkey, &vault_id, &aad)?);
+    }
+    header.vault_key_slots = new_slots;
+    Ok(new_key)
+}
+
 /// Serialize an EnvelopeHeader to CBOR, then wrap it in the SGSN signed format.
 ///
 /// The signature covers `blake3(cbor_bytes || vault_id_bytes)`.

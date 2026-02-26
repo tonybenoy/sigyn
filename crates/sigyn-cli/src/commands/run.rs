@@ -4,7 +4,10 @@ use console::style;
 use sigyn_engine::policy::engine::AccessAction;
 use sigyn_engine::vault::env_file;
 
-use super::secret::{check_access, unlock_vault};
+use sigyn_engine::audit::entry::{AuditAction, AuditOutcome};
+use sigyn_engine::audit::AuditLog;
+
+use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 use crate::project_config::load_project_config;
 
 #[derive(Args)]
@@ -75,6 +78,27 @@ pub enum RunCommands {
         #[arg(long)]
         socket: Option<String>,
     },
+}
+
+fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
+    let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+    let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.vault_cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
+        let _ = log.append(
+            &ctx.fingerprint,
+            action,
+            Some(ctx.env_name.clone()),
+            AuditOutcome::Success,
+            ctx.loaded_identity.signing_key(),
+        );
+    }
 }
 
 /// Resolve the effective environment from flags and project config.
@@ -229,6 +253,15 @@ fn exec_with_secrets(
     let encrypted = env_file::read_encrypted_env(&env_path)?;
     let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
+    // Audit the secret injection
+    audit_log(
+        &ctx,
+        AuditAction::SecretsInjected {
+            env: ctx.env_name.clone(),
+            command: command.first().cloned().unwrap_or_default(),
+        },
+    );
+
     if dry_run {
         println!(
             "[dry-run] Vault: '{}', env: '{}', secrets: {}",
@@ -303,6 +336,15 @@ pub fn handle(
             let encrypted = env_file::read_encrypted_env(&env_path)?;
             let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
+            // Audit the secret export
+            audit_log(
+                &ctx,
+                AuditAction::SecretsExported {
+                    env: ctx.env_name.clone(),
+                    format: format.clone(),
+                },
+            );
+
             let export_format = crate::inject::ExportFormat::from_str(&format)?;
             let output = crate::inject::export_secrets(&plaintext, export_format, &name)?;
 
@@ -323,6 +365,14 @@ pub fn handle(
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
             let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
+
+            // Audit the secret serving
+            audit_log(
+                &ctx,
+                AuditAction::SecretsServed {
+                    env: ctx.env_name.clone(),
+                },
+            );
 
             let socket_path = socket.unwrap_or_else(|| {
                 let sigyn_dir = crate::config::sigyn_home();

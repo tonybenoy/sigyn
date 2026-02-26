@@ -529,6 +529,7 @@ pub fn handle(
             // Mutable state that accumulates across iterations
             let mut header: EnvelopeHeader = ctx.header.clone();
             let mut policy = ctx.policy.clone();
+            let mut effective_vault_cipher_key = *ctx.vault_cipher.key_bytes();
 
             for fingerprint in &fingerprints {
                 let target_fp = match KeyFingerprint::from_hex(fingerprint) {
@@ -626,6 +627,23 @@ pub fn handle(
                     }
                 }
 
+                // Re-encrypt manifest and policy with new vault cipher if rotated
+                if let Some(ref new_vc) = result_v2.new_vault_cipher {
+                    // Re-encrypt manifest with new vault key
+                    let manifest_path = ctx.paths.manifest_path(&ctx.vault_name);
+                    let manifest_data = std::fs::read(&manifest_path)?;
+                    let manifest = sigyn_engine::vault::VaultManifest::from_sealed_bytes(
+                        &ctx.vault_cipher,
+                        &manifest_data,
+                        ctx.manifest.vault_id,
+                    )?;
+                    let resealed = manifest.to_sealed_bytes(new_vc)?;
+                    crate::config::secure_write(&manifest_path, &resealed)?;
+
+                    // Update the effective vault cipher key for saving policy below
+                    effective_vault_cipher_key = *new_vc.key_bytes();
+                }
+
                 // Audit
                 audit_log(
                     &ctx,
@@ -699,10 +717,13 @@ pub fn handle(
             }
 
             // Save policy and header once after all revocations
+            // Use effective vault cipher which may have been rotated during revocation
+            let save_cipher =
+                sigyn_engine::crypto::vault_cipher::VaultCipher::new(effective_vault_cipher_key);
             policy
                 .save_signed(
                     &ctx.paths.policy_path(&ctx.vault_name),
-                    &ctx.vault_cipher,
+                    &save_cipher,
                     ctx.loaded_identity.signing_key(),
                     &ctx.manifest.vault_id,
                 )

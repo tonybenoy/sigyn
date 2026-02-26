@@ -7,6 +7,12 @@ const ARGON2_M_COST: u32 = 131072; // 128 MB
 const ARGON2_T_COST: u32 = 4;
 const ARGON2_P_COST: u32 = 4;
 
+/// Minimum acceptable KDF parameters to prevent downgrade attacks.
+/// These are checked when loading identity files to reject weak parameters.
+const MIN_M_COST: u32 = 65536; // 64 MB minimum
+const MIN_T_COST: u32 = 3;
+const MIN_P_COST: u32 = 1;
+
 fn argon2_instance() -> Argon2<'static> {
     let (m, t, p) = if cfg!(feature = "fast-kdf") {
         (1024, 1, 1)
@@ -15,6 +21,36 @@ fn argon2_instance() -> Argon2<'static> {
     };
     let params = Params::new(m, t, p, Some(32)).expect("hardcoded argon2 params are valid");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// Validate that KDF parameters meet minimum security thresholds.
+/// This prevents downgrade attacks where an attacker replaces an identity file
+/// with one using weak KDF parameters.
+///
+/// Note: when `fast-kdf` feature is enabled (for testing), this check is relaxed.
+pub fn validate_kdf_params(m_cost: u32, t_cost: u32, p_cost: u32) -> Result<()> {
+    if cfg!(feature = "fast-kdf") {
+        return Ok(());
+    }
+    if m_cost < MIN_M_COST {
+        return Err(SigynError::PolicyViolation(format!(
+            "KDF memory cost {} is below minimum {} — identity file may be tampered",
+            m_cost, MIN_M_COST
+        )));
+    }
+    if t_cost < MIN_T_COST {
+        return Err(SigynError::PolicyViolation(format!(
+            "KDF time cost {} is below minimum {} — identity file may be tampered",
+            t_cost, MIN_T_COST
+        )));
+    }
+    if p_cost < MIN_P_COST {
+        return Err(SigynError::PolicyViolation(format!(
+            "KDF parallelism {} is below minimum {} — identity file may be tampered",
+            p_cost, MIN_P_COST
+        )));
+    }
+    Ok(())
 }
 
 /// Wrap a private key with a passphrase-derived key.

@@ -49,6 +49,18 @@ pub fn validate_delegation(
         )));
     }
 
+    // If the inviter was themselves delegated, verify the delegation chain integrity:
+    // the inviter's delegated_by must point to a valid member who actually signed
+    // the invitation (checked via policy membership).
+    if let Some(ref delegator_fp) = inviter.delegated_by {
+        if policy.get_member(delegator_fp).is_none() {
+            return Err(SigynError::PolicyViolation(format!(
+                "inviter's delegator {} is not a current policy member — delegation chain broken",
+                delegator_fp.to_hex()
+            )));
+        }
+    }
+
     Ok(())
 }
 

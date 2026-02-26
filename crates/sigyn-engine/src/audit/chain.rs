@@ -7,8 +7,8 @@ use crate::crypto::vault_cipher::VaultCipher;
 use crate::error::{Result, SigynError};
 
 /// Verify that the audit log entry at `expected_sequence` still has the
-/// expected hash. This detects tampering or rollback of the audit log
-/// after a `sync pull`.
+/// expected hash. Also checks for gaps in sequence numbers from 0 to
+/// `expected_sequence` to detect selective deletion of entries.
 pub fn verify_audit_continuity(
     audit_path: &Path,
     cipher: &VaultCipher,
@@ -21,26 +21,72 @@ pub fn verify_audit_continuity(
     let file = std::fs::File::open(audit_path)?;
     let reader = std::io::BufReader::new(file);
 
+    let mut found_target = false;
+    let mut seen = vec![false; (expected_sequence + 1) as usize];
+
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let entry = decode_audit_line(&line, cipher)?;
+        if entry.sequence <= expected_sequence {
+            seen[entry.sequence as usize] = true;
+        }
         if entry.sequence == expected_sequence {
             if entry.entry_hash == expected_hash {
-                return Ok(());
+                found_target = true;
             } else {
                 return Err(SigynError::AuditChainBroken(expected_sequence));
             }
         }
-        if entry.sequence > expected_sequence {
-            break;
+    }
+
+    if !found_target {
+        return Err(SigynError::AuditChainBroken(expected_sequence));
+    }
+
+    // Check for gaps: every sequence from 0..=expected_sequence must be present
+    for (i, present) in seen.iter().enumerate() {
+        if !present {
+            return Err(SigynError::AuditChainBroken(i as u64));
         }
     }
 
-    // Entry not found at all — log was truncated
-    Err(SigynError::AuditChainBroken(expected_sequence))
+    Ok(())
+}
+
+/// Verify completeness of the audit log: scan all entries and verify
+/// no sequence gaps exist. Returns the highest sequence number.
+pub fn verify_completeness(audit_path: &Path, cipher: &VaultCipher) -> Result<u64> {
+    if !audit_path.exists() {
+        return Ok(0);
+    }
+    let file = std::fs::File::open(audit_path)?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut sequences = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = decode_audit_line(&line, cipher)?;
+        sequences.push(entry.sequence);
+    }
+
+    if sequences.is_empty() {
+        return Ok(0);
+    }
+
+    sequences.sort_unstable();
+    for (i, &seq) in sequences.iter().enumerate() {
+        if seq != i as u64 {
+            return Err(SigynError::AuditChainBroken(i as u64));
+        }
+    }
+
+    Ok(*sequences.last().unwrap())
 }
 
 pub struct AuditLog {
@@ -224,16 +270,21 @@ impl AuditLog {
 
             // Verify Ed25519 signature if key lookup is available
             if let Some(ref lookup) = lookup_key {
-                if let Some(verifying_key) = lookup(&entry.actor) {
-                    if verifying_key
-                        .verify(&entry.entry_hash, &entry.signature)
-                        .is_err()
-                    {
+                match lookup(&entry.actor) {
+                    Some(verifying_key) => {
+                        if verifying_key
+                            .verify(&entry.entry_hash, &entry.signature)
+                            .is_err()
+                        {
+                            return Err(SigynError::AuditChainBroken(entry.sequence));
+                        }
+                    }
+                    None => {
+                        // Unknown actor = potentially tampered entry.
+                        // Fail verification for entries by actors not in the policy.
                         return Err(SigynError::AuditChainBroken(entry.sequence));
                     }
                 }
-                // If the actor's key is not found, we skip signature verification
-                // for that entry (they may have been removed from the vault).
             }
 
             prev_hash = Some(entry.entry_hash);

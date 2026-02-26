@@ -9,6 +9,15 @@ pub fn run_with_secrets(env: &PlaintextEnv, command: &[String], inherit_env: boo
         anyhow::bail!("no command specified");
     }
 
+    // Warn about /proc visibility when verbose mode is on
+    if std::env::var("SIGYN_VERBOSE").is_ok() {
+        eprintln!(
+            "warning: secrets will be visible in /proc/{{}}/environ of the child process. \
+             This is inherent to environment variable injection. Use `sigyn run serve` \
+             for socket-based injection if this is a concern."
+        );
+    }
+
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..]);
 

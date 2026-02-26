@@ -22,6 +22,8 @@ pub trait VaultPolicyExt: Sized {
         verifying_key: &VerifyingKeyWrapper,
         vault_id: &Uuid,
     ) -> Result<Self>;
+    /// Load an encrypted policy without signature verification (migration fallback).
+    fn load_encrypted(path: &Path, cipher: &VaultCipher) -> Result<Self>;
 }
 
 impl VaultPolicyExt for VaultPolicy {
@@ -47,6 +49,14 @@ impl VaultPolicyExt for VaultPolicy {
         }
         let data = std::fs::read(path)?;
         Self::from_signed_encrypted_bytes(&data, cipher, verifying_key, vault_id)
+    }
+
+    fn load_encrypted(path: &Path, cipher: &VaultCipher) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let data = std::fs::read(path)?;
+        Self::from_encrypted_bytes(&data, cipher)
     }
 }
 

@@ -43,7 +43,30 @@ pub fn load_project_config() -> Option<ProjectConfig> {
         return None;
     }
     let cwd = std::env::current_dir().ok()?;
-    if let Some((cfg, _)) = find_project_config(&cwd) {
+    if let Some((cfg, found_dir)) = find_project_config(&cwd) {
+        // Warn if .sigyn.toml is in a git-tracked directory (could be modified by untrusted party)
+        if found_dir.join(".git").exists() || has_git_parent(&found_dir) {
+            eprintln!(
+                "warning: using .sigyn.toml from git-tracked directory {}",
+                found_dir.display()
+            );
+            eprintln!("warning: verify this file was not modified by an untrusted party");
+        }
+
+        // If .sigyn.toml sets identity in a git-tracked dir, require explicit trust
+        if cfg
+            .project
+            .as_ref()
+            .and_then(|p| p.identity.as_ref())
+            .is_some()
+            && std::env::var("SIGYN_TRUST_PROJECT_CONFIG").is_err()
+            && (found_dir.join(".git").exists() || has_git_parent(&found_dir))
+        {
+            eprintln!(
+                "warning: .sigyn.toml sets identity — set SIGYN_TRUST_PROJECT_CONFIG=1 to trust"
+            );
+        }
+
         return Some(cfg);
     }
 
@@ -56,6 +79,19 @@ pub fn load_project_config() -> Option<ProjectConfig> {
     }
 
     None
+}
+
+/// Check if any parent directory has a .git directory (indicates git tracking).
+fn has_git_parent(dir: &Path) -> bool {
+    let mut current = dir.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return true;
+        }
+        if !current.pop() {
+            return false;
+        }
+    }
 }
 
 /// Write a `.sigyn.toml` project config file to `path`.

@@ -171,13 +171,56 @@ impl GitSyncEngine {
         Ok(oid)
     }
 
+    /// Push to remote. By default, verifies that the local HEAD descends from
+    /// the remote HEAD to prevent accidental force-pushes. Pass `force = true`
+    /// to override this check.
     pub fn push(&self, remote_name: &str, branch: &str) -> Result<()> {
+        self.push_with_options(remote_name, branch, false)
+    }
+
+    pub fn push_with_options(&self, remote_name: &str, branch: &str, force: bool) -> Result<()> {
         let repo = self.open_repo()?;
+
+        // Force-push detection: fetch remote HEAD and verify we descend from it
+        if !force {
+            let mut remote = repo
+                .find_remote(remote_name)
+                .map_err(|e| SigynError::GitError(e.to_string()))?;
+            let mut fetch_opts = git2::FetchOptions::new();
+            fetch_opts.remote_callbacks(make_callbacks());
+            // Ignore fetch errors (remote may not exist yet)
+            if remote.fetch(&[branch], Some(&mut fetch_opts), None).is_ok() {
+                let remote_ref = format!("refs/remotes/{}/{}", remote_name, branch);
+                if let Ok(reference) = repo.find_reference(&remote_ref) {
+                    if let Some(remote_oid) = reference.target() {
+                        if let Ok(local_ref) = repo.head() {
+                            if let Some(local_oid) = local_ref.target() {
+                                let descends = repo
+                                    .graph_descendant_of(local_oid, remote_oid)
+                                    .unwrap_or(false);
+                                let is_same = local_oid == remote_oid;
+                                if !descends && !is_same {
+                                    return Err(SigynError::GitError(
+                                        "push rejected: local HEAD does not descend from remote HEAD. \
+                                         This would be a force-push. Use --force to override."
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut remote = repo
             .find_remote(remote_name)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
-
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
+        let refspec = if force {
+            format!("+refs/heads/{}:refs/heads/{}", branch, branch)
+        } else {
+            format!("refs/heads/{}:refs/heads/{}", branch, branch)
+        };
         let mut push_opts = git2::PushOptions::new();
         push_opts.remote_callbacks(make_callbacks());
         remote
