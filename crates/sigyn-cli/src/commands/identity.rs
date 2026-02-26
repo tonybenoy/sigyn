@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use console::style;
+#[cfg(unix)]
+use sigyn_engine::crypto::{SigningKeyPair, X25519PrivateKey};
 use sigyn_engine::identity::keygen::IdentityStore;
 use sigyn_engine::identity::{Identity, IdentityProfile, LoadedIdentity};
 use zeroize::Zeroize;
@@ -153,10 +155,15 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
 
     // Check if the agent has our key cached (Unix only)
     #[cfg(unix)]
-    if let Some(_key_material) = crate::agent::try_agent_unlock(&fp_hex) {
-        // Agent has the key cached — currently used for the PASSPHRASE protocol.
-        // The agent returns the passphrase which is then used by the store to
-        // derive the wrapping key and decrypt the identity.
+    if let Some(key_material) = crate::agent::try_agent_unlock(&fp_hex) {
+        if key_material.len() == 64 {
+            let signing_bytes: [u8; 32] = key_material[..32].try_into().expect("checked length");
+            let encryption_bytes: [u8; 32] =
+                key_material[32..64].try_into().expect("checked length");
+            let signing_key = SigningKeyPair::from_bytes(&signing_bytes);
+            let encryption_key = X25519PrivateKey::from_bytes(encryption_bytes);
+            return Ok(LoadedIdentity::new(identity, encryption_key, signing_key));
+        }
     }
 
     let mut passphrase = read_passphrase(&format!(
