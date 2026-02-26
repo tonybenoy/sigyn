@@ -8,7 +8,12 @@ use super::secret::{check_access, unlock_vault};
 use crate::project_config::load_project_config;
 
 #[derive(Args)]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    after_long_help = "Named commands can be defined in .sigyn.toml under [commands].\n\
+        Run 'sigyn run' with no arguments to see available named commands.\n\n\
+        Inline secret refs: use {{KEY}} in command args to substitute secrets."
+)]
 pub struct RunArgs {
     #[command(subcommand)]
     pub command: Option<RunCommands>,
@@ -227,6 +232,7 @@ fn exec_with_secrets(
             ctx.env_name,
             plaintext.len()
         );
+        // Show original command (before substitution) to avoid leaking secret values
         println!("[dry-run] Command: {}", command.join(" "));
         println!(
             "[dry-run] Clean env: {}",
@@ -239,7 +245,18 @@ fn exec_with_secrets(
         return Ok(());
     }
 
-    let exit_code = crate::inject::run_with_secrets(&plaintext, command, !exec.clean)?;
+    // Substitute inline secret refs (e.g. {{KEY}}) in command args.
+    // Note: substituted values will be visible in the process argv (e.g. via `ps`).
+    // For sensitive values, prefer env var injection over inline refs.
+    let substituted = crate::inject::process::substitute_secret_refs(command, &plaintext);
+    if substituted != command {
+        eprintln!(
+            "{} inline secret refs substituted into command args (values visible in process list)",
+            style("warning:").yellow().bold()
+        );
+    }
+
+    let exit_code = crate::inject::run_with_secrets(&plaintext, &substituted, !exec.clean)?;
     std::process::exit(exit_code);
 }
 
@@ -308,6 +325,113 @@ pub fn handle(
                 command = resolved;
             }
             exec_with_secrets(&args.exec, vault, identity, &command, dry_run)
+        }
+    }
+}
+
+/// Watch for secret file changes and restart the child command.
+pub fn handle_watch(
+    vault: Option<&str>,
+    identity: Option<&str>,
+    env: Option<&str>,
+    command: &[String],
+    interval: u64,
+    clean: bool,
+) -> Result<()> {
+    use std::process::Command;
+    use std::time::Duration;
+
+    if command.is_empty() {
+        anyhow::bail!(
+            "no command specified\n\nUsage: sigyn watch [--interval <secs>] -- <command>"
+        );
+    }
+
+    let ctx = unlock_vault(identity, vault, env)?;
+    check_access(&ctx, AccessAction::Read, None)?;
+
+    let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
+    if !env_path.exists() {
+        anyhow::bail!("environment '{}' has no secrets", ctx.env_name);
+    }
+
+    let poll_duration = Duration::from_secs(interval);
+
+    // Helper to get mtime of the env file
+    let get_mtime =
+        || -> Result<std::time::SystemTime> { Ok(std::fs::metadata(&env_path)?.modified()?) };
+
+    // Helper to decrypt and spawn
+    let spawn_child = |cmd: &[String],
+                       cipher: &sigyn_engine::crypto::vault_cipher::VaultCipher|
+     -> Result<std::process::Child> {
+        let encrypted = env_file::read_encrypted_env(&env_path)?;
+        let plaintext = env_file::decrypt_env(&encrypted, cipher)?;
+        let cmd = crate::inject::process::substitute_secret_refs(cmd, &plaintext);
+
+        let mut proc = Command::new(&cmd[0]);
+        proc.args(&cmd[1..]);
+        if !clean {
+            // inherit parent env (default)
+        } else {
+            proc.env_clear();
+        }
+        for (key, entry) in &plaintext.entries {
+            if let Some(val) = entry.value.as_str() {
+                proc.env(key, val);
+            }
+        }
+        Ok(proc.spawn()?)
+    };
+
+    let mut last_mtime = get_mtime()?;
+
+    eprintln!(
+        "{} watching env '{}' (poll every {}s). Press Ctrl+C to stop.",
+        style("watch:").cyan().bold(),
+        ctx.env_name,
+        interval
+    );
+
+    let mut child = spawn_child(command, &ctx.cipher)?;
+
+    loop {
+        std::thread::sleep(poll_duration);
+
+        // Check if child exited on its own
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(1);
+                eprintln!(
+                    "{} process exited with code {}",
+                    style("watch:").cyan().bold(),
+                    code
+                );
+                std::process::exit(code);
+            }
+            Ok(None) => {} // still running
+            Err(e) => {
+                eprintln!(
+                    "{} failed to check child status: {}",
+                    style("warning:").yellow().bold(),
+                    e
+                );
+            }
+        }
+
+        // Check for file changes
+        match get_mtime() {
+            Ok(mtime) if mtime != last_mtime => {
+                eprintln!(
+                    "{} secrets changed, restarting...",
+                    style("watch:").cyan().bold()
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                child = spawn_child(command, &ctx.cipher)?;
+                last_mtime = mtime;
+            }
+            _ => {}
         }
     }
 }

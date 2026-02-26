@@ -14,17 +14,30 @@ use sigyn_engine::vault::PlaintextEnv;
 ///     - `LIST`  — returns all key names, one per line, terminated by `.`
 ///     - `QUIT` / `EXIT` — shuts down the server
 pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
-    // Try to bind first; if EADDRINUSE, remove stale socket and retry (H11: avoid TOCTOU)
+    // Bind the socket in a secure directory (typically under ~/.sigyn/).
+    // Try to bind first; if EADDRINUSE, verify the socket is stale before removing.
     let listener = match UnixListener::bind(socket_path) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            std::fs::remove_file(socket_path)?;
-            UnixListener::bind(socket_path)?
+            // Check if the existing socket is actively in use
+            match std::os::unix::net::UnixStream::connect(socket_path) {
+                Ok(_) => {
+                    anyhow::bail!(
+                        "socket {} is already in use by another process",
+                        socket_path
+                    );
+                }
+                Err(_) => {
+                    // Stale socket — safe to remove and rebind
+                    std::fs::remove_file(socket_path)?;
+                    UnixListener::bind(socket_path)?
+                }
+            }
         }
         Err(e) => return Err(e.into()),
     };
 
-    // H10: Restrict socket permissions to owner only
+    // Restrict socket permissions to owner only (rw-------)
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;

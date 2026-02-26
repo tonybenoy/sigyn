@@ -1,8 +1,21 @@
 use sigyn_engine::vault::PlaintextEnv;
 
+/// Validate that a key name is safe for use in dotenv/shell export formats.
+/// Rejects keys containing characters that could break export formats or enable injection.
+fn is_safe_export_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        && key.as_bytes()[0] != b'-'
+}
+
 pub fn format_dotenv(env: &PlaintextEnv) -> String {
     let mut out = String::new();
     for (key, entry) in &env.entries {
+        if !is_safe_export_key(key) {
+            continue;
+        }
         if let Some(val) = entry.value.as_str() {
             let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
             if val.contains(' ') || val.contains('"') || val.contains('#') || val.contains('\n') {
@@ -18,6 +31,9 @@ pub fn format_dotenv(env: &PlaintextEnv) -> String {
 pub fn format_shell_eval(env: &PlaintextEnv) -> String {
     let mut out = String::new();
     for (key, entry) in &env.entries {
+        if !is_safe_export_key(key) {
+            continue;
+        }
         if let Some(val) = entry.value.as_str() {
             let escaped = val.replace('\'', "'\\''");
             out.push_str(&format!("export {}='{}'\n", key, escaped));
@@ -29,6 +45,9 @@ pub fn format_shell_eval(env: &PlaintextEnv) -> String {
 pub fn format_docker_env(env: &PlaintextEnv) -> String {
     let mut out = String::new();
     for (key, entry) in &env.entries {
+        if !is_safe_export_key(key) {
+            continue;
+        }
         if let Some(val) = entry.value.as_str() {
             out.push_str(&format!("--env {}={} ", key, shell_escape(val)));
         }

@@ -74,21 +74,25 @@ enum Commands {
         command: commands::identity::IdentityCommands,
     },
     /// Manage vaults
+    #[command(alias = "v")]
     Vault {
         #[command(subcommand)]
         command: commands::vault::VaultCommands,
     },
     /// Manage secrets
+    #[command(alias = "s")]
     Secret {
         #[command(subcommand)]
         command: commands::secret::SecretCommands,
     },
     /// Manage environments
+    #[command(alias = "e")]
     Env {
         #[command(subcommand)]
         command: commands::env::EnvCommands,
     },
     /// Manage access policies
+    #[command(alias = "p")]
     Policy {
         #[command(subcommand)]
         command: commands::policy::PolicyCommands,
@@ -102,6 +106,12 @@ enum Commands {
     Project {
         #[command(subcommand)]
         command: commands::project::ProjectCommands,
+    },
+    /// Set active vault/env context for the current session
+    #[command(alias = "ctx")]
+    Context {
+        #[command(subcommand)]
+        command: commands::context::ContextCommands,
     },
     /// Show current status
     Status,
@@ -117,23 +127,28 @@ enum Commands {
         vault: Option<String>,
     },
     /// Sync vault with remote
+    #[command(alias = "sy")]
     Sync {
         #[command(subcommand)]
         command: commands::sync::SyncCommands,
     },
     /// View and verify audit trail
+    #[command(alias = "a")]
     Audit {
         #[command(subcommand)]
         command: commands::audit::AuditCommands,
     },
     /// Manage vault forks
+    #[command(alias = "f")]
     Fork {
         #[command(subcommand)]
         command: commands::fork::ForkCommands,
     },
     /// Run commands with injected secrets / export secrets
+    #[command(alias = "r")]
     Run(commands::run::RunArgs),
     /// Rotate secrets and manage lifecycle
+    #[command(alias = "rot")]
     Rotate {
         #[command(subcommand)]
         command: commands::rotate::RotateCommands,
@@ -150,6 +165,7 @@ enum Commands {
         command: commands::mfa::MfaCommands,
     },
     /// Import secrets from files or cloud providers
+    #[command(alias = "imp")]
     Import {
         #[command(subcommand)]
         command: commands::import::ImportCommands,
@@ -157,6 +173,7 @@ enum Commands {
     /// Guided first-run setup wizard
     Onboard,
     /// Manage notification webhooks
+    #[command(alias = "notif")]
     Notification {
         #[command(subcommand)]
         command: commands::notifications::NotificationCommands,
@@ -170,6 +187,47 @@ enum Commands {
     },
     /// Launch interactive TUI dashboard
     Tui,
+    /// Get a secret (shortcut for 'secret get')
+    Get {
+        /// Secret key name
+        key: String,
+        /// Copy value to clipboard instead of printing
+        #[arg(long, short)]
+        copy: bool,
+    },
+    /// Set a secret (shortcut for 'secret set')
+    Set {
+        /// Secret key name
+        key: String,
+        /// Secret value (omit to read from stdin)
+        value: Option<String>,
+    },
+    /// Quick list (secrets, vaults, or environments)
+    Ls {
+        /// Environment name (for listing secrets)
+        target: Option<String>,
+        /// List vaults instead of secrets
+        #[arg(long)]
+        vaults: bool,
+        /// List environments instead of secrets
+        #[arg(long)]
+        envs: bool,
+        /// Show decrypted values
+        #[arg(long, short)]
+        reveal: bool,
+    },
+    /// Watch for secret changes and restart command
+    Watch {
+        /// Poll interval in seconds
+        #[arg(long, default_value = "2")]
+        interval: u64,
+        /// Don't inherit parent environment
+        #[arg(long, short)]
+        clean: bool,
+        /// Command and arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -207,6 +265,9 @@ fn main() -> Result<()> {
         }
         Commands::Project { command } => {
             commands::project::handle(command, json)?;
+        }
+        Commands::Context { command } => {
+            commands::context::handle(command, json)?;
         }
         Commands::Status => {
             commands::status::handle(json)?;
@@ -378,6 +439,77 @@ fn main() -> Result<()> {
             let vault_name = cli.vault.as_deref().unwrap_or("default");
             let env_name = cli.env.as_deref().unwrap_or("default");
             tui::run_tui(vault_name, env_name)?;
+        }
+        Commands::Get { key, copy } => {
+            commands::secret::handle(
+                commands::secret::SecretCommands::Get {
+                    key,
+                    env: cli.env.clone(),
+                    copy,
+                },
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+                cli.dry_run,
+            )?;
+        }
+        Commands::Set { key, value } => {
+            commands::secret::handle(
+                commands::secret::SecretCommands::Set {
+                    key,
+                    value,
+                    env: cli.env.clone(),
+                },
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+                cli.dry_run,
+            )?;
+        }
+        Commands::Ls {
+            target,
+            vaults,
+            envs,
+            reveal,
+        } => {
+            if vaults {
+                commands::vault::handle(
+                    commands::vault::VaultCommands::List,
+                    cli.identity.as_deref(),
+                    json,
+                )?;
+            } else if envs {
+                commands::env::handle(
+                    commands::env::EnvCommands::List,
+                    cli.vault.as_deref(),
+                    cli.identity.as_deref(),
+                    json,
+                )?;
+            } else {
+                // List secrets, using target as env name (with prefix matching via unlock_vault)
+                let env = target.or_else(|| cli.env.clone());
+                commands::secret::handle(
+                    commands::secret::SecretCommands::List { env, reveal },
+                    cli.vault.as_deref(),
+                    cli.identity.as_deref(),
+                    json,
+                    cli.dry_run,
+                )?;
+            }
+        }
+        Commands::Watch {
+            interval,
+            clean,
+            command,
+        } => {
+            commands::run::handle_watch(
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                cli.env.as_deref(),
+                &command,
+                interval,
+                clean,
+            )?;
         }
     }
 

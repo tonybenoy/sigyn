@@ -20,7 +20,41 @@ These flags can be used with any subcommand:
 | `--dry-run` | | Preview changes without applying |
 | `--verbose` | | Show detailed config resolution and debug output |
 
-**Resolution priority:** CLI flags > `.sigyn.toml` (project dir) > `~/.sigyn/project.toml` > `~/.sigyn/config.toml` > defaults.
+**Resolution priority:** CLI flags > `~/.sigyn/context.toml` > `.sigyn.toml` (project dir) > `~/.sigyn/project.toml` > `~/.sigyn/config.toml` > defaults.
+
+### Command Aliases
+
+Most commands have short aliases for quick typing:
+
+| Command | Alias |
+|---|---|
+| `identity` | `id` |
+| `vault` | `v` |
+| `secret` | `s` |
+| `env` | `e` |
+| `policy` | `p` |
+| `sync` | `sy` |
+| `audit` | `a` |
+| `fork` | `f` |
+| `run` | `r` |
+| `rotate` | `rot` |
+| `import` | `imp` |
+| `delegation` | `member` |
+| `notification` | `notif` |
+| `context` | `ctx` |
+
+### Environment Prefix Matching
+
+Environment names support unambiguous prefix matching. If your vault has `dev`, `staging`, and `prod` environments:
+
+```bash
+sigyn secret get API_KEY -e d    # resolves to 'dev'
+sigyn secret get API_KEY -e p    # resolves to 'prod'
+sigyn secret get API_KEY -e s    # resolves to 'staging'
+sigyn secret get API_KEY -e st   # also resolves to 'staging'
+```
+
+Ambiguous prefixes produce an error listing the matches.
 
 ### Environment Variables
 
@@ -29,6 +63,51 @@ These flags can be used with any subcommand:
 | `SIGYN_HOME` | Override the Sigyn home directory (default: `~/.sigyn`) |
 | `SIGYN_NON_INTERACTIVE` | Disable all interactive prompts (equivalent to piping to a non-TTY) |
 | `CI` | When set, disables interactive prompts (auto-detected in most CI systems) |
+
+## get (shortcut)
+
+Get a secret value. This is a shortcut for `sigyn secret get`.
+
+```bash
+sigyn get DATABASE_URL -e dev
+sigyn get API_KEY --copy           # copy to clipboard
+sigyn get API_KEY -e prod --json
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--copy` | `-c` | Copy value to clipboard instead of printing |
+
+Uses the global `--env` / `-e` flag for environment selection.
+
+## set (shortcut)
+
+Set a secret value. This is a shortcut for `sigyn secret set`.
+
+```bash
+sigyn set DATABASE_URL 'postgres://localhost/mydb' -e dev
+echo 'supersecret' | sigyn set API_KEY -e prod
+```
+
+Uses the global `--env` / `-e` flag for environment selection.
+
+## ls (quick list)
+
+Quick listing of secrets, vaults, or environments.
+
+```bash
+sigyn ls                    # list secrets in default env
+sigyn ls prod               # list secrets in 'prod' env (prefix matching)
+sigyn ls --vaults           # list all vaults
+sigyn ls --envs             # list all environments
+sigyn ls dev --reveal       # list secrets with values shown
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--vaults` | | List vaults instead of secrets |
+| `--envs` | | List environments instead of secrets |
+| `--reveal` | `-r` | Show decrypted values |
 
 ## identity (alias: id)
 
@@ -85,7 +164,7 @@ Import a teammate's public key.
 sigyn identity import alice.pub
 ```
 
-## vault
+## vault (alias: v)
 
 Manage encrypted vaults.
 
@@ -137,7 +216,7 @@ sigyn vault info                     # uses default vault
 sigyn vault info myapp --json
 ```
 
-## secret
+## secret (alias: s)
 
 Manage secrets within a vault environment.
 
@@ -161,9 +240,15 @@ Retrieve and decrypt a secret value.
 ```bash
 sigyn secret get DATABASE_URL --env dev
 sigyn secret get API_KEY --env prod --json
+sigyn secret get API_KEY --env dev --copy    # copy to clipboard
 ```
 
-JSON output includes key, value, type, environment, and version.
+| Flag | Short | Description |
+|---|---|---|
+| `--env` | `-e` | Target environment (default: dev) |
+| `--copy` | `-c` | Copy value to clipboard instead of printing |
+
+JSON output includes key, value, type, environment, and version. With `--copy`, JSON output includes `"copied": true` instead of the value.
 
 ### secret list
 
@@ -242,7 +327,7 @@ Show the change history of a secret.
 sigyn secret history DATABASE_URL --env dev
 ```
 
-## env
+## env (alias: e)
 
 Manage environments within a vault.
 
@@ -303,7 +388,7 @@ sigyn env promote --from staging --to prod --keys DATABASE_URL,API_KEY
 | `--to <ENV>` | Target environment |
 | `--keys <K1,K2,...>` | Optional comma-separated list of keys to promote (default: all) |
 
-## policy
+## policy (alias: p)
 
 Manage access policies, members, and RBAC rules.
 
@@ -534,7 +619,7 @@ Anchor the audit trail to a git commit for tamper-evidence.
 sigyn audit anchor -v myapp
 ```
 
-## sync
+## sync (alias: sy)
 
 Synchronize vaults via git. All data is encrypted at rest; sync never needs the
 master key.
@@ -594,7 +679,7 @@ sigyn sync configure --remote-url git@github.com:team/secrets.git
 sigyn sync configure --auto-sync true
 ```
 
-## fork
+## fork (alias: f)
 
 Manage vault forks for isolated workstreams.
 
@@ -677,7 +762,40 @@ sigyn project init --global                 # write to ~/.sigyn/project.toml ins
 | `--identity` | `-i` | Identity name (skips prompt) |
 | `--global` | | Write to `~/.sigyn/project.toml` instead of `./.sigyn.toml` |
 
-## run
+## context (alias: ctx)
+
+Manage a persistent context that sets default vault and environment. Stored at
+`~/.sigyn/context.toml`. Context sits between CLI flags and `.sigyn.toml` in the
+resolution chain.
+
+### context set
+
+Set the active context.
+
+```bash
+sigyn context set myapp          # set vault only
+sigyn context set myapp prod     # set vault and env
+sigyn ctx set myapp dev          # using alias
+```
+
+### context show
+
+Show the current context.
+
+```bash
+sigyn context show
+sigyn ctx show --json
+```
+
+### context clear
+
+Clear the current context.
+
+```bash
+sigyn context clear
+```
+
+## run (alias: r)
 
 Run processes with injected secrets or export secrets in various formats.
 
@@ -719,6 +837,18 @@ sigyn run -e dev -c -- node server.js
 | `--clean` | `-c` | Do not inherit the parent process environment |
 | `--prod` | | Shorthand for `--env prod` |
 | `--staging` | | Shorthand for `--env staging` |
+
+### Inline Secret Refs
+
+You can reference secrets directly in command arguments using `{{KEY}}` syntax.
+The values are substituted before the command is executed:
+
+```bash
+sigyn run -e prod -- curl -H "Authorization: Bearer {{API_KEY}}" https://api.example.com
+sigyn run -e dev -- psql "{{DATABASE_URL}}"
+```
+
+Unresolved refs (keys not found in the environment) are left as-is.
 
 ### Named commands
 
@@ -763,7 +893,27 @@ sigyn run serve --env dev
 sigyn run serve --env dev --socket /tmp/my-app.sock
 ```
 
-## rotate
+## watch
+
+Watch for secret changes and automatically restart a command. Polls the encrypted
+environment file for modifications and restarts the child process when changes are
+detected.
+
+```bash
+sigyn watch -- npm run dev
+sigyn watch -e staging --interval 5 -- ./my-app
+sigyn watch --clean -- node server.js
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--interval <SECS>` | | Poll interval in seconds (default: 2) |
+| `--clean` | `-c` | Don't inherit the parent process environment |
+
+Uses the global `--env` / `-e` flag for environment selection. If the child process
+exits on its own, `watch` exits with the same code (does not restart).
+
+## rotate (alias: rot)
 
 Manage secret rotation and lifecycle.
 
@@ -843,7 +993,7 @@ sigyn rotate dead-check --env prod --max-age 365
 |---|---|
 | `--max-age <DAYS>` | Maximum age in days (default: 180) |
 
-## import
+## import (alias: imp)
 
 Import secrets from external files and cloud providers.
 
@@ -1101,6 +1251,8 @@ sigyn init --identity alice --vault myapp
 ### notification configure
 
 Interactively configure a webhook for receiving notifications about vault events.
+Webhook URLs must use HTTPS (HTTP is only allowed for localhost). If a shared secret
+is provided, requests include an `X-Sigyn-Signature` HMAC header for verification.
 
 ```bash
 sigyn notification configure
@@ -1127,7 +1279,8 @@ sigyn notification list --json
 ### update
 
 Self-update to the latest release. Downloads the appropriate binary for the current
-platform and verifies the checksum before replacing the running binary.
+platform and verifies the SHA-256 checksum before replacing the running binary.
+The update will abort if the checksum file cannot be downloaded or verification fails.
 
 ```bash
 sigyn update

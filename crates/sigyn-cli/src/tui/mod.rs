@@ -5,6 +5,8 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::{prelude::*, widgets::*};
+use sigyn_engine::policy::engine::AccessAction;
+#[allow(unused_imports)]
 use sigyn_engine::policy::storage::VaultPolicyExt;
 use std::io::stdout;
 
@@ -149,6 +151,34 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     )?;
     let cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(master_key);
 
+    // --- Access control check: verify the user has Read access before showing secrets ---
+    let policy = sigyn_engine::policy::storage::VaultPolicy::load_encrypted(
+        &paths.policy_path(&state.vault_name),
+        &cipher,
+    )
+    .unwrap_or_default();
+
+    {
+        let engine = sigyn_engine::policy::engine::PolicyEngine::new(&policy, &manifest.owner);
+        let request = sigyn_engine::policy::engine::AccessRequest {
+            actor: fingerprint.clone(),
+            action: AccessAction::Read,
+            env: state.env_name.clone(),
+            key: None,
+            mfa_verified: false,
+        };
+        let decision = engine.evaluate(&request)?;
+        match decision {
+            sigyn_engine::policy::engine::PolicyDecision::Deny(reason) => {
+                anyhow::bail!("access denied: {}", reason);
+            }
+            sigyn_engine::policy::engine::PolicyDecision::RequiresMfa => {
+                anyhow::bail!("MFA verification required");
+            }
+            _ => {}
+        }
+    }
+
     // --- Secrets tab: key names and types (no values) ---
     let env_path = paths.env_path(&state.vault_name, &state.env_name);
     if env_path.exists() {
@@ -170,11 +200,7 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     }
 
     // --- Members tab: fingerprints and roles ---
-    let policy = sigyn_engine::policy::storage::VaultPolicy::load_encrypted(
-        &paths.policy_path(&state.vault_name),
-        &cipher,
-    )
-    .unwrap_or_default();
+    // (policy already loaded above for access check)
 
     state.member_list = Vec::new();
     // Always show the owner first

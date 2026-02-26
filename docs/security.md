@@ -176,8 +176,9 @@ MFA state is stored per identity at `~/.sigyn/identities/<fingerprint>.mfa`,
 encrypted with ChaCha20-Poly1305. Sessions are stored at
 `~/.sigyn/sessions/<fingerprint>.session`.
 
-Backup codes are hashed with blake3 before storage. Each backup code is consumed on
-use and cannot be reused.
+Backup codes are hashed with blake3 before storage and verified using constant-time
+comparison to prevent timing side-channel attacks. Each backup code is consumed on
+use and cannot be reused. Session HMACs are also compared in constant time.
 
 ## Per-Key ACLs
 
@@ -198,7 +199,7 @@ Additionally, members can be restricted to secrets matching specific glob patter
 
 See [Delegation](delegation.md) for a full deep dive. Key security properties:
 
-- Members can only delegate roles at or below their own level.
+- Members can only delegate roles **strictly below** their own level (e.g., a Manager can invite Contributors but not Managers). The Owner can invite any role except Owner.
 - Each delegation records `delegated_by`, forming a tree rooted at the Owner.
 - **Cascade revocation**: revoking a member revokes everyone they invited, transitively (BFS traversal of the delegation tree).
 - **Master key rotation on revoke**: when any member is revoked, a new master key is generated via `VaultCipher::generate()` and re-encrypted to all remaining members. The revoked subtree immediately loses decryption access.

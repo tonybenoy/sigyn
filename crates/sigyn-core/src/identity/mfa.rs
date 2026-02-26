@@ -30,11 +30,31 @@ pub fn hash_backup_code(code: &str) -> String {
     blake3::hash(code.as_bytes()).to_hex().to_string()
 }
 
+/// Constant-time byte equality comparison to prevent timing side channels.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Verify a backup code against a list of hashed codes.
 /// Returns the index of the matching code if found.
+/// Uses constant-time comparison to prevent timing side-channel attacks.
 pub fn verify_backup_code(code: &str, hashed_codes: &[String]) -> Option<usize> {
     let hash = hash_backup_code(code);
-    hashed_codes.iter().position(|h| h == &hash)
+    // Check all codes (don't short-circuit) to prevent timing leaks
+    let mut found_index: Option<usize> = None;
+    for (i, h) in hashed_codes.iter().enumerate() {
+        if constant_time_eq(hash.as_bytes(), h.as_bytes()) {
+            found_index = Some(i);
+        }
+    }
+    found_index
 }
 
 #[cfg(test)]

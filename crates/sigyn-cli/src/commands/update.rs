@@ -273,8 +273,11 @@ pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
                 verify_checksum(&archive_name, &archive_bytes, &checksums)?;
                 eprintln!(" {}", style("ok").green());
             }
-            Err(_) => {
-                eprintln!(" {}", style("checksums not available, skipping").yellow());
+            Err(e) => {
+                anyhow::bail!(
+                    "failed to download checksums (refusing to install unverified binary): {}",
+                    e
+                );
             }
         }
 

@@ -29,8 +29,11 @@ Owner (alice)
 
 ### Step 1: Create an Invitation
 
-A member with the Manager role or higher can create an invitation. The invitation is
-an `InvitationFile` -- a JSON document signed with the inviter's Ed25519 key.
+A member with the Manager role or higher can create an invitation. The inviter can
+only assign a role **strictly below** their own level (e.g., a Manager can invite
+Contributors but not other Managers or Admins). The Owner can invite any role except
+Owner. The invitation is an `InvitationFile` -- a JSON document signed with the
+inviter's Ed25519 key.
 
 ```bash
 sigyn delegation invite create --role contributor --envs dev,staging
@@ -68,16 +71,14 @@ Example invitation file:
 
 ### Signing Payload
 
-The Ed25519 signature covers a deterministic concatenation of fields in a stable order:
+The Ed25519 signature covers a versioned, deterministic concatenation of fields:
 
 ```
-id || vault_name || vault_id || inviter_fingerprint || role_string || env1 || env2 || ... || pattern1 || pattern2 || ... || max_delegation_depth (4 bytes LE)
+"sigyn-invitation-v1:" || id || vault_name || vault_id || inviter_fingerprint || role_string || env1 || env2 || ...
 ```
 
 This is constructed by `InvitationFile::signing_payload()` and prevents field
-reordering or modification attacks. All authorization-affecting fields
-(`secret_patterns`, `max_delegation_depth`) are included to prevent tampering
-after signing.
+reordering or modification attacks.
 
 ### Step 2: Out-of-Band Sharing
 

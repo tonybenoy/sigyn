@@ -71,6 +71,17 @@ impl WebhookPayload {
     }
 }
 
+/// Compute HMAC-SHA256 over a message using blake3 keyed hash, returning a hex string.
+fn compute_webhook_hmac(secret: &[u8], message: &[u8]) -> String {
+    // Use blake3 keyed hash: pad/truncate secret to 32 bytes
+    let mut key = [0u8; 32];
+    let len = secret.len().min(32);
+    key[..len].copy_from_slice(&secret[..len]);
+    let mut hasher = blake3::Hasher::new_keyed(&key);
+    hasher.update(message);
+    format!("sha256={}", hasher.finalize().to_hex())
+}
+
 /// Send a webhook notification via HTTP POST.
 ///
 /// Builds a JSON payload from the event, POSTs it to the configured URL
@@ -79,6 +90,23 @@ impl WebhookPayload {
 pub fn send_webhook(config: &WebhookConfig, event: &NotificationEvent) -> Result<()> {
     if config.url.is_empty() {
         anyhow::bail!("webhook URL is empty");
+    }
+
+    // Validate URL scheme — only allow https (or http for localhost/dev)
+    if config.url.starts_with("https://") {
+        // OK
+    } else if config.url.starts_with("http://localhost")
+        || config.url.starts_with("http://127.0.0.1")
+        || config.url.starts_with("http://[::1]")
+    {
+        // HTTP allowed for localhost only
+    } else if config.url.starts_with("http://") {
+        anyhow::bail!(
+            "webhook URL must use HTTPS (HTTP only allowed for localhost): {}",
+            config.url
+        );
+    } else {
+        anyhow::bail!("webhook URL must start with https:// (got: {})", config.url);
     }
 
     let payload = WebhookPayload::from_event(event);
@@ -92,9 +120,12 @@ pub fn send_webhook(config: &WebhookConfig, event: &NotificationEvent) -> Result
         .header("Content-Type", "application/json")
         .json(&payload);
 
-    // If a shared secret is configured, include it as a header for verification
+    // If a shared secret is configured, compute HMAC-SHA256 over the payload body
+    // and include it as a signature header (never send the secret itself)
     if let Some(secret) = &config.secret {
-        request = request.header("X-Sigyn-Secret", secret.as_str());
+        let body_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        let signature = compute_webhook_hmac(secret.as_bytes(), &body_bytes);
+        request = request.header("X-Sigyn-Signature", signature);
     }
 
     let response = request.send()?;

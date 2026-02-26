@@ -6,6 +6,18 @@ use sigyn_core::crypto::keys::KeyFingerprint;
 use sigyn_core::error::Result;
 pub use sigyn_core::identity::session::{compute_hmac, MfaSession, DEFAULT_GRACE_PERIOD_SECS};
 
+/// Constant-time byte equality comparison to prevent timing side channels.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub struct MfaSessionStore {
     session_dir: PathBuf,
 }
@@ -30,9 +42,9 @@ impl MfaSessionStore {
             return false;
         };
 
-        // Verify HMAC
+        // Verify HMAC using constant-time comparison to prevent timing attacks
         let expected_hmac = compute_hmac(&session.verified_at, &fingerprint.0);
-        if session.hmac != expected_hmac {
+        if !constant_time_eq(session.hmac.as_bytes(), expected_hmac.as_bytes()) {
             return false;
         }
 

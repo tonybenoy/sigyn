@@ -60,7 +60,10 @@ impl InvitationFile {
         max_delegation_depth: u32,
     ) -> Vec<u8> {
         // Deterministic payload: concatenate fields in a stable order.
+        // NOTE: The invitation ID (UUID v4) already makes each invitation unique,
+        // preventing replay of the exact same signed payload.
         let mut payload = Vec::new();
+        payload.extend_from_slice(b"sigyn-invitation-v1:");
         payload.extend_from_slice(id.as_bytes());
         payload.extend_from_slice(vault_name.as_bytes());
         payload.extend_from_slice(vault_id.as_bytes());

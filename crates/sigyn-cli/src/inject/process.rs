@@ -30,6 +30,23 @@ pub fn run_with_secrets(env: &PlaintextEnv, command: &[String], inherit_env: boo
     Ok(status.code().unwrap_or(1))
 }
 
+/// Replace `{{KEY}}` patterns in command arguments with secret values from the environment.
+/// Unresolved refs are left as-is.
+pub fn substitute_secret_refs(args: &[String], env: &PlaintextEnv) -> Vec<String> {
+    let re = regex::Regex::new(r"\{\{(\w+)\}\}").expect("invalid regex");
+    args.iter()
+        .map(|arg| {
+            re.replace_all(arg, |caps: &regex::Captures| {
+                let key = &caps[1];
+                env.get(key)
+                    .and_then(|e| e.value.as_str().map(String::from))
+                    .unwrap_or_else(|| caps[0].to_string())
+            })
+            .into_owned()
+        })
+        .collect()
+}
+
 #[allow(dead_code)]
 pub fn collect_env_vars(env: &PlaintextEnv) -> HashMap<String, String> {
     let mut vars = HashMap::new();

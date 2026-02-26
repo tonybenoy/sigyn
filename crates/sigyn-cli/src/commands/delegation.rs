@@ -188,6 +188,26 @@ pub fn handle(
                 )
             })?;
 
+            // Validate: delegator cannot invite with a role higher than their own
+            if ctx.fingerprint == ctx.manifest.owner {
+                // Owner can invite any role except Owner itself
+                if role_enum == Role::Owner {
+                    anyhow::bail!("cannot invite with 'owner' role — ownership is not delegable");
+                }
+            } else if let Some(delegator) = ctx.policy.get_member(&ctx.fingerprint) {
+                if role_enum.level() >= delegator.role.level() {
+                    anyhow::bail!(
+                        "cannot invite with role '{}' (level {}) — your role '{}' (level {}) must be higher",
+                        role_enum,
+                        role_enum.level(),
+                        delegator.role,
+                        delegator.role.level()
+                    );
+                }
+            } else {
+                anyhow::bail!("you are not a member of this vault");
+            }
+
             let invitee_fp = KeyFingerprint::from_hex(&pubkey)
                 .map_err(|e| anyhow::anyhow!("invalid fingerprint: {}", e))?;
 

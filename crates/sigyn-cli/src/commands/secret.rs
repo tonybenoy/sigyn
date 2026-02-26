@@ -16,6 +16,45 @@ use sigyn_engine::vault::{env_file, VaultManifest, VaultPaths};
 use crate::commands::identity::load_identity;
 use crate::config::sigyn_home;
 
+/// Resolve an environment name by prefix matching against available environments.
+/// If the input exactly matches an environment, returns it as-is. Otherwise, looks
+/// for a unique prefix match. Errors on zero or multiple matches.
+pub fn resolve_env_name(input: &str, manifest: &VaultManifest) -> Result<String> {
+    if manifest.environments.contains(&input.to_string()) {
+        return Ok(input.to_string());
+    }
+    let matches: Vec<_> = manifest
+        .environments
+        .iter()
+        .filter(|e| e.starts_with(input))
+        .collect();
+    match matches.len() {
+        1 => {
+            eprintln!(
+                "{} resolved '{}' \u{2192} '{}'",
+                style("note:").cyan().bold(),
+                input,
+                matches[0]
+            );
+            Ok(matches[0].clone())
+        }
+        0 => anyhow::bail!(
+            "no environment matching '{}'\n  Available: {}",
+            input,
+            manifest.environments.join(", ")
+        ),
+        _ => anyhow::bail!(
+            "ambiguous '{}': matches {}",
+            input,
+            matches
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// Simple glob matching supporting * and ? wildcards.
 fn glob_match(pattern: &str, text: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
@@ -64,6 +103,9 @@ pub enum SecretCommands {
         /// Environment
         #[arg(long, short)]
         env: Option<String>,
+        /// Copy value to clipboard instead of printing
+        #[arg(long, short)]
+        copy: bool,
     },
     /// List all secrets in an environment
     List {
@@ -135,8 +177,9 @@ pub fn unlock_vault(
     let config = crate::config::load_config();
     let project = crate::project_config::load_project_config();
     let project_settings = project.as_ref().and_then(|p| p.project.as_ref());
+    let context = crate::commands::context::load_context();
 
-    // Priority: CLI flags > project config > global config > defaults
+    // Priority: CLI flags > context.toml > project config > global config > defaults
     if vault_name.is_none() {
         if let Some(pv) = project_settings.and_then(|p| p.vault.as_deref()) {
             eprintln!(
@@ -150,14 +193,16 @@ pub fn unlock_vault(
     // Verbose config resolution logging
     if std::env::var("SIGYN_VERBOSE").is_ok() {
         eprintln!(
-            "[verbose] vault: flag={:?} project={:?} global={:?}",
+            "[verbose] vault: flag={:?} context={:?} project={:?} global={:?}",
             vault_name,
+            context.as_ref().and_then(|c| c.vault.as_deref()),
             project_settings.and_then(|p| p.vault.as_deref()),
             config.default_vault.as_deref()
         );
     }
     let vault_name = vault_name
         .map(String::from)
+        .or_else(|| context.as_ref().and_then(|c| c.vault.clone()))
         .or_else(|| project_settings.and_then(|p| p.vault.clone()))
         .or(config.default_vault)
         .ok_or_else(|| {
@@ -192,6 +237,7 @@ pub fn unlock_vault(
     }
     let env_name = env_name
         .map(String::from)
+        .or_else(|| context.as_ref().and_then(|c| c.env.clone()))
         .or_else(|| project_settings.and_then(|p| p.env.clone()))
         .or(config.default_env)
         .unwrap_or_else(|| "dev".into());
@@ -213,6 +259,9 @@ pub fn unlock_vault(
     let manifest_content = std::fs::read_to_string(paths.manifest_path(&vault_name))
         .context(format!("vault '{}' not found", vault_name))?;
     let manifest = VaultManifest::from_toml(&manifest_content)?;
+
+    // Resolve env prefix matching against manifest environments
+    let env_name = resolve_env_name(&env_name, &manifest)?;
 
     let header_bytes =
         std::fs::read(paths.members_path(&vault_name)).context("failed to read vault members")?;
@@ -521,7 +570,7 @@ pub fn handle(
 
             maybe_auto_sync(&ctx.vault_name);
         }
-        SecretCommands::Get { key, env } => {
+        SecretCommands::Get { key, env, copy } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
             check_access(&ctx, AccessAction::Read, Some(&key))?;
 
@@ -543,16 +592,37 @@ pub fn handle(
                 AuditOutcome::Success,
             );
 
-            if json {
+            let value = entry.value.display_value(true);
+
+            if copy {
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| anyhow::anyhow!("failed to access clipboard: {}", e))?;
+                clipboard
+                    .set_text(&value)
+                    .map_err(|e| anyhow::anyhow!("failed to copy to clipboard: {}", e))?;
+                if json {
+                    crate::output::print_json(&serde_json::json!({
+                        "key": key,
+                        "env": ctx.env_name,
+                        "copied": true,
+                    }))?;
+                } else {
+                    eprintln!(
+                        "{} Copied '{}' to clipboard",
+                        style("\u{2713}").green().bold(),
+                        key
+                    );
+                }
+            } else if json {
                 crate::output::print_json(&serde_json::json!({
                     "key": key,
-                    "value": entry.value.display_value(true),
+                    "value": value,
                     "type": entry.value.type_name(),
                     "env": ctx.env_name,
                     "version": entry.metadata.version,
                 }))?;
             } else {
-                println!("{}", entry.value.display_value(true));
+                println!("{}", value);
             }
         }
         SecretCommands::List { env, reveal } => {

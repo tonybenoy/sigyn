@@ -40,6 +40,18 @@ pub fn handle(cmd: NotificationCommands, json: bool) -> Result<()> {
                 anyhow::bail!("webhook URL cannot be empty");
             }
 
+            // Validate URL scheme
+            if !url.starts_with("https://")
+                && !url.starts_with("http://localhost")
+                && !url.starts_with("http://127.0.0.1")
+                && !url.starts_with("http://[::1]")
+            {
+                anyhow::bail!(
+                    "webhook URL must use HTTPS (HTTP only allowed for localhost): {}",
+                    url
+                );
+            }
+
             // Select events
             let event_options = &[
                 "* (all events)",

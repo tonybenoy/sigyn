@@ -2,6 +2,92 @@
 
 This page provides concrete examples for common Sigyn workflows.
 
+## Quick Shortcuts
+
+### Using Short Aliases
+
+Every major command has a short alias for fast typing:
+
+```bash
+# These pairs are equivalent:
+sigyn secret list --env dev     →  sigyn s list -e dev
+sigyn vault list                →  sigyn v list
+sigyn env diff dev staging      →  sigyn e diff dev staging
+sigyn audit tail                →  sigyn a tail
+sigyn sync push                 →  sigyn sy push
+sigyn run -e dev -- ./app       →  sigyn r -e dev -- ./app
+```
+
+### Top-Level get/set
+
+Skip the `secret` subcommand for the most common operations:
+
+```bash
+# Instead of: sigyn secret get DATABASE_URL -e dev
+sigyn get DATABASE_URL -e dev
+
+# Instead of: sigyn secret set API_KEY 'new-key' -e prod
+sigyn set API_KEY 'new-key' -e prod
+
+# Copy a secret to clipboard
+sigyn get API_KEY -e prod --copy
+```
+
+### Quick Listing with ls
+
+```bash
+sigyn ls                  # list secrets in default env
+sigyn ls prod             # list secrets in prod (prefix matching)
+sigyn ls --vaults         # list all vaults
+sigyn ls --envs           # list all environments
+sigyn ls dev --reveal     # show secret values
+```
+
+### Environment Prefix Matching
+
+Type just enough of the environment name to be unambiguous:
+
+```bash
+sigyn get API_KEY -e d        # resolves to 'dev'
+sigyn get API_KEY -e p        # resolves to 'prod'
+sigyn get API_KEY -e st       # resolves to 'staging'
+sigyn run -e p -- ./deploy    # run with prod secrets
+```
+
+### Context for Repeated Operations
+
+Set a persistent context to avoid typing `--vault` and `--env` repeatedly:
+
+```bash
+sigyn context set myapp prod
+sigyn get DATABASE_URL        # uses myapp vault, prod env
+sigyn ls                      # lists prod secrets
+sigyn run -- ./deploy.sh      # runs with prod secrets
+
+sigyn context clear           # go back to defaults
+```
+
+### Inline Secret Refs in Commands
+
+Reference secrets directly in command arguments with `{{KEY}}`:
+
+```bash
+sigyn run -e prod -- curl -H "Authorization: Bearer {{API_KEY}}" https://api.example.com
+sigyn run -e dev -- psql "{{DATABASE_URL}}"
+```
+
+### Watch Mode for Development
+
+Automatically restart your app when secrets change:
+
+```bash
+sigyn watch -e dev -- npm run dev
+sigyn watch -e dev --interval 5 -- cargo run
+```
+
+Useful during development when a teammate updates shared secrets — your local
+server restarts with the new values automatically.
+
 ## CI/CD Integration
 
 ### GitHub Actions
@@ -451,15 +537,20 @@ sigyn secret search 'API_*' --reveal
 
 ### Setting Up Notifications
 
-Configure a webhook to get notified when secrets change:
+Configure a webhook to get notified when secrets change. Webhook URLs must use HTTPS
+(HTTP is only allowed for localhost during development):
 
 ```bash
 sigyn notification configure
 # Webhook URL: https://hooks.slack.com/services/T.../B.../xxx
 # Select events: * (all events)
-# Shared secret: (optional)
+# Shared secret: (optional — used to compute HMAC signature)
 # ✓ Webhook configured
 ```
+
+When a shared secret is configured, each webhook POST includes an `X-Sigyn-Signature`
+header containing an HMAC (blake3 keyed hash) of the JSON payload body. Verify this
+on the receiving end to authenticate that the request came from Sigyn.
 
 ### Testing Notifications
 

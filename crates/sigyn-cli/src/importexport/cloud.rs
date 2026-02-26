@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
+/// Maximum allowed output size from external CLI commands (10 MB).
+const MAX_CLI_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+
 /// Run an external CLI command and return its stdout as a string.
 fn run_cli_command(cmd: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(cmd)
@@ -11,6 +14,15 @@ fn run_cli_command(cmd: &str, args: &[&str]) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("{} failed: {}", cmd, stderr.trim());
+    }
+
+    if output.stdout.len() > MAX_CLI_OUTPUT_BYTES {
+        anyhow::bail!(
+            "{} output too large ({} bytes, max {} bytes)",
+            cmd,
+            output.stdout.len(),
+            MAX_CLI_OUTPUT_BYTES
+        );
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())

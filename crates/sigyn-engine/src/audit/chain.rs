@@ -99,7 +99,14 @@ impl AuditLog {
         Ok(entry)
     }
 
-    pub fn verify_chain(&self) -> Result<u64> {
+    /// Verify the audit chain: hash linkage, hash integrity, and Ed25519 signatures.
+    ///
+    /// `lookup_key` resolves an actor fingerprint to their signing public key.
+    /// If no key lookup is provided, signature verification is skipped (hash-only mode).
+    pub fn verify_chain_with_keys<F>(&self, lookup_key: Option<F>) -> Result<u64>
+    where
+        F: Fn(&KeyFingerprint) -> Option<crate::crypto::keys::VerifyingKeyWrapper>,
+    {
         if !self.path.exists() {
             return Ok(0);
         }
@@ -137,11 +144,32 @@ impl AuditLog {
                 return Err(SigynError::AuditChainBroken(entry.sequence));
             }
 
+            // Verify Ed25519 signature if key lookup is available
+            if let Some(ref lookup) = lookup_key {
+                if let Some(verifying_key) = lookup(&entry.actor) {
+                    if verifying_key
+                        .verify(&entry.entry_hash, &entry.signature)
+                        .is_err()
+                    {
+                        return Err(SigynError::AuditChainBroken(entry.sequence));
+                    }
+                }
+                // If the actor's key is not found, we skip signature verification
+                // for that entry (they may have been removed from the vault).
+            }
+
             prev_hash = Some(entry.entry_hash);
             count += 1;
         }
 
         Ok(count)
+    }
+
+    /// Verify the audit chain (hash linkage and integrity only, no signature verification).
+    pub fn verify_chain(&self) -> Result<u64> {
+        self.verify_chain_with_keys(
+            None::<fn(&KeyFingerprint) -> Option<crate::crypto::keys::VerifyingKeyWrapper>>,
+        )
     }
 
     pub fn tail(&self, n: usize) -> Result<Vec<AuditEntry>> {
