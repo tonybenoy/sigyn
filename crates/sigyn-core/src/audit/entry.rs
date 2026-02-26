@@ -53,6 +53,31 @@ pub enum AuditAction {
     SecretsListed {
         env: String,
     },
+    /// Environment deleted via `sigyn env delete`
+    EnvironmentDeleted {
+        name: String,
+    },
+    /// Vault deleted via `sigyn vault delete`
+    VaultDeleted {
+        vault_id: uuid::Uuid,
+    },
+    /// Vault exported via `sigyn vault export`
+    VaultExported,
+    /// Ownership transferred from one identity to another
+    OwnershipTransferred {
+        from: KeyFingerprint,
+        to: KeyFingerprint,
+    },
+    /// New owner accepted a pending ownership transfer
+    OwnershipTransferAccepted {
+        by: KeyFingerprint,
+    },
+    /// Secrets copied between environments (possibly across vaults)
+    SecretsCopied {
+        keys: Vec<String>,
+        from_env: String,
+        to_env: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

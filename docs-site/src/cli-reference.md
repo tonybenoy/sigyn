@@ -149,6 +149,46 @@ sigyn identity show                  # uses default identity
 sigyn identity show a1b2c3d4...     # by fingerprint
 ```
 
+### identity change-passphrase
+
+Change the passphrase for an existing identity. Verifies the old passphrase, then
+re-wraps the keys with a fresh salt. Clears the agent cache after success.
+
+```bash
+sigyn identity change-passphrase alice
+sigyn identity change-passphrase          # uses default identity
+```
+
+Prompts for current passphrase, then new passphrase with confirmation (minimum 8 characters).
+
+### identity delete
+
+Delete an identity from this machine. Requires passphrase to prove ownership.
+Before deleting, checks whether the identity is a member of any local vaults.
+
+```bash
+sigyn identity delete alice
+sigyn identity delete a1b2c3d4... --force
+```
+
+| Flag | Description |
+|---|---|
+| `--force` | Skip vault membership check and delete anyway |
+
+If the identity is a member of vaults, the command errors with the vault list unless `--force` is used. Interactive mode shows a confirmation prompt.
+
+### identity rotate-keys
+
+Create a new keypair with a new fingerprint, replacing the old identity. The old identity
+is deleted only after the new one is successfully created.
+
+```bash
+sigyn identity rotate-keys
+sigyn identity rotate-keys alice
+```
+
+**Warning:** This creates a new fingerprint. You must be re-invited to all vaults after rotation. There is no automatic migration.
+
 ### identity export
 
 Export the public key portion of an identity for sharing with team members.
@@ -205,11 +245,20 @@ sigyn vault open myapp
 
 ### vault delete
 
-Delete a vault and all its data.
+Delete a vault and all its data. Owner-only. Writes an audit entry and attempts a
+sync push before destroying the directory. Removes the vault from the pinned vaults store.
 
 ```bash
 sigyn vault delete myapp
+sigyn vault delete myapp --force
 ```
+
+| Flag | Description |
+|---|---|
+| `--force` | Skip member check and confirmation in non-interactive mode |
+
+In interactive mode, you must type the vault name to confirm (not just yes/no). If other
+members exist, the command errors unless `--force` is used.
 
 ### vault info
 
@@ -220,6 +269,55 @@ sigyn vault info myapp
 sigyn vault info                     # uses default vault
 sigyn vault info myapp --json
 ```
+
+### vault transfer
+
+Transfer ownership of a vault to another member. This is phase 1 of a two-phase transfer.
+The new owner must already be a member of the vault.
+
+```bash
+sigyn vault transfer myapp --to a1b2c3d4e5f6...
+sigyn vault transfer myapp --to a1b2c3d4e5f6... --downgrade-to admin
+sigyn vault transfer myapp --to a1b2c3d4e5f6... --downgrade-to remove
+```
+
+| Flag | Description |
+|---|---|
+| `--to <FP>` | Fingerprint of the new owner (must be an existing member) |
+| `--downgrade-to <ROLE>` | Role for old owner after transfer (default: `admin`). Use `remove` to leave the vault. |
+
+Creates a signed `pending_transfer.cbor` recording the intended transfer. The vault's
+manifest and policy are **not** changed until the new owner accepts — the old owner
+retains full control in the interim. Transfers expire after 7 days.
+
+### vault accept-transfer
+
+Accept a pending ownership transfer (phase 2). Verifies the old owner's signature,
+checks the transfer has not expired, then atomically updates the manifest owner,
+adjusts the policy (downgrading/removing the old owner), re-signs the header and
+policy with the new owner's signing key, and updates the TOFU pin.
+
+```bash
+sigyn vault accept-transfer myapp
+```
+
+If the transfer has expired, the pending file is removed and the old owner must
+initiate a new transfer.
+
+### vault export
+
+Export a vault as an encrypted tar.gz archive. All data on disk is already encrypted, so
+the archive contains no plaintext secrets. Requires Admin+ access.
+
+```bash
+sigyn vault export myapp -o backup.tar.gz
+sigyn vault export myapp --output /backups/myapp-2025.tar.gz
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--output` | `-o` | Output file path for the tar.gz archive |
+| `--force` | | Overwrite the output file if it already exists |
 
 ## secret (alias: s)
 
@@ -351,6 +449,27 @@ Show the change history of a secret.
 sigyn secret history DATABASE_URL --env dev
 ```
 
+### secret copy
+
+Copy secrets between vaults (or between environments in different vaults). Supports glob
+patterns for key matching. Each vault is unlocked separately, and both sides are audited.
+
+```bash
+sigyn secret copy DATABASE_URL --from-vault app1 --to-vault app2
+sigyn secret copy 'DB_*' 'API_*' --from-vault src --to-vault dst --from-env prod --to-env staging
+```
+
+| Flag | Description |
+|---|---|
+| `--from-vault <NAME>` | Source vault name |
+| `--to-vault <NAME>` | Destination vault name |
+| `--from-env <ENV>` | Source environment (default: `dev`) |
+| `--to-env <ENV>` | Destination environment (default: `dev`) |
+
+Secrets are decrypted from the source vault and re-encrypted with the destination vault's
+key. Requires Read access on source and Write access on destination. Audit entries are
+written on both sides (SecretRead on source, SecretsCopied on destination).
+
 ## env (alias: e)
 
 Manage environments within a vault.
@@ -412,6 +531,23 @@ sigyn env promote --from staging --to prod --keys DATABASE_URL,API_KEY
 | `--to <ENV>` | Target environment |
 | `--keys <K1,K2,...>` | Optional comma-separated list of keys to promote (default: all) |
 
+### env delete
+
+Delete an environment and all its secrets. Requires Admin+ access. Cannot delete the
+last environment in a vault.
+
+```bash
+sigyn env delete qa
+sigyn env delete canary --force
+```
+
+| Flag | Description |
+|---|---|
+| `--force` | Skip confirmation prompt (required in non-interactive mode) |
+
+Removes the environment file, updates the manifest, and cleans up the header's env_slots.
+The deletion is audited.
+
 ## policy (alias: p)
 
 Manage access policies, members, and RBAC rules.
@@ -465,6 +601,21 @@ sigyn policy check a1b2c3d4e5f6... write --env prod --key DATABASE_URL
 | `--key, -k <KEY>` | Optional secret key to check |
 
 Actions: `read`, `write`, `delete`, `manage-members`, `manage-policy`, `create-env`, `promote`.
+
+### policy history
+
+Show policy-related events from the audit log. Filters for member invitations, revocations,
+policy changes, ownership transfers, and environment creation/deletion.
+
+```bash
+sigyn policy history
+sigyn policy history -n 100
+sigyn policy history --json
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `-n` | | Number of entries to show (default: 50) |
 
 ## mfa
 
@@ -589,6 +740,53 @@ List pending invitations.
 
 ```bash
 sigyn delegation pending
+```
+
+### delegation bulk-invite
+
+Invite multiple members at once from a JSON file. All entries are validated before any
+mutations are applied (all-or-nothing validation). Header and policy are saved once at
+the end.
+
+```bash
+sigyn delegation bulk-invite --file members.json
+sigyn delegation bulk-invite --file members.json --force
+```
+
+| Flag | Description |
+|---|---|
+| `--file <PATH>` | Path to JSON file with member definitions |
+| `--force` | Skip confirmation prompt |
+
+**File format** (JSON array):
+```json
+[
+  {"fingerprint": "a1b2c3d4e5f6...", "role": "contributor", "envs": "dev,staging"},
+  {"fingerprint": "f7e8d9c0b1a2...", "role": "readonly", "envs": "*"}
+]
+```
+
+Each entry supports `fingerprint` (required), `role` (default: readonly), and `envs` (default: `*`).
+
+### delegation bulk-revoke
+
+Revoke multiple members at once from a JSON file. Delegates to the standard revoke logic,
+including environment key rotation and optional cascade.
+
+```bash
+sigyn delegation bulk-revoke --file revoke-list.json
+sigyn delegation bulk-revoke --file revoke-list.json --cascade --force
+```
+
+| Flag | Description |
+|---|---|
+| `--file <PATH>` | Path to JSON file with fingerprint list |
+| `--cascade` | Also revoke all members they transitively invited |
+| `--force` | Skip confirmation prompt |
+
+**File format** (JSON array of fingerprint strings):
+```json
+["a1b2c3d4e5f6...", "f7e8d9c0b1a2..."]
 ```
 
 ## audit

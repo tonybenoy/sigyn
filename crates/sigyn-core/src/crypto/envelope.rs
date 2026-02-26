@@ -296,6 +296,19 @@ pub fn remove_recipient_v2(header: &mut EnvelopeHeader, fingerprint: &KeyFingerp
     }
 }
 
+/// Check if any vault_key_slots entry matches the given fingerprint.
+pub fn has_recipient(header: &EnvelopeHeader, fingerprint: &KeyFingerprint) -> bool {
+    header
+        .vault_key_slots
+        .iter()
+        .any(|s| &s.fingerprint == fingerprint)
+}
+
+/// Remove all env_slots entries for a given environment name.
+pub fn remove_env_slots(header: &mut EnvelopeHeader, env_name: &str) {
+    header.env_slots.remove(env_name);
+}
+
 /// Remove a recipient from a single environment's slots.
 pub fn remove_env_recipient(
     header: &mut EnvelopeHeader,

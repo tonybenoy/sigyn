@@ -78,8 +78,19 @@ impl AgentState {
     }
 
     fn evict_expired(&mut self) {
-        self.keys
-            .retain(|_, entry| entry.cached_at.elapsed() < self.timeout);
+        let expired: Vec<String> = self
+            .keys
+            .iter()
+            .filter(|(_, e)| e.cached_at.elapsed() >= self.timeout)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            if let Some(mut entry) = self.keys.remove(&key) {
+                for byte in entry.key_material.iter_mut() {
+                    *byte = 0;
+                }
+            }
+        }
     }
 }
 
@@ -188,9 +199,10 @@ pub fn agent_passphrase(fingerprint: &str, passphrase: &str) -> Result<Vec<u8>> 
     }
 
     if trimmed == "NEED_PASSPHRASE" {
-        // Send passphrase
+        // Send passphrase base64-encoded to handle spaces and special chars
         let stream_ref = reader.get_mut();
-        writeln!(stream_ref, "PASSPHRASE {} {}", fingerprint, passphrase)?;
+        let pass_b64 = base64_encode(passphrase.as_bytes());
+        writeln!(stream_ref, "PASSPHRASE {} {}", fingerprint, pass_b64)?;
         stream_ref.flush()?;
 
         let mut response = String::new();
@@ -205,6 +217,29 @@ pub fn agent_passphrase(fingerprint: &str, passphrase: &str) -> Result<Vec<u8>> 
     }
 
     anyhow::bail!("unexpected agent response: {}", trimmed);
+}
+
+/// Evict a specific fingerprint from the agent cache.
+/// Falls back to LOCK (clear all) if the agent doesn't support per-key eviction.
+pub fn agent_evict(_fingerprint: &str) -> Result<()> {
+    let sock_path = get_agent_socket().ok_or_else(|| anyhow::anyhow!("no running agent found"))?;
+    let mut stream =
+        UnixStream::connect(&sock_path).context("failed to connect to agent socket")?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+
+    // No dedicated EVICT command exists yet; use LOCK to clear all cached keys.
+    writeln!(stream, "LOCK")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    if line.trim() == "OK" {
+        Ok(())
+    } else {
+        anyhow::bail!("agent evict failed: {}", line.trim())
+    }
 }
 
 /// Cache a loaded identity's key material in the agent.
@@ -279,7 +314,22 @@ fn handle_client(
             }
             Some("PASSPHRASE") => {
                 let fp = parts.get(1).unwrap_or(&"").to_string();
-                let passphrase = parts.get(2).unwrap_or(&"").to_string();
+                let pass_b64 = parts.get(2).unwrap_or(&"");
+                let passphrase = match base64_decode(pass_b64) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            let _ = writeln!(writer, "ERR invalid passphrase encoding");
+                            let _ = writer.flush();
+                            continue;
+                        }
+                    },
+                    Err(_) => {
+                        let _ = writeln!(writer, "ERR invalid base64 passphrase");
+                        let _ = writer.flush();
+                        continue;
+                    }
+                };
 
                 let store = IdentityStore::new(home.clone());
                 match KeyFingerprint::from_hex(&fp) {

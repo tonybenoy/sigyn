@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-cli"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-core"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-engine"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-recovery"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "chrono",

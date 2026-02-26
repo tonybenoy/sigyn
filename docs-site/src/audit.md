@@ -21,8 +21,9 @@ Each log entry contains:
 
 ## Tracked Actions
 
-- `VaultCreated`, `VaultDeleted`
+- `VaultCreated`, `VaultDeleted`, `VaultExported`
 - `SecretRead`, `SecretWritten`, `SecretDeleted`
+- `SecretsCopied` — `sigyn secret copy` (records keys, source/dest envs)
 - `SecretsExported` — `sigyn run export` (records env and format)
 - `SecretsInjected` — `sigyn run exec` (records env and command)
 - `SecretsServed` — `sigyn run serve` (records env)
@@ -30,8 +31,10 @@ Each log entry contains:
 - `MemberInvited`, `MemberRevoked`
 - `PolicyChanged`
 - `MasterKeyRotated`
+- `OwnershipTransferred` — records from/to fingerprints
+- `OwnershipTransferAccepted` — records accepting fingerprint
 - `ForkCreated`
-- `EnvCreated`, `EnvPromoted`
+- `EnvironmentCreated`, `EnvironmentDeleted`, `EnvironmentPromoted`
 - `BreakGlassActivated`
 
 ## Commands

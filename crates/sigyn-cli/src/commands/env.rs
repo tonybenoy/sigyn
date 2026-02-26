@@ -37,6 +37,14 @@ pub enum EnvCommands {
         /// New environment name
         target: String,
     },
+    /// Delete an environment
+    Delete {
+        /// Environment name
+        name: String,
+        /// Force deletion without confirmation
+        #[arg(long)]
+        force: bool,
+    },
     /// Promote secrets from one environment to another
     Promote {
         /// Source environment name
@@ -473,6 +481,104 @@ pub fn handle(
                 crate::output::print_success(&format!(
                     "Cloned '{}' → '{}' ({} secrets)",
                     source, target, count
+                ));
+            }
+        }
+        EnvCommands::Delete { name, force } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(
+                &ctx,
+                sigyn_engine::policy::engine::AccessAction::ManagePolicy,
+                None,
+            )?;
+
+            let manifest_path = paths.manifest_path(&vault_name);
+            let mut manifest = ctx.manifest.clone();
+
+            if !manifest.environments.contains(&name) {
+                anyhow::bail!(
+                    "environment '{}' does not exist in vault '{}'",
+                    name,
+                    vault_name
+                );
+            }
+
+            if manifest.environments.len() <= 1 {
+                anyhow::bail!("cannot delete the last environment — vault must have at least one");
+            }
+
+            if !force && crate::config::is_interactive() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "Delete environment '{}'? All secrets in it will be permanently lost.",
+                        name
+                    ))
+                    .default(false)
+                    .interact()?;
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            } else if !force {
+                anyhow::bail!("use --force in non-interactive mode");
+            }
+
+            // Write audit entry BEFORE destroying data
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if let Ok(ac) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.vault_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            ) {
+                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                    log.append(
+                        &ctx.fingerprint,
+                        AuditAction::EnvironmentDeleted { name: name.clone() },
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("failed to write audit entry: {}", e))?;
+                }
+            }
+
+            // Delete env file
+            let env_path = paths.env_path(&vault_name, &name);
+            if env_path.exists() {
+                std::fs::remove_file(&env_path)?;
+            }
+
+            // Remove from manifest
+            manifest.environments.retain(|e| e != &name);
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.vault_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
+
+            // Remove env slots from header
+            let mut header = ctx.header.clone();
+            sigyn_engine::crypto::envelope::remove_env_slots(&mut header, &name);
+            {
+                use sigyn_engine::crypto::envelope;
+                let signed = envelope::sign_header(
+                    &header,
+                    ctx.loaded_identity.signing_key(),
+                    ctx.manifest.vault_id,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+                crate::config::secure_write(&paths.members_path(&vault_name), &signed)?;
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "environment_deleted",
+                    "name": name,
+                    "vault": vault_name,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Deleted environment '{}' from vault '{}'",
+                    name, vault_name
                 ));
             }
         }

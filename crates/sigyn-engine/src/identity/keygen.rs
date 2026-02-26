@@ -129,6 +129,66 @@ impl IdentityStore {
         Ok(self.list()?.into_iter().find(|i| i.profile.name == name))
     }
 
+    /// Change the passphrase for an existing identity.
+    ///
+    /// Loads the identity with the old passphrase, re-wraps the keys with the
+    /// new passphrase (generating a fresh salt), and atomically overwrites the file.
+    pub fn change_passphrase(
+        &self,
+        fingerprint: &KeyFingerprint,
+        old_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<()> {
+        let path = self.identity_path(fingerprint);
+        if !path.exists() {
+            return Err(SigynError::IdentityNotFound(fingerprint.to_hex()));
+        }
+
+        // Load and verify with old passphrase
+        let file_data = std::fs::read(&path)?;
+        let data = self.verify_and_strip_mac(&path, &file_data)?;
+        let wrapped: WrappedIdentity = ciborium_from_slice(&data)?;
+
+        let mut enc_bytes = wrapped.unwrap_encryption_key(old_passphrase)?;
+        let mut sign_bytes = wrapped.unwrap_signing_key(old_passphrase)?;
+
+        // Re-wrap with new passphrase (generates new salt)
+        let result = WrappedIdentity::wrap(
+            &enc_bytes,
+            &sign_bytes,
+            wrapped.encryption_pubkey,
+            wrapped.signing_pubkey,
+            wrapped.profile,
+            new_passphrase,
+        );
+
+        // Zeroize raw key bytes regardless of wrap outcome
+        enc_bytes.iter_mut().for_each(|b| *b = 0);
+        sign_bytes.iter_mut().for_each(|b| *b = 0);
+
+        let new_wrapped = result?;
+
+        // Serialize and write with MAC
+        let cbor_data = ciborium_to_vec(&new_wrapped)?;
+        let device_key = crate::device::load_or_create_device_key(&self.base_dir)?;
+        let mac = compute_identity_mac(&cbor_data, &device_key);
+        let mut new_data = cbor_data;
+        new_data.extend_from_slice(mac.as_bytes());
+        crate::io::atomic_write(&path, &new_data)?;
+
+        Ok(())
+    }
+
+    /// Delete an identity file from disk.
+    pub fn delete(&self, fingerprint: &KeyFingerprint) -> Result<()> {
+        let path = self.identity_path(fingerprint);
+        if !path.exists() {
+            return Err(SigynError::IdentityNotFound(fingerprint.to_hex()));
+        }
+        std::fs::remove_file(&path)?;
+        Ok(())
+    }
+
     /// Verify and strip the BLAKE3 keyed MAC from identity file data.
     /// If the MAC is missing (old format), warn and rewrite the file with a MAC.
     fn verify_and_strip_mac(&self, path: &std::path::Path, file_data: &[u8]) -> Result<Vec<u8>> {

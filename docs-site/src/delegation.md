@@ -352,6 +352,62 @@ This:
 Only members with Admin role or higher can activate breach mode
 (`AccessAction::ManagePolicy` is required).
 
+## Bulk Operations
+
+For onboarding or offboarding multiple team members at once, use the bulk commands:
+
+### Bulk Invite
+
+```bash
+sigyn delegation bulk-invite --file members.json
+```
+
+The JSON file contains an array of member definitions:
+
+```json
+[
+  {"fingerprint": "a1b2c3d4e5f6...", "role": "contributor", "envs": "dev,staging"},
+  {"fingerprint": "f7e8d9c0b1a2...", "role": "readonly", "envs": "*"}
+]
+```
+
+All entries are validated before any are applied. If any fingerprint is invalid or any
+role is unrecognized, the entire operation is aborted. On success, the header and policy
+are saved once (not per entry), and each member gets an audit entry.
+
+### Bulk Revoke
+
+```bash
+sigyn delegation bulk-revoke --file revoke-list.json --cascade
+```
+
+The JSON file is a simple array of fingerprint strings:
+
+```json
+["a1b2c3d4e5f6...", "f7e8d9c0b1a2..."]
+```
+
+Uses the same revocation logic as `delegation revoke`, including key rotation and
+optional cascade. All fingerprints are validated before any mutations.
+
+## Ownership Transfer
+
+Vault ownership can be transferred to another member using a two-phase protocol:
+
+```bash
+# Phase 1: Current owner initiates transfer
+sigyn vault transfer myapp --to a1b2c3d4e5f6...
+
+# Phase 2: New owner accepts and re-signs
+sigyn vault accept-transfer myapp
+```
+
+Phase 1 only writes a signed `pending_transfer.cbor` — the old owner retains full
+control until the new owner accepts. Phase 2 atomically updates the manifest, policy,
+and header. The old owner is downgraded to Admin by default (configurable with
+`--downgrade-to`). Transfers expire after 7 days. Both phases are recorded in the
+audit trail.
+
 ## Operational Recommendations
 
 1. **Use cascade revocation** when removing someone who has invited others, unless you specifically want to preserve their subtree.

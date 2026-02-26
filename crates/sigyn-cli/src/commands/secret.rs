@@ -151,6 +151,24 @@ pub enum SecretCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Copy secrets between vaults
+    Copy {
+        /// Secret key(s) to copy (supports glob patterns)
+        #[arg(required = true, num_args = 1..)]
+        keys: Vec<String>,
+        /// Source vault name
+        #[arg(long)]
+        from_vault: String,
+        /// Destination vault name
+        #[arg(long)]
+        to_vault: String,
+        /// Source environment
+        #[arg(long, default_value = "dev")]
+        from_env: String,
+        /// Destination environment
+        #[arg(long, default_value = "dev")]
+        to_env: String,
+    },
     /// Generate a random secret
     Generate {
         /// Secret key name
@@ -538,19 +556,15 @@ pub fn unlock_vault(
         &owner_verifying_key,
         &manifest.vault_id,
     )
-    .unwrap_or_else(|e| {
-        eprintln!(
-            "{} policy signature verification failed: {}",
-            console::style("warning:").yellow().bold(),
-            e
-        );
-        eprintln!(
-            "{} falling back to unsigned policy load",
-            console::style("warning:").yellow().bold()
-        );
-        VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &vault_cipher)
-            .unwrap_or_default()
-    });
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "policy signature verification failed: {}. \
+             The policy file may have been tampered with. \
+             If the vault owner changed, run: sigyn vault trust {} --accept-new-owner",
+            e,
+            vault_name
+        )
+    })?;
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();
@@ -1349,8 +1363,13 @@ pub fn handle(
                     continue;
                 }
 
+                // Use the per-env cipher; skip envs the user doesn't have access to
+                let env_cipher = match ctx.cipher_for_env(env_name) {
+                    Some(c) => c,
+                    None => continue,
+                };
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
+                let plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
 
                 for (key, entry) in &plaintext.entries {
                     if glob_match(&pattern, key) {
@@ -1383,6 +1402,151 @@ pub fn handle(
                 crate::output::print_json(&results)?;
             } else if !found_any {
                 println!("  No secrets matching '{}' found.", pattern);
+            }
+        }
+        SecretCommands::Copy {
+            keys,
+            from_vault,
+            to_vault,
+            from_env,
+            to_env,
+        } => {
+            // Unlock source vault
+            let src_ctx = unlock_vault(identity, Some(&from_vault), Some(&from_env))?;
+            check_access(&src_ctx, AccessAction::Read, None)?;
+
+            // Read and decrypt source env
+            let src_cipher = src_ctx
+                .cipher_for_env(&from_env)
+                .ok_or_else(|| anyhow::anyhow!("no access to source env '{}'", from_env))?;
+            let src_path = src_ctx.paths.env_path(&from_vault, &from_env);
+            if !src_path.exists() {
+                anyhow::bail!(
+                    "source environment '{}' has no secrets in vault '{}'",
+                    from_env,
+                    from_vault
+                );
+            }
+            let src_encrypted = env_file::read_encrypted_env(&src_path)?;
+            let src_env = env_file::decrypt_env(&src_encrypted, src_cipher)?;
+
+            // Resolve keys with glob matching
+            let mut resolved_keys: Vec<String> = Vec::new();
+            for pattern in &keys {
+                let mut matched = false;
+                for key in src_env.entries.keys() {
+                    if glob_match(pattern, key) {
+                        if !resolved_keys.contains(key) {
+                            resolved_keys.push(key.clone());
+                        }
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    anyhow::bail!("no keys matching '{}' in source env", pattern);
+                }
+            }
+
+            if resolved_keys.is_empty() {
+                anyhow::bail!("no keys matched");
+            }
+
+            // Unlock destination vault (may prompt for a different identity/passphrase)
+            let dst_ctx = unlock_vault(identity, Some(&to_vault), Some(&to_env))?;
+            // Check write access per-key to enforce secret_patterns restrictions
+            for key in &resolved_keys {
+                check_access(&dst_ctx, AccessAction::Write, Some(key))?;
+            }
+
+            // Read or create destination env
+            let dst_cipher = dst_ctx
+                .cipher_for_env(&to_env)
+                .ok_or_else(|| anyhow::anyhow!("no access to destination env '{}'", to_env))?;
+            let dst_path = dst_ctx.paths.env_path(&to_vault, &to_env);
+            let mut dst_env = if dst_path.exists() {
+                let enc = env_file::read_encrypted_env(&dst_path)?;
+                env_file::decrypt_env(&enc, dst_cipher)?
+            } else {
+                sigyn_engine::vault::PlaintextEnv::new()
+            };
+
+            // Copy secrets
+            let mut copied = Vec::new();
+            for key in &resolved_keys {
+                if let Some(entry) = src_env.get(key) {
+                    dst_env.set(key.clone(), entry.value.clone(), &dst_ctx.fingerprint);
+                    copied.push(key.clone());
+                }
+            }
+
+            // Encrypt and write destination env
+            let encrypted = env_file::encrypt_env(&dst_env, dst_cipher, &to_env)?;
+            env_file::write_encrypted_env(&dst_path, &encrypted)?;
+
+            // Audit on source: SecretRead per key
+            {
+                let audit_path = src_ctx.paths.audit_path(&src_ctx.vault_name);
+                if let Ok(ac) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    src_ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &src_ctx.manifest.vault_id,
+                ) {
+                    if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                        for key in &copied {
+                            let _ = log.append(
+                                &src_ctx.fingerprint,
+                                AuditAction::SecretRead { key: key.clone() },
+                                Some(from_env.clone()),
+                                AuditOutcome::Success,
+                                src_ctx.loaded_identity.signing_key(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Audit on destination: SecretsCopied
+            {
+                let audit_path = dst_ctx.paths.audit_path(&dst_ctx.vault_name);
+                if let Ok(ac) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    dst_ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &dst_ctx.manifest.vault_id,
+                ) {
+                    if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                        let _ = log.append(
+                            &dst_ctx.fingerprint,
+                            AuditAction::SecretsCopied {
+                                keys: copied.clone(),
+                                from_env: from_env.clone(),
+                                to_env: to_env.clone(),
+                            },
+                            Some(to_env.clone()),
+                            AuditOutcome::Success,
+                            dst_ctx.loaded_identity.signing_key(),
+                        );
+                    }
+                }
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "secrets_copied",
+                    "keys": copied,
+                    "from_vault": from_vault,
+                    "from_env": from_env,
+                    "to_vault": to_vault,
+                    "to_env": to_env,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Copied {} secret(s) from {}/{} to {}/{}",
+                    copied.len(),
+                    from_vault,
+                    from_env,
+                    to_vault,
+                    to_env
+                ));
             }
         }
         SecretCommands::Generate {

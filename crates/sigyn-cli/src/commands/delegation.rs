@@ -59,6 +59,29 @@ pub enum DelegationCommands {
         #[arg(long)]
         env: String,
     },
+    /// Bulk invite members from a JSON file
+    #[command(name = "bulk-invite")]
+    BulkInvite {
+        /// Path to JSON file with member definitions
+        #[arg(long)]
+        file: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
+    /// Bulk revoke members from a JSON file or list
+    #[command(name = "bulk-revoke")]
+    BulkRevoke {
+        /// Path to JSON file with fingerprint list
+        #[arg(long)]
+        file: String,
+        /// Also revoke all members they invited
+        #[arg(long)]
+        cascade: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
     /// Revoke member(s)' access to a specific environment (v2 only)
     RevokeEnv {
         /// Member fingerprint(s)
@@ -822,6 +845,279 @@ pub fn handle(
                     }
                 }
             }
+        }
+        DelegationCommands::BulkInvite { file, force } => {
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            check_access(&ctx, AccessAction::ManageMembers, None)?;
+
+            // Parse JSON file: [{"fingerprint": "...", "role": "contributor", "envs": "dev,staging"}, ...]
+            let file_contents = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", file, e))?;
+            let entries: Vec<serde_json::Value> = serde_json::from_str(&file_contents)
+                .map_err(|e| anyhow::anyhow!("invalid JSON in '{}': {}", file, e))?;
+
+            // Validate all entries before executing any
+            struct BulkEntry {
+                fingerprint: KeyFingerprint,
+                role: Role,
+                envs: Vec<String>,
+            }
+            let mut validated = Vec::new();
+            for (i, entry) in entries.iter().enumerate() {
+                let fp_hex = entry["fingerprint"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("entry {}: missing 'fingerprint'", i))?;
+                let fp = KeyFingerprint::from_hex(fp_hex)
+                    .map_err(|e| anyhow::anyhow!("entry {}: invalid fingerprint: {}", i, e))?;
+                let role_str = entry["role"].as_str().unwrap_or("readonly");
+                let role = Role::from_str_name(role_str)
+                    .ok_or_else(|| anyhow::anyhow!("entry {}: unknown role '{}'", i, role_str))?;
+                let envs_str = entry["envs"].as_str().unwrap_or("*");
+                let envs: Vec<String> = envs_str.split(',').map(|s| s.trim().to_string()).collect();
+
+                // Validate role level and delegation depth (same checks as single invite)
+                if role == Role::Owner {
+                    anyhow::bail!("entry {}: cannot invite with 'owner' role", i);
+                }
+                if ctx.fingerprint != ctx.manifest.owner {
+                    if let Some(delegator) = ctx.policy.get_member(&ctx.fingerprint) {
+                        if role.level() >= delegator.role.level() {
+                            anyhow::bail!(
+                                "entry {}: cannot invite with role '{}' (level {}) — your role '{}' (level {}) must be higher",
+                                i, role, role.level(), delegator.role, delegator.role.level()
+                            );
+                        }
+                    } else {
+                        anyhow::bail!("you are not a member of this vault");
+                    }
+                    sigyn_engine::delegation::validate_delegation(
+                        &ctx.policy,
+                        &ctx.fingerprint,
+                        role,
+                    )
+                    .map_err(|e| anyhow::anyhow!("entry {}: {}", i, e))?;
+                }
+
+                validated.push(BulkEntry {
+                    fingerprint: fp,
+                    role,
+                    envs,
+                });
+            }
+
+            if validated.is_empty() {
+                anyhow::bail!("no entries in file");
+            }
+
+            // Show summary and confirm
+            if !force {
+                println!("{}", style("Bulk invite summary:").bold());
+                for entry in &validated {
+                    println!(
+                        "  {} {} envs=[{}]",
+                        &entry.fingerprint.to_hex()[..12],
+                        entry.role,
+                        entry.envs.join(",")
+                    );
+                }
+                if crate::config::is_interactive() {
+                    let confirm = dialoguer::Confirm::new()
+                        .with_prompt(format!("Invite {} member(s)?", validated.len()))
+                        .default(false)
+                        .interact()?;
+                    if !confirm {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                } else {
+                    anyhow::bail!("use --force in non-interactive mode");
+                }
+            }
+
+            let home = sigyn_home();
+            let store = IdentityStore::new(home);
+            let identities = store
+                .list()
+                .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+
+            let mut header: EnvelopeHeader = ctx.header.clone();
+            let mut policy = ctx.policy.clone();
+            let mut invited = 0usize;
+            let mut failed = 0usize;
+
+            for entry in &validated {
+                let invitee_identity = match identities
+                    .iter()
+                    .find(|id| id.fingerprint == entry.fingerprint)
+                {
+                    Some(id) => id,
+                    None => {
+                        failed += 1;
+                        crate::output::print_error(&format!(
+                            "identity not found locally for {}",
+                            entry.fingerprint.to_hex()
+                        ));
+                        continue;
+                    }
+                };
+
+                // Build member policy
+                let mut member = MemberPolicy::new(entry.fingerprint.clone(), entry.role);
+                member.allowed_envs = entry.envs.clone();
+                member.delegated_by = Some(ctx.fingerprint.clone());
+                policy.add_member(member);
+
+                // Add vault key slot
+                if let Err(e) = envelope::add_vault_key_recipient(
+                    &mut header,
+                    ctx.vault_cipher.key_bytes(),
+                    &invitee_identity.encryption_pubkey,
+                    ctx.manifest.vault_id,
+                ) {
+                    failed += 1;
+                    crate::output::print_error(&format!(
+                        "failed to add vault key for {}: {}",
+                        &entry.fingerprint.to_hex()[..12],
+                        e
+                    ));
+                    continue;
+                }
+
+                // Add env slots
+                let envs_to_grant: Vec<String> = if entry.envs.iter().any(|e| e == "*") {
+                    ctx.manifest.environments.clone()
+                } else {
+                    entry.envs.clone()
+                };
+                let mut env_ok = true;
+                for env_name in &envs_to_grant {
+                    if let Some(env_key) = ctx.env_ciphers.get(env_name) {
+                        if let Err(e) = envelope::add_env_recipient(
+                            &mut header,
+                            env_name,
+                            env_key.key_bytes(),
+                            &invitee_identity.encryption_pubkey,
+                            ctx.manifest.vault_id,
+                        ) {
+                            crate::output::print_error(&format!(
+                                "failed to add env '{}' for {}: {}",
+                                env_name,
+                                &entry.fingerprint.to_hex()[..12],
+                                e
+                            ));
+                            env_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !env_ok {
+                    failed += 1;
+                    continue;
+                }
+
+                audit_log(
+                    &ctx,
+                    AuditAction::MemberInvited {
+                        fingerprint: entry.fingerprint.clone(),
+                    },
+                );
+                invited += 1;
+            }
+
+            // Save header and policy ONCE at end
+            policy
+                .save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &ctx.vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
+            save_header(
+                &header,
+                &ctx.paths,
+                &ctx.vault_name,
+                ctx.loaded_identity.signing_key(),
+                ctx.manifest.vault_id,
+            )?;
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "bulk_invite",
+                    "invited": invited,
+                    "failed": failed,
+                }))?;
+            } else {
+                println!(
+                    "{} invited, {} failed",
+                    style(invited).green().bold(),
+                    if failed > 0 {
+                        style(failed).red().bold()
+                    } else {
+                        style(failed).dim()
+                    }
+                );
+            }
+        }
+        DelegationCommands::BulkRevoke {
+            file,
+            cascade,
+            force,
+        } => {
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            check_access(&ctx, AccessAction::ManageMembers, None)?;
+
+            // Parse JSON file: ["fingerprint1", "fingerprint2", ...]
+            let file_contents = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", file, e))?;
+            let fp_strings: Vec<String> = serde_json::from_str(&file_contents)
+                .map_err(|e| anyhow::anyhow!("invalid JSON in '{}': {}", file, e))?;
+
+            // Validate all fingerprints before executing
+            let mut fps = Vec::new();
+            for (i, fp_hex) in fp_strings.iter().enumerate() {
+                let fp = KeyFingerprint::from_hex(fp_hex)
+                    .map_err(|e| anyhow::anyhow!("entry {}: invalid fingerprint: {}", i, e))?;
+                fps.push(fp);
+            }
+
+            if fps.is_empty() {
+                anyhow::bail!("no fingerprints in file");
+            }
+
+            // Show summary and confirm
+            if !force {
+                println!("{}", style("Bulk revoke summary:").bold());
+                for fp in &fps {
+                    println!("  {}", &fp.to_hex()[..12]);
+                }
+                if crate::config::is_interactive() {
+                    let confirm = dialoguer::Confirm::new()
+                        .with_prompt(format!("Revoke {} member(s)?", fps.len()))
+                        .default(false)
+                        .interact()?;
+                    if !confirm {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                } else {
+                    anyhow::bail!("use --force in non-interactive mode");
+                }
+            }
+
+            // Reuse the existing revoke logic by converting to hex strings and delegating
+            let hex_strings: Vec<String> = fps.iter().map(|fp| fp.to_hex()).collect();
+            // We can just delegate to the Revoke handler — but to avoid code duplication
+            // we'll inline the same pattern
+            return super::delegation::handle(
+                DelegationCommands::Revoke {
+                    fingerprints: hex_strings,
+                    cascade,
+                },
+                vault,
+                identity,
+                json,
+            );
         }
         DelegationCommands::GrantEnv { fingerprints, env } => {
             let ctx = unlock_vault(identity, Some(vault_name), None)?;

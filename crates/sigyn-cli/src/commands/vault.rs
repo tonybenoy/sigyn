@@ -56,6 +56,42 @@ pub enum VaultCommands {
     },
     /// List all pinned vaults and their pinned owners
     Pins,
+    /// Delete a vault (owner only)
+    Delete {
+        /// Vault name
+        name: String,
+        /// Force deletion even if other members exist
+        #[arg(long)]
+        force: bool,
+    },
+    /// Transfer vault ownership to another member
+    Transfer {
+        /// Vault name
+        name: String,
+        /// Fingerprint of the new owner (must be an existing member)
+        #[arg(long)]
+        to: String,
+        /// Role to downgrade the old owner to (default: admin). Use "remove" to leave the vault.
+        #[arg(long, default_value = "admin")]
+        downgrade_to: String,
+    },
+    /// Accept a pending ownership transfer
+    #[command(name = "accept-transfer")]
+    AcceptTransfer {
+        /// Vault name
+        name: String,
+    },
+    /// Export a vault as an encrypted tar.gz archive
+    Export {
+        /// Vault name
+        name: String,
+        /// Output file path
+        #[arg(long, short)]
+        output: String,
+        /// Overwrite existing output file
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn create_single_vault(
@@ -539,6 +575,444 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                         );
                     }
                 }
+            }
+        }
+        VaultCommands::Transfer {
+            name,
+            to,
+            downgrade_to,
+        } => {
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+
+            // Owner-only
+            if ctx.fingerprint != ctx.manifest.owner {
+                anyhow::bail!(
+                    "only the vault owner can initiate a transfer (owner: {})",
+                    ctx.manifest.owner.to_hex()
+                );
+            }
+
+            let new_owner_fp = sigyn_engine::crypto::keys::KeyFingerprint::from_hex(&to)
+                .map_err(|e| anyhow::anyhow!("invalid fingerprint: {}", e))?;
+
+            if new_owner_fp == ctx.fingerprint {
+                anyhow::bail!("cannot transfer ownership to yourself");
+            }
+
+            // Verify new owner is an existing vault member
+            if !envelope::has_recipient(&ctx.header, &new_owner_fp) {
+                anyhow::bail!(
+                    "fingerprint {} is not a member of vault '{}'. Invite them first.",
+                    to,
+                    name
+                );
+            }
+
+            // Create signed pending transfer
+            let downgrade_role = if downgrade_to == "remove" {
+                None
+            } else {
+                Some(downgrade_to.clone())
+            };
+            let transfer = sigyn_engine::vault::PendingTransfer::sign(
+                ctx.manifest.vault_id,
+                &name,
+                &ctx.fingerprint,
+                &new_owner_fp,
+                downgrade_role.clone(),
+                ctx.loaded_identity.signing_key(),
+            );
+
+            // Validate downgrade role early
+            if let Some(ref role_name) = downgrade_role {
+                sigyn_engine::policy::roles::Role::from_str_name(role_name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown role: {}", role_name))?;
+            }
+
+            // Write pending transfer file only — do NOT update manifest or policy yet.
+            // The actual ownership change happens atomically in accept-transfer.
+            let transfer_path = paths.pending_transfer_path(&name);
+            let mut buf = Vec::new();
+            ciborium::into_writer(&transfer, &mut buf)
+                .map_err(|e| anyhow::anyhow!("failed to serialize transfer: {}", e))?;
+            crate::config::secure_write(&transfer_path, &buf)?;
+
+            // Audit — fail if audit cannot be written for this critical operation
+            {
+                let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &ctx.manifest.vault_id,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to derive audit cipher: {}", e))?;
+                let mut log = AuditLog::open(&paths.audit_path(&name), audit_cipher)
+                    .map_err(|e| anyhow::anyhow!("failed to open audit log: {}", e))?;
+                log.append(
+                    &ctx.fingerprint,
+                    AuditAction::OwnershipTransferred {
+                        from: ctx.fingerprint.clone(),
+                        to: new_owner_fp.clone(),
+                    },
+                    None,
+                    AuditOutcome::Success,
+                    ctx.loaded_identity.signing_key(),
+                )
+                .map_err(|e| anyhow::anyhow!("failed to write audit entry: {}", e))?;
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "transfer_initiated",
+                    "vault": name,
+                    "from": ctx.fingerprint.to_hex(),
+                    "to": to,
+                    "downgrade_to": downgrade_to,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Ownership transfer initiated for vault '{}'",
+                    name
+                ));
+                println!("  New owner: {}", style(&to).cyan());
+                println!("  Old owner downgraded to: {}", downgrade_to);
+                println!();
+                println!("{}", style("Next steps:").bold());
+                println!(
+                    "  The new owner must run: sigyn vault accept-transfer {}",
+                    name
+                );
+            }
+        }
+        VaultCommands::AcceptTransfer { name } => {
+            let transfer_path = paths.pending_transfer_path(&name);
+            if !transfer_path.exists() {
+                anyhow::bail!("no pending transfer found for vault '{}'", name);
+            }
+
+            // Read and verify the pending transfer
+            let transfer_data = std::fs::read(&transfer_path)?;
+            let transfer: sigyn_engine::vault::PendingTransfer =
+                ciborium::from_reader(&transfer_data[..])
+                    .map_err(|e| anyhow::anyhow!("invalid transfer file: {}", e))?;
+
+            // Unlock vault as the new owner
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+
+            // Verify we are the intended new owner
+            if ctx.fingerprint != transfer.to_owner {
+                anyhow::bail!(
+                    "this transfer is intended for {}, not for you ({})",
+                    transfer.to_owner.to_hex(),
+                    ctx.fingerprint.to_hex()
+                );
+            }
+
+            // Check transfer expiry
+            if transfer.is_expired() {
+                // Clean up expired transfer file
+                let _ = std::fs::remove_file(&transfer_path);
+                anyhow::bail!(
+                    "transfer expired (created {}). The old owner must initiate a new transfer.",
+                    transfer.created_at.format("%Y-%m-%d %H:%M UTC")
+                );
+            }
+
+            // Verify old owner's signature on the transfer.
+            // Look up the old owner's verifying key from the header (no identity store needed).
+            let old_owner_vk = {
+                let id_store = IdentityStore::new(home.clone());
+                let identities = id_store
+                    .list()
+                    .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+                identities
+                    .iter()
+                    .find(|id| id.fingerprint == transfer.from_owner)
+                    .map(|id| id.signing_pubkey.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "old owner identity {} not found locally — cannot verify transfer signature",
+                            transfer.from_owner.to_hex()
+                        )
+                    })?
+            };
+            transfer
+                .verify(&old_owner_vk)
+                .map_err(|_| anyhow::anyhow!("transfer signature verification failed"))?;
+
+            // Now apply the ownership change atomically:
+            // 1. Update manifest owner
+            let mut manifest = ctx.manifest.clone();
+            manifest.owner = ctx.fingerprint.clone();
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.vault_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&paths.manifest_path(&name), &sealed)?;
+
+            // 2. Update policy: downgrade old owner, remove new owner from members
+            let mut policy = ctx.policy.clone();
+            if let Some(ref role_name) = transfer.downgrade_role {
+                if let Some(role) = sigyn_engine::policy::roles::Role::from_str_name(role_name) {
+                    let member = sigyn_engine::policy::member::MemberPolicy::new(
+                        transfer.from_owner.clone(),
+                        role,
+                    );
+                    policy.add_member(member);
+                }
+            }
+            policy.remove_member(&ctx.fingerprint);
+
+            // 3. Re-sign header with new owner's signing key
+            let signed = envelope::sign_header(
+                &ctx.header,
+                ctx.loaded_identity.signing_key(),
+                manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+            crate::config::secure_write(&paths.members_path(&name), &signed)?;
+
+            // 4. Re-sign policy with new owner's signing key
+            policy.save_signed(
+                &paths.policy_path(&name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &manifest.vault_id,
+            )?;
+
+            // Delete pending transfer file
+            std::fs::remove_file(&transfer_path)?;
+
+            // Update TOFU pin to new owner's signing pubkey
+            let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+            if let Ok(mut pin_store) =
+                sigyn_engine::vault::local_state::load_pinned_store(&home, &device_key)
+            {
+                let state = pin_store.entry_mut(&name);
+                state.pin = Some(sigyn_engine::vault::VaultPin {
+                    vault_id: manifest.vault_id,
+                    owner_fingerprint: ctx.fingerprint.clone(),
+                    owner_signing_pubkey_bytes: ctx
+                        .loaded_identity
+                        .identity
+                        .signing_pubkey
+                        .to_bytes()
+                        .to_vec(),
+                    pinned_at: chrono::Utc::now(),
+                });
+                let _ = sigyn_engine::vault::local_state::save_pinned_store(
+                    &pin_store,
+                    &home,
+                    &device_key,
+                );
+            }
+
+            // Audit
+            if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.vault_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &manifest.vault_id,
+            ) {
+                if let Ok(mut log) = AuditLog::open(&paths.audit_path(&name), audit_cipher) {
+                    let _ = log.append(
+                        &ctx.fingerprint,
+                        AuditAction::OwnershipTransferAccepted {
+                            by: ctx.fingerprint.clone(),
+                        },
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    );
+                }
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "transfer_accepted",
+                    "vault": name,
+                    "new_owner": ctx.fingerprint.to_hex(),
+                    "from_owner": transfer.from_owner.to_hex(),
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Ownership transfer accepted for vault '{}'",
+                    name
+                ));
+                println!(
+                    "  You ({}) are now the owner.",
+                    style(&ctx.fingerprint.to_hex()[..12]).cyan()
+                );
+            }
+        }
+        VaultCommands::Export {
+            name,
+            output,
+            force,
+        } => {
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+            super::secret::check_access(
+                &ctx,
+                sigyn_engine::policy::engine::AccessAction::ManagePolicy,
+                None,
+            )?;
+
+            let vault_dir = paths
+                .safe_vault_dir(&name)
+                .map_err(|e| anyhow::anyhow!("symlink safety check failed: {}", e))?;
+
+            // Refuse to overwrite existing files unless --force
+            let output_path = std::path::Path::new(&output);
+            if output_path.exists() && !force {
+                anyhow::bail!(
+                    "output file '{}' already exists. Use --force to overwrite.",
+                    output
+                );
+            }
+
+            // Create tar.gz of vault directory (all files are already encrypted on disk)
+            let output_file = std::fs::File::create(&output)
+                .map_err(|e| anyhow::anyhow!("failed to create output file: {}", e))?;
+            let gz = flate2::write::GzEncoder::new(output_file, flate2::Compression::default());
+            let mut tar_builder = tar::Builder::new(gz);
+            tar_builder
+                .append_dir_all(&name, &vault_dir)
+                .map_err(|e| anyhow::anyhow!("failed to build archive: {}", e))?;
+            tar_builder
+                .finish()
+                .map_err(|e| anyhow::anyhow!("failed to finish archive: {}", e))?;
+
+            // Audit
+            if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.vault_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            ) {
+                if let Ok(mut log) = AuditLog::open(&paths.audit_path(&name), audit_cipher) {
+                    let _ = log.append(
+                        &ctx.fingerprint,
+                        AuditAction::VaultExported,
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    );
+                }
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "vault_exported",
+                    "vault": name,
+                    "output": output,
+                }))?;
+            } else {
+                crate::output::print_success(&format!("Vault '{}' exported to '{}'", name, output));
+                println!("  All data is encrypted — no plaintext secrets in the archive.");
+            }
+        }
+        VaultCommands::Delete { name, force } => {
+            let manifest_path = paths.manifest_path(&name);
+            if !manifest_path.exists() {
+                anyhow::bail!("vault '{}' not found", name);
+            }
+
+            // Unlock vault to verify ownership
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+            let manifest = &ctx.manifest;
+
+            // Owner-only check
+            if ctx.fingerprint != manifest.owner {
+                anyhow::bail!(
+                    "only the vault owner can delete a vault (owner: {})",
+                    manifest.owner.to_hex()
+                );
+            }
+
+            // Check for other members
+            if !force {
+                let member_count = ctx.policy.members.len();
+                if member_count > 0 {
+                    let member_fps: Vec<String> = ctx
+                        .policy
+                        .members
+                        .values()
+                        .take(5)
+                        .map(|m| m.fingerprint.to_hex()[..12].to_string())
+                        .collect();
+                    anyhow::bail!(
+                        "vault '{}' has {} other member(s): {}{}. \
+                         Revoke their access first, or use --force.",
+                        name,
+                        member_count,
+                        member_fps.join(", "),
+                        if member_count > 5 { ", ..." } else { "" }
+                    );
+                }
+            }
+
+            // Confirmation: must type vault name
+            if crate::config::is_interactive() {
+                let typed: String = dialoguer::Input::new()
+                    .with_prompt(format!(
+                        "Type '{}' to confirm deletion (this cannot be undone)",
+                        name
+                    ))
+                    .interact_text()?;
+                if typed != name {
+                    anyhow::bail!("vault name does not match — deletion aborted");
+                }
+            } else if !force {
+                anyhow::bail!("use --force in non-interactive mode");
+            }
+
+            // Write audit entry BEFORE destroying data — fail if audit cannot be written
+            let vault_id = manifest.vault_id;
+            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.vault_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to derive audit cipher: {}", e))?;
+            let mut log = AuditLog::open(&paths.audit_path(&name), audit_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to open audit log: {}", e))?;
+            log.append(
+                &ctx.fingerprint,
+                AuditAction::VaultDeleted { vault_id },
+                None,
+                AuditOutcome::Success,
+                ctx.loaded_identity.signing_key(),
+            )
+            .map_err(|e| anyhow::anyhow!("failed to write audit entry: {}", e))?;
+
+            // Best-effort sync push to persist audit on remote
+            let _ = crate::commands::sync::auto_push(&name);
+
+            // Remove vault directory (symlink-safe)
+            let vault_dir = paths
+                .safe_vault_dir(&name)
+                .map_err(|e| anyhow::anyhow!("symlink safety check failed: {}", e))?;
+            if vault_dir.exists() {
+                std::fs::remove_dir_all(&vault_dir)?;
+            }
+
+            // Remove from pinned vaults
+            let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+            if let Ok(mut pin_store) =
+                sigyn_engine::vault::local_state::load_pinned_store(&home, &device_key)
+            {
+                pin_store.remove(&name);
+                let _ = sigyn_engine::vault::local_state::save_pinned_store(
+                    &pin_store,
+                    &home,
+                    &device_key,
+                );
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "vault_deleted",
+                    "name": name,
+                    "vault_id": vault_id.to_string(),
+                }))?;
+            } else {
+                crate::output::print_success(&format!("Vault '{}' deleted", name));
             }
         }
     }

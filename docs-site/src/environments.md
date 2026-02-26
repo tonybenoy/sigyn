@@ -40,6 +40,19 @@ sigyn env promote --from staging --to prod --keys DATABASE_URL,API_KEY
 
 Promotion records are logged in the audit trail.
 
+## Deleting Environments
+
+Environments can be deleted if they are no longer needed. Requires Admin+ access.
+A vault must always have at least one environment.
+
+```bash
+sigyn env delete qa
+sigyn env delete canary --force
+```
+
+Deletion removes the encrypted env file, removes the environment from the manifest, and
+cleans up the corresponding key slots from the header. The action is recorded in the audit trail.
+
 ## Environment Policies
 
 Environments can have role-based restrictions. For example, you can require the `Admin` role to write to `prod` while allowing `Contributor` access to `dev` and `staging`. These are configured through the policy engine:

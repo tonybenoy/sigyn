@@ -118,6 +118,10 @@ impl VaultPaths {
         }
     }
 
+    pub fn pending_transfer_path(&self, name: &str) -> PathBuf {
+        self.vault_dir(name).join("pending_transfer.cbor")
+    }
+
     pub fn forks_path(&self, name: &str) -> PathBuf {
         self.vault_dir(name).join("forks.cbor")
     }

@@ -36,6 +36,26 @@ pub enum IdentityCommands {
         /// Fingerprint or name
         identity: Option<String>,
     },
+    /// Change the passphrase for an identity
+    #[command(name = "change-passphrase")]
+    ChangePassphrase {
+        /// Identity name or fingerprint (uses default if omitted)
+        identity: Option<String>,
+    },
+    /// Delete an identity
+    Delete {
+        /// Identity name or fingerprint
+        identity: String,
+        /// Force deletion even if identity is a member of local vaults
+        #[arg(long)]
+        force: bool,
+    },
+    /// Rotate keys (creates a new identity with a new fingerprint)
+    #[command(name = "rotate-keys")]
+    RotateKeys {
+        /// Identity name or fingerprint (uses default if omitted)
+        identity: Option<String>,
+    },
 }
 
 pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
@@ -123,6 +143,202 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                 );
             }
         }
+        IdentityCommands::ChangePassphrase { identity } => {
+            let id = resolve_identity(&store, identity.as_deref())?;
+            let fp_hex = id.fingerprint.to_hex();
+
+            let mut old_passphrase =
+                read_passphrase(&format!("Current passphrase for '{}': ", id.profile.name))?;
+
+            // Verify old passphrase by attempting load
+            if let Err(e) = store.load(&id.fingerprint, &old_passphrase) {
+                old_passphrase.zeroize();
+                return Err(e).context("wrong passphrase");
+            }
+
+            let mut new_passphrase = read_passphrase("New passphrase: ")?;
+            let mut confirm = read_passphrase("Confirm new passphrase: ")?;
+            if new_passphrase != confirm {
+                new_passphrase.zeroize();
+                confirm.zeroize();
+                old_passphrase.zeroize();
+                anyhow::bail!("passphrases do not match");
+            }
+            confirm.zeroize();
+
+            if new_passphrase.len() < 8 {
+                new_passphrase.zeroize();
+                old_passphrase.zeroize();
+                anyhow::bail!("passphrase must be at least 8 characters");
+            }
+
+            store
+                .change_passphrase(&id.fingerprint, &old_passphrase, &new_passphrase)
+                .context("failed to change passphrase")?;
+            old_passphrase.zeroize();
+            new_passphrase.zeroize();
+
+            // Evict agent cache so the old cached material is cleared
+            #[cfg(unix)]
+            {
+                let _ = crate::agent::agent_evict(&fp_hex);
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "passphrase_changed",
+                    "fingerprint": fp_hex,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Passphrase changed for '{}'",
+                    id.profile.name
+                ));
+            }
+        }
+        IdentityCommands::Delete { identity, force } => {
+            let id = resolve_identity(&store, Some(&identity))?;
+            let fp_hex = id.fingerprint.to_hex();
+
+            // Verify ownership via passphrase
+            let mut passphrase = read_passphrase(&format!(
+                "Passphrase for '{}' (to confirm ownership): ",
+                id.profile.name
+            ))?;
+            if let Err(e) = store.load(&id.fingerprint, &passphrase) {
+                passphrase.zeroize();
+                return Err(e).context("wrong passphrase — cannot verify identity ownership");
+            }
+            passphrase.zeroize();
+
+            // Check if identity is a member of any local vault
+            if !force {
+                let home = sigyn_home();
+                let paths = sigyn_engine::vault::VaultPaths::new(home);
+                let vaults = paths.list_vaults().unwrap_or_default();
+                let mut member_of = Vec::new();
+                for vault_name in &vaults {
+                    let members_path = paths.members_path(vault_name);
+                    if let Ok(data) = std::fs::read(&members_path) {
+                        if let Ok(header) =
+                            sigyn_engine::crypto::envelope::extract_header_unverified(&data)
+                        {
+                            if sigyn_engine::crypto::envelope::has_recipient(
+                                &header,
+                                &id.fingerprint,
+                            ) {
+                                member_of.push(vault_name.clone());
+                            }
+                        }
+                    }
+                }
+                if !member_of.is_empty() {
+                    anyhow::bail!(
+                        "identity '{}' is a member of vault(s): {}. \
+                         Revoke access first, or use --force.",
+                        id.profile.name,
+                        member_of.join(", ")
+                    );
+                }
+            }
+
+            if crate::config::is_interactive() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "Delete identity '{}'? This cannot be undone.",
+                        id.profile.name
+                    ))
+                    .default(false)
+                    .interact()?;
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            store
+                .delete(&id.fingerprint)
+                .context("failed to delete identity")?;
+
+            #[cfg(unix)]
+            {
+                let _ = crate::agent::agent_evict(&fp_hex);
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "identity_deleted",
+                    "fingerprint": fp_hex,
+                    "name": id.profile.name,
+                }))?;
+            } else {
+                crate::output::print_success(&format!("Identity '{}' deleted", id.profile.name));
+            }
+        }
+        IdentityCommands::RotateKeys { identity } => {
+            let id = resolve_identity(&store, identity.as_deref())?;
+            let old_fp_hex = id.fingerprint.to_hex();
+
+            eprintln!(
+                "{} Key rotation creates a NEW fingerprint. You must be re-invited to all vaults.",
+                style("warning:").yellow().bold()
+            );
+
+            if crate::config::is_interactive() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt("Proceed with key rotation?")
+                    .default(false)
+                    .interact()?;
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let mut passphrase =
+                read_passphrase(&format!("Passphrase for '{}': ", id.profile.name))?;
+            if let Err(e) = store.load(&id.fingerprint, &passphrase) {
+                passphrase.zeroize();
+                return Err(e).context("wrong passphrase");
+            }
+
+            // Generate new identity with same profile
+            let new_identity = store
+                .generate(id.profile.clone(), &passphrase)
+                .context("failed to generate new identity")?;
+            passphrase.zeroize();
+
+            // Delete old identity only after new one is successfully created
+            store
+                .delete(&id.fingerprint)
+                .context("failed to delete old identity")?;
+
+            #[cfg(unix)]
+            {
+                let _ = crate::agent::agent_evict(&old_fp_hex);
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "keys_rotated",
+                    "old_fingerprint": old_fp_hex,
+                    "new_fingerprint": new_identity.fingerprint.to_hex(),
+                }))?;
+            } else {
+                crate::output::print_success("Keys rotated successfully");
+                println!(
+                    "  Old fingerprint: {}",
+                    style(&old_fp_hex).dim().strikethrough()
+                );
+                println!(
+                    "  New fingerprint: {}",
+                    style(new_identity.fingerprint.to_hex()).cyan()
+                );
+                println!();
+                println!("{}", style("Next steps:").bold());
+                println!("  Share your new fingerprint with vault owners to be re-invited.");
+            }
+        }
     }
     Ok(())
 }
@@ -180,12 +396,15 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
     // Cache in agent for future use (best-effort, Unix only)
     #[cfg(unix)]
     if crate::agent::get_agent_socket().is_some() {
-        let signing_bytes = loaded.signing_key().to_bytes();
-        let encryption_bytes = loaded.encryption_key().to_bytes();
+        let mut signing_bytes = loaded.signing_key().to_bytes();
+        let mut encryption_bytes = loaded.encryption_key().to_bytes();
         let mut material = Vec::with_capacity(signing_bytes.len() + encryption_bytes.len());
         material.extend_from_slice(&signing_bytes);
         material.extend_from_slice(&encryption_bytes);
+        signing_bytes.zeroize();
+        encryption_bytes.zeroize();
         let _ = crate::agent::agent_cache(&fp_hex, &material);
+        material.zeroize();
     }
 
     Ok(loaded)

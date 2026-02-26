@@ -61,4 +61,9 @@ impl PinnedVaultsStore {
     pub fn get(&self, vault_name: &str) -> Option<&LocalVaultState> {
         self.vaults.get(vault_name)
     }
+
+    /// Remove a vault entry from the store. Returns the removed state if it existed.
+    pub fn remove(&mut self, vault_name: &str) -> Option<LocalVaultState> {
+        self.vaults.remove(vault_name)
+    }
 }

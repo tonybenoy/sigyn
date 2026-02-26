@@ -57,6 +57,12 @@ pub enum PolicyCommands {
         /// Actions requiring MFA (comma-separated): read,write,delete,manage-members,manage-policy,create-env,promote,all,none
         actions: String,
     },
+    /// Show policy-related audit history
+    History {
+        /// Number of entries to show
+        #[arg(short, long, default_value = "50")]
+        n: usize,
+    },
     /// Set per-action MFA requirements on a specific member
     #[command(name = "member-require-mfa")]
     MemberRequireMfa {
@@ -406,6 +412,94 @@ pub fn handle(
             }
         }
 
+        PolicyCommands::History { n } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::Audit, None)?;
+
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if !audit_path.exists() {
+                println!("No audit log found for vault '{}'", ctx.vault_name);
+                return Ok(());
+            }
+
+            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.vault_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to derive audit cipher: {}", e))?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, audit_cipher)?;
+            let all_entries = log.tail(1000)?;
+
+            // Filter for policy-related actions
+            let policy_entries: Vec<_> = all_entries
+                .into_iter()
+                .filter(|e| {
+                    matches!(
+                        e.action,
+                        AuditAction::PolicyChanged
+                            | AuditAction::MemberInvited { .. }
+                            | AuditAction::MemberRevoked { .. }
+                            | AuditAction::OwnershipTransferred { .. }
+                            | AuditAction::OwnershipTransferAccepted { .. }
+                            | AuditAction::EnvironmentCreated { .. }
+                            | AuditAction::EnvironmentDeleted { .. }
+                    )
+                })
+                .rev()
+                .take(n)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+
+            if json {
+                crate::output::print_json(&policy_entries)?;
+            } else {
+                println!(
+                    "{} {}",
+                    style("Policy History").bold(),
+                    style(format!("(showing {})", policy_entries.len())).dim()
+                );
+                println!("{}", style("─".repeat(80)).dim());
+                for entry in &policy_entries {
+                    let actor_short = &entry.actor.to_hex()[..12];
+                    let action_desc = match &entry.action {
+                        AuditAction::PolicyChanged => "policy changed".to_string(),
+                        AuditAction::MemberInvited { fingerprint } => {
+                            format!("invited {}", &fingerprint.to_hex()[..12])
+                        }
+                        AuditAction::MemberRevoked { fingerprint } => {
+                            format!("revoked {}", &fingerprint.to_hex()[..12])
+                        }
+                        AuditAction::OwnershipTransferred { from, to } => {
+                            format!(
+                                "ownership transferred {} -> {}",
+                                &from.to_hex()[..12],
+                                &to.to_hex()[..12]
+                            )
+                        }
+                        AuditAction::OwnershipTransferAccepted { by } => {
+                            format!("transfer accepted by {}", &by.to_hex()[..12])
+                        }
+                        AuditAction::EnvironmentCreated { name } => {
+                            format!("env '{}' created", name)
+                        }
+                        AuditAction::EnvironmentDeleted { name } => {
+                            format!("env '{}' deleted", name)
+                        }
+                        _ => format!("{:?}", entry.action),
+                    };
+                    println!(
+                        "  {} {} {} {}",
+                        style(format!("#{}", entry.sequence)).dim(),
+                        style(entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()).cyan(),
+                        style(actor_short).dim(),
+                        action_desc,
+                    );
+                }
+            }
+        }
         PolicyCommands::MemberRequireMfa {
             fingerprint,
             actions,
