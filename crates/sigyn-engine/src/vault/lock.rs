@@ -23,6 +23,13 @@ impl VaultLock {
             .open(lock_path)
             .map_err(|e| SigynError::LockFailed(e.to_string()))?;
 
+        // Restrict lock file permissions to owner-only (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+
         let mut lock = RwLock::new(file);
         let _ = lock.try_write().map_err(|_| {
             SigynError::LockFailed(format!(
@@ -34,9 +41,15 @@ impl VaultLock {
         Ok(Self { _lock: lock })
     }
 
+    /// Force-acquire the lock by removing any stale lock file atomically.
+    /// This avoids the TOCTOU of checking existence then removing — just
+    /// attempt removal unconditionally (ENOENT is fine).
     pub fn force_acquire(lock_path: &Path) -> Result<Self> {
-        if lock_path.exists() {
-            std::fs::remove_file(lock_path)?;
+        // Atomically remove the stale lock file; ignore "not found" errors
+        match std::fs::remove_file(lock_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
         Self::acquire(lock_path)
     }

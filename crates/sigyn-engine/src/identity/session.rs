@@ -20,11 +20,16 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 pub struct MfaSessionStore {
     session_dir: PathBuf,
+    /// HMAC key derived from the device key (not the public fingerprint).
+    hmac_key: [u8; 32],
 }
 
 impl MfaSessionStore {
-    pub fn new(session_dir: PathBuf) -> Self {
-        Self { session_dir }
+    pub fn new(session_dir: PathBuf, hmac_key: [u8; 32]) -> Self {
+        Self {
+            session_dir,
+            hmac_key,
+        }
     }
 
     fn session_path(&self, fingerprint: &KeyFingerprint) -> PathBuf {
@@ -43,7 +48,7 @@ impl MfaSessionStore {
         };
 
         // Verify HMAC using constant-time comparison to prevent timing attacks
-        let expected_hmac = compute_hmac(&session.verified_at, &fingerprint.0);
+        let expected_hmac = compute_hmac(&session.verified_at, &self.hmac_key);
         if !constant_time_eq(session.hmac.as_bytes(), expected_hmac.as_bytes()) {
             return false;
         }
@@ -58,8 +63,16 @@ impl MfaSessionStore {
     pub fn create(&self, fingerprint: &KeyFingerprint) -> Result<()> {
         std::fs::create_dir_all(&self.session_dir)?;
 
+        // Restrict session directory permissions to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.session_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
         let now = Utc::now();
-        let hmac = compute_hmac(&now, &fingerprint.0);
+        let hmac = compute_hmac(&now, &self.hmac_key);
         let session = MfaSession {
             verified_at: now,
             hmac,
@@ -67,7 +80,17 @@ impl MfaSessionStore {
 
         let json = serde_json::to_string(&session)
             .map_err(|e| sigyn_core::error::SigynError::Serialization(e.to_string()))?;
-        std::fs::write(self.session_path(fingerprint), json)?;
+
+        let path = self.session_path(fingerprint);
+        std::fs::write(&path, json)?;
+
+        // Restrict session file permissions to owner-only (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
         Ok(())
     }
 
@@ -88,7 +111,8 @@ mod tests {
     #[test]
     fn test_session_create_and_validate() {
         let dir = tempfile::tempdir().unwrap();
-        let store = MfaSessionStore::new(dir.path().to_path_buf());
+        let hmac_key = [0x42u8; 32];
+        let store = MfaSessionStore::new(dir.path().to_path_buf(), hmac_key);
         let fp = KeyFingerprint([1u8; 16]);
 
         assert!(!store.is_valid(&fp, DEFAULT_GRACE_PERIOD_SECS));
@@ -106,7 +130,8 @@ mod tests {
     #[test]
     fn test_tampered_session_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let store = MfaSessionStore::new(dir.path().to_path_buf());
+        let hmac_key = [0x42u8; 32];
+        let store = MfaSessionStore::new(dir.path().to_path_buf(), hmac_key);
         let fp = KeyFingerprint([2u8; 16]);
 
         store.create(&fp).unwrap();
@@ -119,5 +144,20 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
 
         assert!(!store.is_valid(&fp, DEFAULT_GRACE_PERIOD_SECS));
+    }
+
+    #[test]
+    fn test_wrong_hmac_key_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let hmac_key1 = [0x42u8; 32];
+        let hmac_key2 = [0x99u8; 32];
+        let store1 = MfaSessionStore::new(dir.path().to_path_buf(), hmac_key1);
+        let store2 = MfaSessionStore::new(dir.path().to_path_buf(), hmac_key2);
+        let fp = KeyFingerprint([3u8; 16]);
+
+        store1.create(&fp).unwrap();
+        assert!(store1.is_valid(&fp, DEFAULT_GRACE_PERIOD_SECS));
+        // Different key should reject the session
+        assert!(!store2.is_valid(&fp, DEFAULT_GRACE_PERIOD_SECS));
     }
 }

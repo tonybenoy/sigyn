@@ -133,6 +133,90 @@ impl GitSyncEngine {
         Ok(())
     }
 
+    /// Return the hex OID of the current HEAD commit, or None if no commits yet.
+    pub fn head_oid(&self) -> Result<Option<String>> {
+        let repo = self.open_repo()?;
+        let head = match repo.head() {
+            Ok(h) => h,
+            Err(_) => return Ok(None),
+        };
+        let oid = head
+            .target()
+            .ok_or_else(|| SigynError::GitError("HEAD has no target".into()))?;
+        Ok(Some(oid.to_string()))
+    }
+
+    /// Pull with rollback protection. If `checkpoint_oid` is provided,
+    /// verifies that the fetched HEAD descends from it before fast-forwarding.
+    /// Returns `SigynError::RollbackDetected` if the remote has been rewound.
+    pub fn pull_with_rollback_check(
+        &self,
+        remote_name: &str,
+        branch: &str,
+        checkpoint_oid: Option<&str>,
+    ) -> Result<PullResult> {
+        let repo = self.open_repo()?;
+        let mut remote = repo
+            .find_remote(remote_name)
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+
+        let mut fetch_opts = git2::FetchOptions::new();
+        fetch_opts.remote_callbacks(make_callbacks());
+        remote
+            .fetch(&[branch], Some(&mut fetch_opts), None)
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+
+        let fetch_head = repo
+            .find_reference("FETCH_HEAD")
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+        let fetch_commit = repo
+            .reference_to_annotated_commit(&fetch_head)
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+
+        // Rollback check: verify fetch_commit descends from our checkpoint
+        if let Some(cp_hex) = checkpoint_oid {
+            if let Ok(cp_oid) = git2::Oid::from_str(cp_hex) {
+                let descends = repo
+                    .graph_descendant_of(fetch_commit.id(), cp_oid)
+                    .unwrap_or(false);
+                let is_same = fetch_commit.id() == cp_oid;
+                if !descends && !is_same {
+                    return Err(SigynError::RollbackDetected {
+                        remote: fetch_commit.id().to_string(),
+                        local: cp_hex.to_string(),
+                    });
+                }
+            }
+        }
+
+        let (analysis, _) = repo
+            .merge_analysis(&[&fetch_commit])
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+
+        if analysis.is_up_to_date() {
+            return Ok(PullResult::UpToDate);
+        }
+
+        if analysis.is_fast_forward() {
+            let refname = format!("refs/heads/{}", branch);
+            if let Ok(mut reference) = repo.find_reference(&refname) {
+                reference
+                    .set_target(fetch_commit.id(), "sigyn pull fast-forward")
+                    .map_err(|e| SigynError::GitError(e.to_string()))?;
+            } else {
+                repo.reference(&refname, fetch_commit.id(), true, "sigyn pull")
+                    .map_err(|e| SigynError::GitError(e.to_string()))?;
+            }
+            repo.set_head(&refname)
+                .map_err(|e| SigynError::GitError(e.to_string()))?;
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .map_err(|e| SigynError::GitError(e.to_string()))?;
+            return Ok(PullResult::FastForward);
+        }
+
+        Ok(PullResult::Conflict)
+    }
+
     pub fn pull(&self, remote_name: &str, branch: &str) -> Result<PullResult> {
         let repo = self.open_repo()?;
         let mut remote = repo

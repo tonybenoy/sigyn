@@ -343,6 +343,7 @@ fn main() -> Result<()> {
                             commands::vault::VaultCommands::Create {
                                 name: name.clone(),
                                 org: None,
+                                split_audit: false,
                             },
                             cfg.default_identity.as_deref(),
                             false,

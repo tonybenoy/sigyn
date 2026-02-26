@@ -169,12 +169,16 @@ returns `RequiresMfa` instead of `Allow`. The CLI then:
 2. If no session, loads the encrypted `.mfa` file (decrypted with a key derived via
    HKDF-SHA256 from the identity's X25519 private key with context `b"mfa-state"`).
 3. Prompts for a TOTP code or single-use backup code.
-4. On success, creates a session file (HMAC-protected with blake3) so subsequent
+4. On success, creates a session file (HMAC-protected with a key derived via
+   HKDF from the device key with context `b"sigyn-session-hmac-v1"`) so subsequent
    operations within the grace period skip the prompt.
 
 MFA state is stored per identity at `~/.sigyn/identities/<fingerprint>.mfa`,
-encrypted with ChaCha20-Poly1305. Sessions are stored at
-`~/.sigyn/sessions/<fingerprint>.session`.
+encrypted with ChaCha20-Poly1305 using the identity's fingerprint as AEAD
+Associated Authenticated Data (AAD). This binds the MFA ciphertext to the specific
+identity — copying an MFA file from one identity to another will fail decryption.
+Sessions are stored at `~/.sigyn/sessions/<fingerprint>.session` with `0o600`
+permissions in a `0o700` directory.
 
 Backup codes are hashed with blake3 before storage and verified using constant-time
 comparison to prevent timing side-channel attacks. Each backup code is consumed on
@@ -203,11 +207,14 @@ See [Delegation](delegation.md) for a full deep dive. Key security properties:
 - Each delegation records `delegated_by`, forming a tree rooted at the Owner.
 - **Cascade revocation**: revoking a member revokes everyone they invited, transitively (BFS traversal of the delegation tree).
 - **Master key rotation on revoke**: when any member is revoked, a new master key is generated via `VaultCipher::generate()` and re-encrypted to all remaining members. The revoked subtree immediately loses decryption access.
+- **Invitation expiry**: invitations are created with a 7-day expiry (`expires_at`). Attempting to accept an expired invitation is rejected with a clear error message. This limits the window for invitation file theft or replay.
 
 ## Audit Trail
 
-Sigyn maintains a hash-chained, signed audit log for every vault, stored as JSON Lines
-at `<vault>/audit.log.json`.
+Sigyn maintains a hash-chained, signed, and encrypted audit log for every vault,
+stored at `<vault>/audit.log.json`. Each line is individually encrypted with a
+vault-derived cipher (HKDF from master key with context `sigyn-audit-v1` and
+vault_id as salt), then base64-encoded.
 
 ### Entry Structure
 
@@ -230,7 +237,9 @@ Each `AuditEntry` contains:
   or removing any entry breaks the chain, which is detected by `sigyn audit verify`.
 - **Ed25519 signatures**: each entry is signed by the actor's Ed25519 key, proving
   authorship and preventing forgery.
-- **Append-only**: the log file is opened in append mode only.
+- **Append-only**: the log file is opened in append mode only. The reader tolerates
+  a single trailing corrupt line (crash recovery for interrupted writes) while still
+  detecting mid-file tampering.
 - **Witness countersigning**: a second party can countersign the latest entry to provide
   independent verification via `sigyn audit witness`. Witness signatures are stored
   separately in a `WitnessLog`.
@@ -295,7 +304,194 @@ inheritance, and whether the fork can add members independently.
 All file writes in the CLI go through a write-to-temp-then-persist pattern using
 `tempfile::NamedTempFile` and its `persist()` method. This prevents partial writes
 from corrupting vault data if the process is interrupted. The `fd-lock` crate provides
-advisory file locking for concurrent access safety.
+advisory file locking for concurrent access safety, with lock files created at `0o600`
+permissions.
+
+The `secure_write()` function on Unix creates a temporary file with `0o600` mode from
+the start (via `OpenOptions::mode()`), writes content, calls `sync_all()` for
+durability, and atomically renames to the target path. This eliminates the TOCTOU
+window where a file could be briefly readable with default permissions between
+creation and `chmod`.
+
+## Filesystem Permissions
+
+Sigyn enforces restrictive Unix permissions on all files it manages:
+
+- **`~/.sigyn/` directory**: created with `0o700` (owner only) to prevent other local
+  users from reading vault metadata, config, or manifests.
+- **Encrypted files** (policy, secrets, identities): written via `atomic_write()` with
+  `0o600` permissions (owner read/write only).
+- **All other files** (manifests, config, context, notifications): also encrypted and
+  written via `secure_write()` with `0o600` permissions.
+
+## Encrypted File Protection
+
+Every file under `~/.sigyn/` is either encrypted (AEAD) or cryptographically signed.
+A three-tier key hierarchy ensures each file is protected with the appropriate key
+available at read time:
+
+### Tier A: Device Key
+
+A 32-byte random key stored at `~/.sigyn/.device_key` (mode `0o400`). Generated on
+first use. Protects files that must be readable **before** any identity is loaded:
+
+| File | HKDF Context |
+|---|---|
+| `config.toml` | `sigyn-config-v1` |
+| `context.toml` | `sigyn-context-v1` |
+| `notifications.toml` | `sigyn-notifications-v1` |
+| `org-manifest.toml` | `sigyn-org-manifest-v1` |
+| `forks.cbor` | `sigyn-forks-v1` |
+
+### Tier B: Identity Signing Key (Ed25519)
+
+The `members.cbor` envelope header is wrapped in a signed file format (`SGSN` magic)
+with an Ed25519 signature covering `blake3(cbor_data \|\| vault_id_bytes)`. This
+provides integrity verification before the vault master key is available.
+
+The `EnvelopeHeader` includes a `vault_id` field, allowing the vault ID to be read
+from `members.cbor` before decrypting `vault.toml` — breaking the circular dependency
+that would otherwise require the manifest to be plaintext. The signature is verified
+after vault unlock using the owner's signing key from the local identity store.
+
+Invitation acceptance requires the inviter's identity to be present locally for
+signature verification. This prevents accepting tampered invitations even when the
+inviter is offline. Invitations use a length-prefixed signing payload (v2 format)
+where every variable-length field is preceded by its byte length as a little-endian
+`u32`, and list fields include an element count prefix. This prevents field boundary
+ambiguity attacks where crafted values in one field could be interpreted as part of
+another.
+
+Hierarchy node `members.cbor` files also use the SGSN signed format with Ed25519
+signatures, verified on read when the signer's verifying key is available.
+
+### Tier C: Vault Master Key
+
+After vault unlock, a per-file cipher is derived via HKDF from the master key:
+
+| File | HKDF Context | HKDF Salt |
+|---|---|---|
+| `vault.toml` (manifest) | `sigyn-manifest-v1` | (AAD = vault_id) |
+| `rotation_schedules.toml` | `sigyn-rotation-v1` | vault_id |
+| `audit.log.json` entries | `sigyn-audit-v1` | vault_id |
+| `witnesses.json` | `sigyn-witness-v1` | vault_id |
+
+### Sealed File Format
+
+Encrypted files use the `SGYN` sealed format:
+
+```
+[magic: "SGYN" 4B] [version: 0x01 1B] [nonce: 12B] [ciphertext + Poly1305 tag]
+```
+
+Signed files use the `SGSN` signed format:
+
+```
+[magic: "SGSN" 4B] [version: 0x01 1B] [cbor_data] [signature: 64B Ed25519]
+```
+
+### No Plaintext Fallbacks
+
+All file readers strictly require their expected format (`SGYN` magic for encrypted
+files, `SGSN` magic for signed files). There are no legacy plaintext fallbacks. If a
+file does not have the correct magic header, it is rejected with a clear error. This
+prevents downgrade attacks where an attacker replaces an encrypted file with a
+plaintext version to bypass integrity checks.
+
+## Rollback Protection
+
+An attacker with push access to a vault's git remote could force-push older commits,
+restoring a pre-revocation `members.cbor` that still includes a revoked member's slot.
+Sigyn prevents this with commit-level rollback detection:
+
+### Sync Checkpoints
+
+After every successful `sync pull` or `sync push`, the current HEAD commit OID is
+recorded in the device-local `pinned_vaults.cbor` store (encrypted with the device
+key). On the next `sync pull`, Sigyn verifies that the fetched remote HEAD is a
+**descendant** of the stored checkpoint using `git2::graph_descendant_of()`.
+
+If the remote HEAD does not descend from the checkpoint, the pull is **aborted** with
+an SSH-style warning banner:
+
+```
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: POSSIBLE ROLLBACK ATTACK   @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+```
+
+The user must explicitly pass `--force` to accept the new remote state.
+
+### Audit Continuity
+
+After a pull, the audit chain can be verified against a stored checkpoint (last known
+sequence number and entry hash). If the entry at the expected sequence no longer has
+the expected hash, the audit log has been tampered with or rolled back.
+
+## Vault Origin Pinning (TOFU)
+
+Sigyn uses Trust-On-First-Use to prevent a vault copy-and-rehost attack:
+
+1. **First access**: When a vault is unlocked for the first time on a device, the
+   vault ID and owner fingerprint are recorded in the device-local `pinned_vaults.cbor`.
+2. **Subsequent accesses**: The vault ID and owner fingerprint are verified against
+   the pin. If either has changed, the unlock is aborted with an SSH-style warning:
+
+```
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: VAULT OWNER CHANGED        @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+```
+
+This prevents an attacker from copying vault files, re-signing `members.cbor` with
+their own key, and inviting victims to a different repo. Even though the entire
+cryptographic chain passes, the pin check catches the owner substitution.
+
+To accept a legitimate ownership change: `sigyn vault trust <name> --accept-new-owner`.
+
+## Vault/Audit Repo Split
+
+By default, vault data and audit data share a single git repo. This means an auditor
+who needs push access to write witness entries also has push access to `members.cbor`.
+Git hosting cannot enforce per-file permissions.
+
+Sigyn supports an optional **split-repo layout** where audit data lives in a separate
+git repository:
+
+```
+vaults/<name>/          # vault repo (members, policy, secrets)
+  vault.toml
+  members.cbor
+  policy.cbor
+  envs/
+  .gitignore            # ignores audit/
+  audit/                # separate git repo (audit log, witnesses)
+    .git/
+    audit.log.json
+    witnesses.json
+```
+
+Created with `sigyn vault create <name> --split-audit`. This allows git hosting to
+grant auditors **read** access to the vault repo (to unseal the audit cipher) and
+**write** access only to the audit repo. Sync operations coordinate both repos
+automatically, with independent rollback protection for each.
+
+## Local State Store
+
+Device-local state that is **never synced** is stored in `~/.sigyn/pinned_vaults.cbor`,
+encrypted with a cipher derived from the device key (HKDF context
+`b"sigyn-pinned-vaults-v1"`). This store holds:
+
+- **Vault pins**: TOFU owner fingerprint and vault ID, recorded on first access.
+- **Sync checkpoints**: last-known HEAD commit OIDs for rollback detection.
+- **Audit checkpoints**: last-known audit sequence and entry hash.
+
+## Encrypted Org Links
+
+The `.org_link` metadata file (which records a vault's org hierarchy membership) is
+encrypted with a device-key-derived cipher (HKDF context `b"sigyn-org-link-v1"`)
+using the sealed file format. Legacy plaintext `.org_link` files are still readable
+for backward compatibility.
 
 ## Threat Model Summary
 
@@ -304,6 +500,11 @@ advisory file locking for concurrent access safety.
 | Stolen vault files | ChaCha20-Poly1305 encryption; attacker needs a member's private key |
 | Compromised member | Revoke member; master key is rotated; cascade revocation removes their delegates |
 | Tampered audit log | Hash chain breaks on tamper; Ed25519 signatures prove authorship |
+| Tampered config/manifest | AEAD authentication; device key or master key required to forge |
+| Tampered members.cbor | Ed25519 signature over content + vault_id; forgery requires signing key |
+| Downgrade to plaintext | No fallbacks; all readers reject data without correct magic header |
+| Forged MFA session | Session HMAC uses device-key-derived secret, not public fingerprint |
+| Tampered invitation | Acceptance requires inviter's identity for signature verification |
 | Lost access (key loss) | Shamir K-of-N recovery shards |
 | Unauthorized access escalation | `PolicyEngine::evaluate()` on every operation; no bypass path |
 | Brute-force passphrase | Argon2id with tuned memory/time cost |
@@ -311,6 +512,18 @@ advisory file locking for concurrent access safety.
 | Replay of old ciphertext | Unique nonces per encryption; vault UUID bound into HKDF salt |
 | Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop |
 | Partial file writes | Atomic writes via `tempfile::persist()` |
+| Local filesystem snooping | `~/.sigyn/` directory `0o700`; all files `0o600`; all contents encrypted |
+| Device key compromise | Limits exposure to Tier A files only; vault secrets require identity key |
+| Rollback attack (force-push) | Commit OID checkpoints; descendant verification on pull |
+| Copy-and-rehost attack | TOFU vault origin pinning; owner fingerprint checked on every unlock |
+| Auditor privilege escalation | Optional split-repo layout; separate git permissions for vault and audit data |
+| Org link metadata leak | `.org_link` encrypted with device key |
+| MFA file swapping between identities | Fingerprint bound as AAD in AEAD encryption |
+| Invitation replay/theft | 7-day expiry; Ed25519 signature with length-prefixed payload |
+| Signing payload field confusion | Length-prefixed v2 format prevents boundary ambiguity |
+| Hierarchy node header forgery | SGSN signed format with Ed25519 verification |
+| Crash during audit append | Trailing corrupt line tolerated; mid-file tampering detected |
+| File permission TOCTOU | Atomic temp+rename with `0o600` mode set at creation |
 
 ## Related Documentation
 

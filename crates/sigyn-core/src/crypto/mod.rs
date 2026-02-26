@@ -2,6 +2,7 @@ pub mod envelope;
 pub mod kdf;
 pub mod keys;
 pub mod nonce;
+pub mod sealed;
 pub mod vault_cipher;
 
 pub use envelope::{EnvelopeHeader, RecipientSlot};

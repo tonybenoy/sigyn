@@ -5,6 +5,7 @@ pub use sigyn_core::{Result, SigynError};
 
 // Engine-specific modules (I/O layer + re-exports from core)
 pub mod audit;
+pub mod device;
 pub mod hierarchy;
 pub mod identity;
 pub mod io;

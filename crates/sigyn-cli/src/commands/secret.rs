@@ -164,6 +164,8 @@ pub struct UnlockedVaultContext {
     pub manifest: VaultManifest,
     pub policy: VaultPolicy,
     pub loaded_identity: LoadedIdentity,
+    /// The envelope header, already verified against the owner's signing key.
+    pub header: sigyn_engine::crypto::EnvelopeHeader,
 }
 
 pub fn unlock_vault(
@@ -173,7 +175,7 @@ pub fn unlock_vault(
 ) -> Result<UnlockedVaultContext> {
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());
-    let paths = VaultPaths::new(home);
+    let paths = VaultPaths::new(home.clone());
     let config = crate::config::load_config();
     let project = crate::project_config::load_project_config();
     let project_settings = project.as_ref().and_then(|p| p.project.as_ref());
@@ -256,21 +258,27 @@ pub fn unlock_vault(
     let loaded = load_identity(&store, effective_identity)?;
     let fingerprint = loaded.identity.fingerprint.clone();
 
-    let manifest_content = std::fs::read_to_string(paths.manifest_path(&vault_name))
+    // Read manifest data first (gives better "vault not found" error)
+    let manifest_data = std::fs::read(paths.manifest_path(&vault_name))
         .context(format!("vault '{}' not found", vault_name))?;
-    let manifest = VaultManifest::from_toml(&manifest_content)?;
-
-    // Resolve env prefix matching against manifest environments
-    let env_name = resolve_env_name(&env_name, &manifest)?;
 
     let header_bytes =
         std::fs::read(paths.members_path(&vault_name)).context("failed to read vault members")?;
-    let header: sigyn_engine::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice())
-            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
+    // Bootstrap: extract vault_id from header (unverified — we verify below)
+    let header_preview: sigyn_engine::crypto::EnvelopeHeader =
+        envelope::extract_header_unverified(&header_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+    let vault_id = header_preview.vault_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "vault '{}' header missing vault_id — file may be corrupted",
+            vault_name
+        )
+    })?;
+
+    // Unseal master key using the unverified header (to get the cipher for manifest)
     let master_key =
-        envelope::unseal_master_key(&header, loaded.encryption_key(), manifest.vault_id).context(
+        envelope::unseal_master_key(&header_preview, loaded.encryption_key(), vault_id).context(
             format!(
                 "failed to unseal vault '{}' (not a member or wrong key)\n\n  \
                  Check your membership: sigyn delegation tree -v {}\n  \
@@ -280,6 +288,123 @@ pub fn unlock_vault(
         )?;
 
     let cipher = VaultCipher::new(master_key);
+
+    // Decrypt manifest (rejects plaintext — must be sealed)
+    let manifest = VaultManifest::from_sealed_bytes(&cipher, &manifest_data, vault_id)?;
+
+    // Now verify the header signature using the owner's signing key from the manifest.
+    // This prevents an attacker from replacing members.cbor with a crafted header.
+    let store = IdentityStore::new(sigyn_home());
+    let identities = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+    if let Some(owner_id) = identities
+        .iter()
+        .find(|id| id.fingerprint == manifest.owner)
+    {
+        envelope::verify_and_load_header(&header_bytes, vault_id, &owner_id.signing_pubkey)
+            .map_err(|e| anyhow::anyhow!("header signature verification failed: {}", e))?;
+    } else if loaded.identity.fingerprint == manifest.owner {
+        // We are the owner — verify with our own signing key
+        envelope::verify_and_load_header(&header_bytes, vault_id, &loaded.identity.signing_pubkey)
+            .map_err(|e| anyhow::anyhow!("header signature verification failed: {}", e))?;
+    } else {
+        anyhow::bail!(
+            "cannot verify header signature: owner identity {} not found locally.\n  \
+             Import the owner's identity or ask them to re-sign the vault.",
+            manifest.owner.to_hex()
+        );
+    }
+
+    // --- Origin pinning (TOFU) ---
+    // Check the vault owner against the pinned identity on this device.
+    {
+        let device_key = sigyn_engine::device::load_or_create_device_key(&home);
+        if let Ok(dk) = device_key {
+            if let Ok(mut pin_store) =
+                sigyn_engine::vault::local_state::load_pinned_store(&home, &dk)
+            {
+                let local_state = pin_store.entry_mut(&vault_name);
+                match &local_state.pin {
+                    None => {
+                        // First access: pin the owner
+                        local_state.pin = Some(sigyn_engine::vault::VaultPin {
+                            vault_id,
+                            owner_fingerprint: manifest.owner.clone(),
+                            owner_signing_pubkey_bytes: {
+                                // Get owner's signing pubkey bytes
+                                let owner_id = identities
+                                    .iter()
+                                    .find(|id| id.fingerprint == manifest.owner);
+                                if let Some(oid) = owner_id {
+                                    oid.signing_pubkey.to_bytes().to_vec()
+                                } else if loaded.identity.fingerprint == manifest.owner {
+                                    loaded.identity.signing_pubkey.to_bytes().to_vec()
+                                } else {
+                                    Vec::new()
+                                }
+                            },
+                            pinned_at: chrono::Utc::now(),
+                        });
+                        let _ = sigyn_engine::vault::local_state::save_pinned_store(
+                            &pin_store, &home, &dk,
+                        );
+                        eprintln!(
+                            "{} vault '{}' pinned to owner {}",
+                            style("pin:").cyan().bold(),
+                            vault_name,
+                            manifest.owner.to_hex()
+                        );
+                    }
+                    Some(pin) => {
+                        // Subsequent access: verify owner hasn't changed
+                        if pin.owner_fingerprint != manifest.owner {
+                            eprintln!(
+                                "\n{}\n{}\n{}\n",
+                                style("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                                    .red()
+                                    .bold(),
+                                style("@    WARNING: VAULT OWNER CHANGED        @")
+                                    .red()
+                                    .bold(),
+                                style("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                                    .red()
+                                    .bold(),
+                            );
+                            eprintln!(
+                                "Vault '{}' now claims owner {} but was pinned to owner {}.",
+                                vault_name,
+                                style(manifest.owner.to_hex()).yellow(),
+                                style(pin.owner_fingerprint.to_hex()).yellow(),
+                            );
+                            eprintln!("Someone may have copied this vault to a different repo.\n");
+                            eprintln!(
+                                "To accept the new owner: sigyn vault trust {} --accept-new-owner",
+                                vault_name
+                            );
+                            anyhow::bail!(
+                                "vault origin mismatch: expected owner {}, found {}",
+                                pin.owner_fingerprint.to_hex(),
+                                manifest.owner.to_hex()
+                            );
+                        }
+                        // Also verify vault_id hasn't changed
+                        if pin.vault_id != vault_id {
+                            anyhow::bail!(
+                                "vault ID mismatch: pinned {} but found {}. \
+                                 The vault may have been recreated.",
+                                pin.vault_id,
+                                vault_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve env prefix matching against manifest environments
+    let env_name = resolve_env_name(&env_name, &manifest)?;
 
     // Load policy (returns empty policy if file doesn't exist)
     let policy =
@@ -294,6 +419,7 @@ pub fn unlock_vault(
         manifest,
         policy,
         loaded_identity: loaded,
+        header: header_preview,
     })
 }
 
@@ -339,19 +465,15 @@ pub fn check_access(
                 if !mp.exists() {
                     continue;
                 }
-                if let Ok(content) = std::fs::read_to_string(&mp) {
-                    if let Ok(manifest) =
-                        sigyn_engine::hierarchy::manifest::NodeManifest::from_toml(&content)
+                if let Ok(manifest) = super::org::load_org_manifest_path(&mp) {
                     {
                         let members_p = hierarchy_paths.members_path(cp);
                         if members_p.exists() {
                             if let Ok(hdr_bytes) = std::fs::read(&members_p) {
-                                if let Ok(header) = ciborium::from_reader::<
-                                    sigyn_engine::crypto::EnvelopeHeader,
-                                    _,
-                                >(
-                                    hdr_bytes.as_slice()
-                                ) {
+                                // Use extract_header_unverified for org hierarchy headers
+                                // (the owner's signing key may not be locally available)
+                                if let Ok(header) = envelope::extract_header_unverified(&hdr_bytes)
+                                {
                                     if let Ok(mk) = envelope::unseal_master_key(
                                         &header,
                                         ctx.loaded_identity.encryption_key(),
@@ -452,10 +574,25 @@ fn maybe_auto_sync(vault_name: &str) {
     }
 }
 
+/// Derive the audit log cipher from the vault cipher.
+fn derive_audit_cipher(
+    ctx: &UnlockedVaultContext,
+) -> Option<sigyn_engine::crypto::vault_cipher::VaultCipher> {
+    sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    )
+    .ok()
+}
+
 /// Append an audit entry (best-effort — warn on stderr but don't fail the operation)
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    match AuditLog::open(&audit_path) {
+    let Some(audit_cipher) = derive_audit_cipher(ctx) else {
+        return;
+    };
+    match AuditLog::open(&audit_path, audit_cipher) {
         Ok(mut log) => {
             if let Err(e) = log.append(
                 &ctx.fingerprint,
@@ -881,9 +1018,7 @@ pub fn handle(
             let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::Read, None)?;
 
-            let manifest_content =
-                std::fs::read_to_string(ctx.paths.manifest_path(&ctx.vault_name))?;
-            let manifest = sigyn_engine::vault::VaultManifest::from_toml(&manifest_content)?;
+            let manifest = &ctx.manifest;
 
             let mut results: Vec<serde_json::Value> = Vec::new();
             let mut found_any = false;

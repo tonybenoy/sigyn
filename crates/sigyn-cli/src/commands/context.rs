@@ -36,14 +36,40 @@ pub fn load_context() -> Option<ShellContext> {
     if !path.exists() {
         return None;
     }
-    let content = std::fs::read_to_string(&path).ok()?;
+    let data = std::fs::read(&path).ok()?;
+    if !sigyn_engine::crypto::sealed::is_sealed(&data) {
+        eprintln!(
+            "{} context.toml is not in sealed format — ignoring (possible tampering)",
+            console::style("warning:").yellow().bold()
+        );
+        return None;
+    }
+    let home = crate::config::sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home).ok()?;
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-context-v1").ok()?;
+    let plaintext =
+        sigyn_engine::crypto::sealed::sealed_decrypt(&cipher, &data, b"context.toml").ok()?;
+    let content = String::from_utf8(plaintext).ok()?;
     let ctx: ShellContext = toml::from_str(&content).ok()?;
-    // Only return if at least one field is set
     if ctx.vault.is_some() || ctx.env.is_some() {
         Some(ctx)
     } else {
         None
     }
+}
+
+/// Save context encrypted with device key.
+fn save_context(ctx: &ShellContext) -> anyhow::Result<()> {
+    let home = crate::config::sigyn_home();
+    let content = toml::to_string_pretty(ctx)?;
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-context-v1")?;
+    let sealed =
+        sigyn_engine::crypto::sealed::sealed_encrypt(&cipher, content.as_bytes(), b"context.toml")?;
+    crate::config::secure_write(&context_path(), &sealed)?;
+    Ok(())
 }
 
 pub fn handle(cmd: ContextCommands, json: bool) -> Result<()> {
@@ -53,10 +79,8 @@ pub fn handle(cmd: ContextCommands, json: bool) -> Result<()> {
                 vault: Some(vault.clone()),
                 env: env.clone(),
             };
-            let home = sigyn_home();
-            std::fs::create_dir_all(&home)?;
-            let content = toml::to_string_pretty(&ctx)?;
-            std::fs::write(context_path(), content)?;
+            crate::config::ensure_sigyn_home()?;
+            save_context(&ctx)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({

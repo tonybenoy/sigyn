@@ -1,7 +1,16 @@
 use sigyn_engine::audit::chain::AuditLog;
 use sigyn_engine::audit::entry::{AuditAction, AuditOutcome};
 use sigyn_engine::crypto::keys::{KeyFingerprint, SigningKeyPair};
+use sigyn_engine::crypto::vault_cipher::VaultCipher;
 use tempfile::TempDir;
+
+/// Fixed test key — create a new VaultCipher from these bytes each time
+/// (VaultCipher intentionally does not implement Clone due to ZeroizeOnDrop).
+const TEST_KEY: [u8; 32] = [0x42u8; 32];
+
+fn make_cipher() -> VaultCipher {
+    VaultCipher::new(TEST_KEY)
+}
 
 #[test]
 fn test_audit_chain_integrity() {
@@ -13,7 +22,7 @@ fn test_audit_chain_integrity() {
 
     // 1. Create audit log and append 10 entries with different actions
     {
-        let mut log = AuditLog::open(&log_path).unwrap();
+        let mut log = AuditLog::open(&log_path, make_cipher()).unwrap();
 
         let actions = vec![
             AuditAction::VaultCreated,
@@ -54,14 +63,14 @@ fn test_audit_chain_integrity() {
 
     // 2. Verify the chain is intact
     {
-        let log = AuditLog::open(&log_path).unwrap();
+        let log = AuditLog::open(&log_path, make_cipher()).unwrap();
         let count = log.verify_chain().unwrap();
         assert_eq!(count, 10);
     }
 
     // 3. Read back entries and verify structure
     {
-        let log = AuditLog::open(&log_path).unwrap();
+        let log = AuditLog::open(&log_path, make_cipher()).unwrap();
         let tail = log.tail(10).unwrap();
         assert_eq!(tail.len(), 10);
 
@@ -90,7 +99,7 @@ fn test_audit_chain_detects_tampering() {
 
     // Append 5 entries
     {
-        let mut log = AuditLog::open(&log_path).unwrap();
+        let mut log = AuditLog::open(&log_path, make_cipher()).unwrap();
         for i in 0..5 {
             log.append(
                 &actor,
@@ -107,41 +116,29 @@ fn test_audit_chain_detects_tampering() {
 
     // Verify chain is valid before tampering
     {
-        let log = AuditLog::open(&log_path).unwrap();
+        let log = AuditLog::open(&log_path, make_cipher()).unwrap();
         assert_eq!(log.verify_chain().unwrap(), 5);
     }
 
-    // Tamper with the file: modify the 3rd entry's prev_hash
+    // Tamper with the file: modify a byte in the 3rd line (encrypted entry)
     {
         let content = std::fs::read_to_string(&log_path).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
+        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
         assert_eq!(lines.len(), 5);
 
-        // Parse the 3rd entry (index 2), modify its prev_hash, and rewrite
-        let mut entry: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-        // Flip a byte in prev_hash to simulate tampering
-        if let Some(prev_hash) = entry.get_mut("prev_hash") {
-            if let Some(arr) = prev_hash.as_array_mut() {
-                if let Some(first) = arr.first_mut() {
-                    let val = first.as_u64().unwrap_or(0);
-                    *first = serde_json::Value::from(val ^ 0xFF);
-                }
-            }
+        // Flip a character in the base64-encoded encrypted line
+        let mut chars: Vec<char> = lines[2].chars().collect();
+        if chars.len() > 10 {
+            chars[10] = if chars[10] == 'A' { 'B' } else { 'A' };
         }
-
-        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        new_lines[2] = serde_json::to_string(&entry).unwrap();
-        std::fs::write(&log_path, new_lines.join("\n") + "\n").unwrap();
+        lines[2] = chars.into_iter().collect();
+        std::fs::write(&log_path, lines.join("\n") + "\n").unwrap();
     }
 
-    // Verify chain now detects tampering
+    // Opening the log with the tampered entry should fail (decryption error)
     {
-        let log = AuditLog::open(&log_path).unwrap();
-        let result = log.verify_chain();
-        assert!(
-            result.is_err(),
-            "Chain verification should fail after tampering"
-        );
+        let result = AuditLog::open(&log_path, make_cipher());
+        assert!(result.is_err(), "Opening tampered audit log should fail");
     }
 }
 
@@ -155,7 +152,7 @@ fn test_audit_log_append_continues_after_reopen() {
 
     // Append 3 entries, then close
     {
-        let mut log = AuditLog::open(&log_path).unwrap();
+        let mut log = AuditLog::open(&log_path, make_cipher()).unwrap();
         for _ in 0..3 {
             log.append(
                 &actor,
@@ -170,7 +167,7 @@ fn test_audit_log_append_continues_after_reopen() {
 
     // Reopen and append 2 more
     {
-        let mut log = AuditLog::open(&log_path).unwrap();
+        let mut log = AuditLog::open(&log_path, make_cipher()).unwrap();
         for _ in 0..2 {
             let entry = log
                 .append(
@@ -188,7 +185,7 @@ fn test_audit_log_append_continues_after_reopen() {
 
     // Verify full chain
     {
-        let log = AuditLog::open(&log_path).unwrap();
+        let log = AuditLog::open(&log_path, make_cipher()).unwrap();
         let count = log.verify_chain().unwrap();
         assert_eq!(count, 5);
     }
@@ -202,7 +199,7 @@ fn test_audit_log_records_denied_outcomes() {
     let signing_key = SigningKeyPair::generate();
     let actor = KeyFingerprint([0xEEu8; 16]);
 
-    let mut log = AuditLog::open(&log_path).unwrap();
+    let mut log = AuditLog::open(&log_path, make_cipher()).unwrap();
     log.append(
         &actor,
         AuditAction::SecretRead {

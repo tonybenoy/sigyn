@@ -124,66 +124,27 @@ fn load_vault_data(state: &mut TuiState) {
 
 fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     use sigyn_engine::audit::AuditLog;
-    use sigyn_engine::vault::{env_file, VaultPaths};
+    use sigyn_engine::vault::env_file;
 
-    let home = crate::config::sigyn_home();
-    let paths = VaultPaths::new(home);
-
-    // Load manifest to verify the vault exists
-    let manifest_path = paths.manifest_path(&state.vault_name);
-    let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest = sigyn_engine::vault::VaultManifest::from_toml(&manifest_content)?;
-
-    // Try to unlock the vault using the default identity
-    let store = sigyn_engine::identity::keygen::IdentityStore::new(crate::config::sigyn_home());
-    let loaded = crate::commands::identity::load_identity(&store, None)?;
-    let fingerprint = loaded.identity.fingerprint.clone();
-
-    let header_bytes = std::fs::read(paths.members_path(&state.vault_name))?;
-    let header: sigyn_engine::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice())
-            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
-
-    let master_key = sigyn_engine::crypto::envelope::unseal_master_key(
-        &header,
-        loaded.encryption_key(),
-        manifest.vault_id,
+    // Use unlock_vault to handle both sealed and plaintext manifests
+    let ctx = crate::commands::secret::unlock_vault(
+        None,
+        Some(&state.vault_name),
+        Some(&state.env_name),
     )?;
-    let cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(master_key);
+    crate::commands::secret::check_access(&ctx, AccessAction::Read, None)?;
 
-    // --- Access control check: verify the user has Read access before showing secrets ---
-    let policy = sigyn_engine::policy::storage::VaultPolicy::load_encrypted(
-        &paths.policy_path(&state.vault_name),
-        &cipher,
-    )
-    .unwrap_or_default();
-
-    {
-        let engine = sigyn_engine::policy::engine::PolicyEngine::new(&policy, &manifest.owner);
-        let request = sigyn_engine::policy::engine::AccessRequest {
-            actor: fingerprint.clone(),
-            action: AccessAction::Read,
-            env: state.env_name.clone(),
-            key: None,
-            mfa_verified: false,
-        };
-        let decision = engine.evaluate(&request)?;
-        match decision {
-            sigyn_engine::policy::engine::PolicyDecision::Deny(reason) => {
-                anyhow::bail!("access denied: {}", reason);
-            }
-            sigyn_engine::policy::engine::PolicyDecision::RequiresMfa => {
-                anyhow::bail!("MFA verification required");
-            }
-            _ => {}
-        }
-    }
+    let manifest = &ctx.manifest;
+    let cipher = &ctx.cipher;
+    let fingerprint = &ctx.fingerprint;
+    let paths = &ctx.paths;
+    let policy = &ctx.policy;
 
     // --- Secrets tab: key names and types (no values) ---
     let env_path = paths.env_path(&state.vault_name, &state.env_name);
     if env_path.exists() {
         let encrypted = env_file::read_encrypted_env(&env_path)?;
-        let plaintext = env_file::decrypt_env(&encrypted, &cipher)?;
+        let plaintext = env_file::decrypt_env(&encrypted, cipher)?;
 
         state.secrets = plaintext
             .entries
@@ -218,27 +179,34 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     // --- Audit tab: last 20 entries ---
     let audit_path = paths.audit_path(&state.vault_name);
     if audit_path.exists() {
-        if let Ok(log) = AuditLog::open(&audit_path) {
-            if let Ok(entries) = log.tail(20) {
-                state.audit_entries = entries
-                    .iter()
-                    .map(|e| {
-                        format!(
-                            "[{}] {} {:?} ({})",
-                            e.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                            e.actor.to_hex(),
-                            e.action,
-                            match &e.outcome {
-                                sigyn_engine::audit::entry::AuditOutcome::Success =>
-                                    "ok".to_string(),
-                                sigyn_engine::audit::entry::AuditOutcome::Denied(r) =>
-                                    format!("denied: {}", r),
-                                sigyn_engine::audit::entry::AuditOutcome::Error(r) =>
-                                    format!("error: {}", r),
-                            }
-                        )
-                    })
-                    .collect();
+        let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+            cipher.key_bytes(),
+            b"sigyn-audit-v1",
+            &manifest.vault_id,
+        );
+        if let Ok(ac) = audit_cipher {
+            if let Ok(log) = AuditLog::open(&audit_path, ac) {
+                if let Ok(entries) = log.tail(20) {
+                    state.audit_entries = entries
+                        .iter()
+                        .map(|e| {
+                            format!(
+                                "[{}] {} {:?} ({})",
+                                e.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                                e.actor.to_hex(),
+                                e.action,
+                                match &e.outcome {
+                                    sigyn_engine::audit::entry::AuditOutcome::Success =>
+                                        "ok".to_string(),
+                                    sigyn_engine::audit::entry::AuditOutcome::Denied(r) =>
+                                        format!("denied: {}", r),
+                                    sigyn_engine::audit::entry::AuditOutcome::Error(r) =>
+                                        format!("error: {}", r),
+                                }
+                            )
+                        })
+                        .collect();
+                }
             }
         }
     }

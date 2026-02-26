@@ -35,22 +35,47 @@ fn forks_path(home: &std::path::Path, vault_name: &str) -> std::path::PathBuf {
     home.join("vaults").join(vault_name).join("forks.cbor")
 }
 
+fn forks_cipher() -> Option<sigyn_engine::crypto::vault_cipher::VaultCipher> {
+    let home = crate::config::sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home).ok()?;
+    sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-forks-v1").ok()
+}
+
 fn load_forks(path: &std::path::Path) -> Vec<sigyn_engine::forks::Fork> {
-    if path.exists() {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(forks) = ciborium::from_reader(data.as_slice()) {
-                return forks;
-            }
-        }
+    if !path.exists() {
+        return Vec::new();
     }
-    Vec::new()
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    if !sigyn_engine::crypto::sealed::is_sealed(&data) {
+        eprintln!(
+            "{} forks.cbor is not in sealed format — ignoring (possible tampering)",
+            console::style("warning:").yellow().bold()
+        );
+        return Vec::new();
+    }
+    let cipher = match forks_cipher() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let plaintext =
+        match sigyn_engine::crypto::sealed::sealed_decrypt(&cipher, &data, b"forks.cbor") {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+    ciborium::from_reader(plaintext.as_slice()).unwrap_or_default()
 }
 
 fn save_forks(path: &std::path::Path, forks: &[sigyn_engine::forks::Fork]) -> Result<()> {
     let mut buf = Vec::new();
     ciborium::into_writer(forks, &mut buf)
         .map_err(|e| anyhow::anyhow!("failed to encode forks: {}", e))?;
-    std::fs::write(path, buf)?;
+    let cipher = forks_cipher().ok_or_else(|| anyhow::anyhow!("failed to derive forks cipher"))?;
+    let sealed = sigyn_engine::crypto::sealed::sealed_encrypt(&cipher, &buf, b"forks.cbor")
+        .map_err(|e| anyhow::anyhow!("failed to encrypt forks: {}", e))?;
+    crate::config::secure_write(path, &sealed)?;
     Ok(())
 }
 

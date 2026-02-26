@@ -218,7 +218,7 @@ fn test_vault_info() {
         .success();
 
     sigyn(&home)
-        .args(["vault", "info", "myapp"])
+        .args(["vault", "info", "myapp", "-i", "testuser"])
         .assert()
         .success()
         .stdout(
@@ -239,7 +239,7 @@ fn test_vault_info_json() {
         .success();
 
     sigyn(&home)
-        .args(["--json", "vault", "info", "myapp"])
+        .args(["--json", "vault", "info", "myapp", "-i", "testuser"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"vault_id\""));
@@ -539,7 +539,7 @@ fn test_env_list() {
     setup_vault(&home);
 
     sigyn(&home)
-        .args(["env", "list", "-v", "myapp"])
+        .args(["env", "list", "-v", "myapp", "-i", "testuser"])
         .assert()
         .success()
         .stdout(
@@ -562,7 +562,7 @@ fn test_env_create() {
 
     // Verify it appears in list
     sigyn(&home)
-        .args(["env", "list", "-v", "myapp"])
+        .args(["env", "list", "-v", "myapp", "-i", "testuser"])
         .assert()
         .success()
         .stdout(predicate::str::contains("testing"));
@@ -966,12 +966,15 @@ fn test_init() {
         .success()
         .stdout(predicate::str::contains("Configuration initialized"));
 
-    // Verify config was written
+    // Verify config was written (file is now encrypted, so just check it exists
+    // and starts with the SGYN sealed magic header)
     let config_path = sigyn_home_path(&home).join("config.toml");
     assert!(config_path.exists());
-    let content = std::fs::read_to_string(&config_path).unwrap();
-    assert!(content.contains("myid"));
-    assert!(content.contains("myvault"));
+    let data = std::fs::read(&config_path).unwrap();
+    assert!(
+        data.starts_with(b"SGYN"),
+        "config.toml should be sealed (encrypted)"
+    );
 }
 
 // ─── Error cases ─────────────────────────────────────────────────
@@ -1418,7 +1421,9 @@ fn test_rotate_schedule() {
     setup_vault(&home);
 
     sigyn(&home)
-        .args(["rotate", "schedule", "list", "-v", "myapp"])
+        .args([
+            "rotate", "schedule", "list", "-v", "myapp", "-i", "testuser",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Rotation Schedules"));

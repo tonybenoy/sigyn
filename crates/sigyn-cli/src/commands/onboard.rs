@@ -122,6 +122,7 @@ pub fn handle(json: bool) -> Result<()> {
                 crate::commands::vault::VaultCommands::Create {
                     name: name.clone(),
                     org: None,
+                    split_audit: false,
                 },
                 identity_name,
                 false,

@@ -54,7 +54,15 @@ pub enum PolicyCommands {
 
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    match AuditLog::open(&audit_path) {
+    let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    match AuditLog::open(&audit_path, audit_cipher) {
         Ok(mut log) => {
             if let Err(e) = log.append(
                 &ctx.fingerprint,

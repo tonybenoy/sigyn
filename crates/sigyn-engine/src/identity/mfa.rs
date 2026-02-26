@@ -24,13 +24,17 @@ impl MfaStore {
     }
 
     /// Save MFA state, encrypted with a key derived from the identity's encryption key.
+    /// The fingerprint is bound as AAD to prevent swapping MFA files between identities.
     pub fn save(
         &self,
         fingerprint: &KeyFingerprint,
         state: &MfaState,
         identity_encryption_key: &[u8; 32],
     ) -> Result<()> {
-        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+        use chacha20poly1305::{
+            aead::{Aead, Payload},
+            ChaCha20Poly1305, KeyInit,
+        };
 
         let enc_key = derive_mfa_key(identity_encryption_key)?;
 
@@ -43,7 +47,13 @@ impl MfaStore {
         let nonce_bytes = sigyn_core::crypto::nonce::generate_nonce();
         let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
-            .encrypt(nonce, cbor_buf.as_slice())
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &cbor_buf,
+                    aad: &fingerprint.0,
+                },
+            )
             .map_err(|e| SigynError::Encryption(e.to_string()))?;
 
         let mut output = Vec::with_capacity(12 + ciphertext.len());
@@ -56,12 +66,16 @@ impl MfaStore {
     }
 
     /// Load and decrypt MFA state using the identity's encryption key.
+    /// The fingerprint is verified as AAD — swapping MFA files between identities will fail.
     pub fn load(
         &self,
         fingerprint: &KeyFingerprint,
         identity_encryption_key: &[u8; 32],
     ) -> Result<Option<MfaState>> {
-        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+        use chacha20poly1305::{
+            aead::{Aead, Payload},
+            ChaCha20Poly1305, KeyInit,
+        };
 
         let path = self.mfa_path(fingerprint);
         if !path.exists() {
@@ -79,7 +93,13 @@ impl MfaStore {
             .map_err(|e| SigynError::Decryption(e.to_string()))?;
         let nonce = chacha20poly1305::Nonce::from_slice(nonce_bytes);
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad: &fingerprint.0,
+                },
+            )
             .map_err(|_| SigynError::Decryption("failed to decrypt MFA state".into()))?;
 
         let state: MfaState = ciborium::from_reader(plaintext.as_slice())
@@ -142,5 +162,33 @@ mod tests {
 
         store.save(&fp, &state, &key).unwrap();
         assert!(store.load(&fp, &wrong_key).is_err());
+    }
+
+    #[test]
+    fn test_swapped_fingerprint_fails() {
+        // Verify that MFA state encrypted for one identity cannot be loaded
+        // under a different fingerprint (AAD mismatch).
+        let dir = tempfile::tempdir().unwrap();
+        let store = MfaStore::new(dir.path().to_path_buf());
+        let fp_alice = KeyFingerprint([0xAAu8; 16]);
+        let fp_bob = KeyFingerprint([0xBBu8; 16]);
+        let key = [42u8; 32];
+
+        let state = MfaState {
+            totp_secret: "SECRET".into(),
+            backup_codes: vec![],
+            enabled_at: chrono::Utc::now(),
+        };
+
+        // Save under Alice's fingerprint
+        store.save(&fp_alice, &state, &key).unwrap();
+
+        // Copy Alice's file to Bob's path
+        let alice_path = dir.path().join(format!("{}.mfa", fp_alice.to_hex()));
+        let bob_path = dir.path().join(format!("{}.mfa", fp_bob.to_hex()));
+        std::fs::copy(&alice_path, &bob_path).unwrap();
+
+        // Loading under Bob's fingerprint should fail (AAD mismatch)
+        assert!(store.load(&fp_bob, &key).is_err());
     }
 }

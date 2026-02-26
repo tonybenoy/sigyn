@@ -32,6 +32,7 @@ fn make_signed_invitation(
         max_delegation_depth: depth,
         signature,
         created_at: chrono::Utc::now(),
+        expires_at: None,
     }
 }
 

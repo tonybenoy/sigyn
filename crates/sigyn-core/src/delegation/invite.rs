@@ -44,6 +44,9 @@ pub struct InvitationFile {
     /// Ed25519 signature from the inviter over the canonical invitation payload.
     pub signature: Vec<u8>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When this invitation expires. Default: 7 days from creation.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl InvitationFile {
@@ -59,21 +62,34 @@ impl InvitationFile {
         secret_patterns: &[String],
         max_delegation_depth: u32,
     ) -> Vec<u8> {
-        // Deterministic payload: concatenate fields in a stable order.
+        // Deterministic payload with length-prefixed fields to prevent
+        // ambiguity from variable-length concatenation.
         // NOTE: The invitation ID (UUID v4) already makes each invitation unique,
         // preventing replay of the exact same signed payload.
         let mut payload = Vec::new();
-        payload.extend_from_slice(b"sigyn-invitation-v1:");
+        payload.extend_from_slice(b"sigyn-invitation-v2:");
         payload.extend_from_slice(id.as_bytes());
-        payload.extend_from_slice(vault_name.as_bytes());
+        // Length-prefix all variable-length fields
+        let vault_name_bytes = vault_name.as_bytes();
+        payload.extend_from_slice(&(vault_name_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(vault_name_bytes);
         payload.extend_from_slice(vault_id.as_bytes());
         payload.extend_from_slice(&inviter_fingerprint.0);
-        payload.extend_from_slice(proposed_role.to_string().as_bytes());
+        let role_bytes = proposed_role.to_string();
+        payload.extend_from_slice(&(role_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(role_bytes.as_bytes());
+        // Encode list count then length-prefixed elements
+        payload.extend_from_slice(&(allowed_envs.len() as u32).to_le_bytes());
         for env in allowed_envs {
-            payload.extend_from_slice(env.as_bytes());
+            let env_bytes = env.as_bytes();
+            payload.extend_from_slice(&(env_bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(env_bytes);
         }
+        payload.extend_from_slice(&(secret_patterns.len() as u32).to_le_bytes());
         for pattern in secret_patterns {
-            payload.extend_from_slice(pattern.as_bytes());
+            let pat_bytes = pattern.as_bytes();
+            payload.extend_from_slice(&(pat_bytes.len() as u32).to_le_bytes());
+            payload.extend_from_slice(pat_bytes);
         }
         payload.extend_from_slice(&max_delegation_depth.to_le_bytes());
         payload
@@ -197,6 +213,7 @@ mod tests {
             max_delegation_depth: 3,
             signature,
             created_at: chrono::Utc::now(),
+            expires_at: None,
         };
 
         assert!(invite.verify(&kp.verifying_key()).is_ok());
@@ -225,6 +242,7 @@ mod tests {
             max_delegation_depth: 0,
             signature,
             created_at: chrono::Utc::now(),
+            expires_at: None,
         };
 
         // Verify with wrong key should fail

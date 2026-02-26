@@ -21,6 +21,9 @@ pub enum VaultCommands {
         /// Link vault to an org hierarchy path (e.g. "acme/platform/web")
         #[arg(long)]
         org: Option<String>,
+        /// Create separate git repo for audit data (enables per-repo access control)
+        #[arg(long)]
+        split_audit: bool,
     },
     /// List all vaults
     List,
@@ -42,6 +45,16 @@ pub enum VaultCommands {
         /// Vault name
         name: String,
     },
+    /// Accept a changed vault owner (after origin mismatch warning)
+    Trust {
+        /// Vault name
+        name: String,
+        /// Accept the new owner identity
+        #[arg(long)]
+        accept_new_owner: bool,
+    },
+    /// List all pinned vaults and their pinned owners
+    Pins,
 }
 
 pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<()> {
@@ -50,7 +63,11 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
     let paths = VaultPaths::new(home.clone());
 
     match cmd {
-        VaultCommands::Create { name, org } => {
+        VaultCommands::Create {
+            name,
+            org,
+            split_audit,
+        } => {
             let loaded = load_identity(&store, identity)?;
             let fingerprint = loaded.identity.fingerprint.clone();
 
@@ -83,13 +100,21 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
 
             std::fs::create_dir_all(paths.env_dir(&name))?;
 
-            let manifest_toml = manifest.to_toml()?;
-            std::fs::write(paths.manifest_path(&name), manifest_toml)?;
+            let sealed_manifest = manifest
+                .to_sealed_bytes(&master_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&paths.manifest_path(&name), &sealed_manifest)?;
 
-            let mut header_bytes = Vec::new();
-            ciborium::into_writer(&header, &mut header_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
-            std::fs::write(paths.members_path(&name), header_bytes)?;
+            // Write encrypted org_link for org-path scanning
+            if let Some(ref org_path) = org {
+                let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+                let link_path = paths.vault_dir(&name).join(".org_link");
+                sigyn_engine::vault::path::write_org_link(&link_path, org_path, &device_key)?;
+            }
+
+            let signed_header = envelope::sign_header(&header, loaded.signing_key(), vault_id)
+                .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+            crate::config::secure_write(&paths.members_path(&name), &signed_header)?;
 
             let policy = sigyn_engine::policy::storage::VaultPolicy::new();
             policy.save_encrypted(&paths.policy_path(&name), &master_cipher)?;
@@ -104,15 +129,26 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 )?;
             }
 
+            // If --split-audit, initialize audit sub-repo before writing audit log
+            if split_audit {
+                sigyn_engine::sync::vault_sync::init_audit_repo(&paths.vault_dir(&name))?;
+            }
+
             // Audit: vault created
-            if let Ok(mut log) = AuditLog::open(&paths.audit_path(&name)) {
-                let _ = log.append(
-                    &fingerprint,
-                    AuditAction::VaultCreated,
-                    None,
-                    AuditOutcome::Success,
-                    loaded.signing_key(),
-                );
+            if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                master_cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &vault_id,
+            ) {
+                if let Ok(mut log) = AuditLog::open(&paths.audit_path(&name), audit_cipher) {
+                    let _ = log.append(
+                        &fingerprint,
+                        AuditAction::VaultCreated,
+                        None,
+                        AuditOutcome::Success,
+                        loaded.signing_key(),
+                    );
+                }
             }
 
             if json {
@@ -151,18 +187,8 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 println!("{}", style("Vaults").bold());
                 println!("{}", style("─".repeat(40)).dim());
                 for name in &vaults {
-                    let manifest_path = paths.manifest_path(name);
-                    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                        if let Ok(manifest) = VaultManifest::from_toml(&content) {
-                            println!(
-                                "  {} ({})",
-                                style(name).bold(),
-                                manifest.environments.join(", ")
-                            );
-                            continue;
-                        }
-                    }
-                    println!("  {}", style(name).bold());
+                    // All manifests are encrypted; show as locked (use `vault info` to decrypt)
+                    println!("  {} {}", style(name).bold(), style("(locked)").dim());
                 }
             }
         }
@@ -176,8 +202,9 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 anyhow::bail!("vault '{}' not found", vault_name);
             }
 
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let manifest = VaultManifest::from_toml(&content)?;
+            // Always requires unlock — manifests are encrypted
+            let ctx = super::secret::unlock_vault(identity, Some(&vault_name), None)?;
+            let manifest = ctx.manifest;
 
             if json {
                 crate::output::print_json(&manifest)?;
@@ -210,8 +237,9 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 anyhow::bail!("org node '{}' not found", org);
             }
 
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let mut manifest = VaultManifest::from_toml(&content)?;
+            // Unlock vault to decrypt/re-encrypt manifest
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+            let mut manifest = ctx.manifest.clone();
 
             if manifest.org_path.is_some() {
                 anyhow::bail!(
@@ -222,7 +250,15 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             }
 
             manifest.org_path = Some(org.clone());
-            std::fs::write(&manifest_path, manifest.to_toml()?)?;
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
+            {
+                let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+                let link_path = paths.vault_dir(&name).join(".org_link");
+                sigyn_engine::vault::path::write_org_link(&link_path, &org, &device_key)?;
+            }
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -239,15 +275,20 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 anyhow::bail!("vault '{}' not found", name);
             }
 
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let mut manifest = VaultManifest::from_toml(&content)?;
+            // Unlock vault to decrypt/re-encrypt manifest
+            let ctx = super::secret::unlock_vault(identity, Some(&name), None)?;
+            let mut manifest = ctx.manifest.clone();
 
             if manifest.org_path.is_none() {
                 anyhow::bail!("vault '{}' is not linked to any org", name);
             }
 
             let old_org = manifest.org_path.take();
-            std::fs::write(&manifest_path, manifest.to_toml()?)?;
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
+            let _ = std::fs::remove_file(paths.vault_dir(&name).join(".org_link"));
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -260,6 +301,136 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                     name,
                     old_org.unwrap()
                 ));
+            }
+        }
+        VaultCommands::Trust {
+            name,
+            accept_new_owner,
+        } => {
+            if !accept_new_owner {
+                anyhow::bail!(
+                    "use --accept-new-owner to confirm you trust the new owner of vault '{}'",
+                    name
+                );
+            }
+
+            let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+            let mut pin_store =
+                sigyn_engine::vault::local_state::load_pinned_store(&home, &device_key)
+                    .map_err(|e| anyhow::anyhow!("failed to load pin store: {}", e))?;
+
+            // We need to unlock the vault to get the current manifest
+            // But unlock_vault will fail with origin mismatch — so we read
+            // the manifest directly (header-only, unverified) to show info.
+            let _manifest_data = std::fs::read(paths.manifest_path(&name))
+                .map_err(|_| anyhow::anyhow!("vault '{}' not found", name))?;
+            let header_bytes = std::fs::read(paths.members_path(&name))
+                .map_err(|_| anyhow::anyhow!("vault '{}' has no members file", name))?;
+            let header_preview =
+                sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
+                    .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+            let vault_id = header_preview
+                .vault_id
+                .ok_or_else(|| anyhow::anyhow!("header missing vault_id"))?;
+
+            let local_state = pin_store.entry_mut(&name);
+            let old_pin = local_state.pin.as_ref();
+
+            if let Some(old) = old_pin {
+                eprintln!(
+                    "Current pinned owner: {}",
+                    style(old.owner_fingerprint.to_hex()).yellow()
+                );
+            } else {
+                eprintln!("No existing pin for vault '{}'", name);
+            }
+
+            if crate::config::is_interactive() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "Accept new owner for vault '{}'? This resets the origin pin.",
+                        name
+                    ))
+                    .default(false)
+                    .interact()?;
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            // Clear the pin — it will be re-established on next unlock_vault()
+            local_state.pin = None;
+            sigyn_engine::vault::local_state::save_pinned_store(&pin_store, &home, &device_key)
+                .map_err(|e| anyhow::anyhow!("failed to save pin store: {}", e))?;
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "vault": name,
+                    "vault_id": vault_id.to_string(),
+                    "pin_reset": true,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Pin reset for vault '{}'. The owner will be re-pinned on next access.",
+                    name
+                ));
+            }
+        }
+        VaultCommands::Pins => {
+            let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+            let pin_store = sigyn_engine::vault::local_state::load_pinned_store(&home, &device_key)
+                .map_err(|e| anyhow::anyhow!("failed to load pin store: {}", e))?;
+
+            if pin_store.vaults.is_empty() {
+                if json {
+                    crate::output::print_json(&serde_json::json!([]))?;
+                } else {
+                    println!(
+                        "No pinned vaults. Pins are created automatically on first vault access."
+                    );
+                }
+                return Ok(());
+            }
+
+            if json {
+                let entries: Vec<_> = pin_store
+                    .vaults
+                    .iter()
+                    .filter_map(|(name, state)| {
+                        state.pin.as_ref().map(|pin| {
+                            serde_json::json!({
+                                "vault": name,
+                                "vault_id": pin.vault_id.to_string(),
+                                "owner": pin.owner_fingerprint.to_hex(),
+                                "pinned_at": pin.pinned_at.to_rfc3339(),
+                            })
+                        })
+                    })
+                    .collect();
+                crate::output::print_json(&entries)?;
+            } else {
+                println!("{}", style("Pinned Vaults").bold());
+                println!("{}", style("─".repeat(60)).dim());
+                let mut names: Vec<_> = pin_store.vaults.keys().collect();
+                names.sort();
+                for name in names {
+                    let state = &pin_store.vaults[name];
+                    if let Some(ref pin) = state.pin {
+                        println!(
+                            "  {} owner={} pinned={}",
+                            style(name).bold(),
+                            style(pin.owner_fingerprint.to_hex()).cyan(),
+                            pin.pinned_at.format("%Y-%m-%d"),
+                        );
+                    } else if state.checkpoint.is_some() {
+                        println!(
+                            "  {} {}",
+                            style(name).bold(),
+                            style("(checkpoint only, no pin)").dim(),
+                        );
+                    }
+                }
             }
         }
     }

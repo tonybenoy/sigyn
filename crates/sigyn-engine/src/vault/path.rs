@@ -1,4 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use sigyn_core::crypto::sealed::{derive_file_cipher, is_sealed, sealed_decrypt, sealed_encrypt};
+
+const ORG_LINK_HKDF_CONTEXT: &[u8] = b"sigyn-org-link-v1";
+const ORG_LINK_AAD: &[u8] = b".org_link";
 
 pub struct VaultPaths {
     base: PathBuf,
@@ -34,11 +39,32 @@ impl VaultPaths {
     }
 
     pub fn audit_path(&self, name: &str) -> PathBuf {
-        self.vault_dir(name).join("audit.log.json")
+        match self.detect_layout(name) {
+            VaultLayout::SingleRepo => self.vault_dir(name).join("audit.log.json"),
+            VaultLayout::SplitRepo => self.audit_repo_dir(name).join("audit.log.json"),
+        }
     }
 
     pub fn witnesses_path(&self, name: &str) -> PathBuf {
-        self.vault_dir(name).join("witnesses.json")
+        match self.detect_layout(name) {
+            VaultLayout::SingleRepo => self.vault_dir(name).join("witnesses.json"),
+            VaultLayout::SplitRepo => self.audit_repo_dir(name).join("witnesses.json"),
+        }
+    }
+
+    /// The audit sub-repo directory for split-repo layouts.
+    pub fn audit_repo_dir(&self, name: &str) -> PathBuf {
+        self.vault_dir(name).join("audit")
+    }
+
+    /// Detect whether this vault uses a single repo or a split (vault + audit) layout.
+    pub fn detect_layout(&self, name: &str) -> VaultLayout {
+        let audit_dir = self.vault_dir(name).join("audit");
+        if audit_dir.is_dir() && audit_dir.join(".git").exists() {
+            VaultLayout::SplitRepo
+        } else {
+            VaultLayout::SingleRepo
+        }
     }
 
     pub fn forks_path(&self, name: &str) -> PathBuf {
@@ -71,23 +97,55 @@ impl VaultPaths {
     }
 
     /// List vaults that belong to a given org path.
-    /// Scans all vaults and returns those whose manifest `org_path` matches or is a descendant.
-    pub fn list_vaults_for_org(&self, org_path: &str) -> crate::Result<Vec<String>> {
+    ///
+    /// Since vault manifests are encrypted, this method checks for an `org_link` metadata
+    /// file in the vault directory. This file is written when a vault is created with --org
+    /// or attached via `vault attach`. The org_link file is device-key encrypted.
+    pub fn list_vaults_for_org(
+        &self,
+        org_path: &str,
+        device_key: Option<&[u8; 32]>,
+    ) -> crate::Result<Vec<String>> {
         let all_vaults = self.list_vaults()?;
         let mut matching = Vec::new();
         for name in all_vaults {
-            let manifest_path = self.manifest_path(&name);
-            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                if let Ok(manifest) = super::manifest::VaultManifest::from_toml(&content) {
-                    if let Some(ref vp) = manifest.org_path {
-                        if vp == org_path || vp.starts_with(&format!("{}/", org_path)) {
-                            matching.push(name);
-                        }
-                    }
+            let link_path = self.vault_dir(&name).join(".org_link");
+            if let Some(linked_org) = read_org_link(&link_path, device_key) {
+                if linked_org == org_path || linked_org.starts_with(&format!("{}/", org_path)) {
+                    matching.push(name);
                 }
             }
         }
         Ok(matching)
+    }
+}
+
+/// Whether the vault uses a single git repo or separate vault + audit repos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultLayout {
+    SingleRepo,
+    SplitRepo,
+}
+
+/// Write an encrypted `.org_link` file using the device key.
+pub fn write_org_link(path: &Path, org_path: &str, device_key: &[u8; 32]) -> crate::Result<()> {
+    let cipher = derive_file_cipher(device_key, ORG_LINK_HKDF_CONTEXT)?;
+    let sealed = sealed_encrypt(&cipher, org_path.as_bytes(), ORG_LINK_AAD)?;
+    crate::io::atomic_write(path, &sealed)?;
+    Ok(())
+}
+
+/// Read an `.org_link` file. Handles both encrypted (new) and plaintext (legacy) formats.
+pub fn read_org_link(path: &Path, device_key: Option<&[u8; 32]>) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    if is_sealed(&data) {
+        let key = device_key?;
+        let cipher = derive_file_cipher(key, ORG_LINK_HKDF_CONTEXT).ok()?;
+        let plaintext = sealed_decrypt(&cipher, &data, ORG_LINK_AAD).ok()?;
+        String::from_utf8(plaintext).ok()
+    } else {
+        // Legacy plaintext format
+        Some(String::from_utf8_lossy(&data).trim().to_string())
     }
 }
 

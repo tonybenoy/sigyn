@@ -114,6 +114,50 @@ pub enum OrgSyncCommands {
     },
 }
 
+/// Load an org node manifest from its sealed file (public for cross-module use).
+pub fn load_org_manifest_path(
+    manifest_path: &std::path::Path,
+) -> Result<sigyn_engine::hierarchy::manifest::NodeManifest> {
+    load_org_manifest(manifest_path)
+}
+
+/// Load an org node manifest from its sealed file.
+fn load_org_manifest(
+    manifest_path: &std::path::Path,
+) -> Result<sigyn_engine::hierarchy::manifest::NodeManifest> {
+    let data = std::fs::read(manifest_path)?;
+    if !sigyn_engine::crypto::sealed::is_sealed(&data) {
+        anyhow::bail!("org manifest is not in sealed format — file may be tampered or corrupted");
+    }
+    let home = crate::config::sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-org-manifest-v1")?;
+    let plaintext = sigyn_engine::crypto::sealed::sealed_decrypt(&cipher, &data, b"org-manifest")
+        .map_err(|e| anyhow::anyhow!("failed to decrypt org manifest: {}", e))?;
+    let content = std::str::from_utf8(&plaintext)?;
+    NodeManifest::from_toml(content)
+        .map_err(|e| anyhow::anyhow!("failed to parse org manifest: {}", e))
+}
+
+/// Save an org node manifest in sealed format.
+fn save_org_manifest(
+    manifest_path: &std::path::Path,
+    manifest: &sigyn_engine::hierarchy::manifest::NodeManifest,
+) -> Result<()> {
+    let home = crate::config::sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-org-manifest-v1")?;
+    let sealed = sigyn_engine::crypto::sealed::sealed_encrypt(
+        &cipher,
+        manifest.to_toml()?.as_bytes(),
+        b"org-manifest",
+    )?;
+    crate::config::secure_write(manifest_path, &sealed)?;
+    Ok(())
+}
+
 pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()> {
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());
@@ -148,17 +192,25 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
             std::fs::create_dir_all(hierarchy_paths.children_dir(&org_path))?;
 
-            // Write manifest
-            std::fs::write(
-                hierarchy_paths.manifest_path(&org_path),
-                manifest.to_toml()?,
-            )?;
+            // Write manifest (encrypted with device key)
+            {
+                let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+                let cipher = sigyn_engine::crypto::sealed::derive_file_cipher(
+                    &device_key,
+                    b"sigyn-org-manifest-v1",
+                )?;
+                let sealed = sigyn_engine::crypto::sealed::sealed_encrypt(
+                    &cipher,
+                    manifest.to_toml()?.as_bytes(),
+                    b"org-manifest",
+                )?;
+                crate::config::secure_write(&hierarchy_paths.manifest_path(&org_path), &sealed)?;
+            }
 
-            // Write envelope header
-            let mut header_bytes = Vec::new();
-            ciborium::into_writer(&header, &mut header_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
-            std::fs::write(hierarchy_paths.members_path(&org_path), header_bytes)?;
+            // Write signed envelope header
+            let signed_header = envelope::sign_header(&header, loaded.signing_key(), node_id)
+                .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+            crate::config::secure_write(&hierarchy_paths.members_path(&org_path), &signed_header)?;
 
             // Write empty policy
             let policy = VaultPolicy::new();
@@ -199,8 +251,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 }
 
                 // Read parent manifest to set parent_id
-                let parent_content = std::fs::read_to_string(&parent_manifest_path)?;
-                let mut parent_manifest = NodeManifest::from_toml(&parent_content)?;
+                let mut parent_manifest = load_org_manifest(&parent_manifest_path)?;
 
                 let mut manifest =
                     NodeManifest::new(name.clone(), r#type.clone(), fingerprint.clone());
@@ -217,15 +268,17 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 std::fs::create_dir_all(hierarchy_paths.children_dir(&child_path))?;
 
-                std::fs::write(
-                    hierarchy_paths.manifest_path(&child_path),
-                    manifest.to_toml()?,
+                crate::config::secure_write(
+                    &hierarchy_paths.manifest_path(&child_path),
+                    manifest.to_toml()?.as_bytes(),
                 )?;
 
-                let mut header_bytes = Vec::new();
-                ciborium::into_writer(&header, &mut header_bytes)
-                    .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
-                std::fs::write(hierarchy_paths.members_path(&child_path), header_bytes)?;
+                let signed_header = envelope::sign_header(&header, loaded.signing_key(), node_id)
+                    .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+                crate::config::secure_write(
+                    &hierarchy_paths.members_path(&child_path),
+                    &signed_header,
+                )?;
 
                 let policy = VaultPolicy::new();
                 policy.save_encrypted(&hierarchy_paths.policy_path(&child_path), &master_cipher)?;
@@ -236,7 +289,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     name: name.clone(),
                     node_type: r#type.clone(),
                 });
-                std::fs::write(&parent_manifest_path, parent_manifest.to_toml()?)?;
+                save_org_manifest(&parent_manifest_path, &parent_manifest)?;
 
                 if json {
                     crate::output::print_json(&serde_json::json!({
@@ -276,7 +329,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 // Check no linked vaults
                 let vault_paths = sigyn_engine::vault::VaultPaths::new(home.clone());
-                let linked = vault_paths.list_vaults_for_org(&path)?;
+                let linked = vault_paths.list_vaults_for_org(&path, None)?;
                 if !linked.is_empty() {
                     anyhow::bail!(
                         "cannot remove '{}': {} vault(s) are linked. Detach them first.",
@@ -293,7 +346,10 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                         let mut parent_manifest = NodeManifest::from_toml(&parent_content)?;
                         let node_name = org_path.segments().last().unwrap();
                         parent_manifest.children.retain(|c| c.name != *node_name);
-                        std::fs::write(&parent_manifest_path, parent_manifest.to_toml()?)?;
+                        crate::config::secure_write(
+                            &parent_manifest_path,
+                            parent_manifest.to_toml()?.as_bytes(),
+                        )?;
                     }
                 }
 
@@ -350,8 +406,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 anyhow::bail!("node '{}' not found", path);
             }
 
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let manifest = NodeManifest::from_toml(&content)?;
+            let manifest = load_org_manifest(&manifest_path)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -401,7 +456,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 // Unseal to read policy
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
                 let header: sigyn_engine::crypto::EnvelopeHeader =
-                    ciborium::from_reader(header_bytes.as_slice())
+                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
                     &header,
@@ -473,7 +528,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 // Unseal to modify policy
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
                 let header: sigyn_engine::crypto::EnvelopeHeader =
-                    ciborium::from_reader(header_bytes.as_slice())
+                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
                     &header,
@@ -519,7 +574,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
                 let header: sigyn_engine::crypto::EnvelopeHeader =
-                    ciborium::from_reader(header_bytes.as_slice())
+                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                 let master_key = envelope::unseal_master_key(
                     &header,
@@ -569,12 +624,11 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     if !mp.exists() {
                         continue;
                     }
-                    let content = std::fs::read_to_string(&mp)?;
-                    let manifest = NodeManifest::from_toml(&content)?;
+                    let manifest = load_org_manifest(&mp)?;
 
                     let header_bytes = std::fs::read(hierarchy_paths.members_path(cp))?;
                     let header: sigyn_engine::crypto::EnvelopeHeader =
-                        ciborium::from_reader(header_bytes.as_slice())
+                        sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                             .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
                     let master_key = envelope::unseal_master_key(
                         &header,
@@ -678,13 +732,12 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     anyhow::bail!("node '{}' not found", path);
                 }
 
-                let content = std::fs::read_to_string(&manifest_path)?;
-                let mut manifest = NodeManifest::from_toml(&content)?;
+                let mut manifest = load_org_manifest(&manifest_path)?;
                 manifest.git_remote = Some(GitRemoteConfig {
                     url: remote_url.clone(),
                     branch: branch.clone(),
                 });
-                std::fs::write(&manifest_path, manifest.to_toml()?)?;
+                save_org_manifest(&manifest_path, &manifest)?;
 
                 if json {
                     crate::output::print_json(&serde_json::json!({
@@ -711,8 +764,7 @@ fn print_tree(
     is_last: bool,
 ) -> Result<()> {
     let manifest_path = paths.manifest_path(org_path);
-    let content = std::fs::read_to_string(&manifest_path)?;
-    let manifest = NodeManifest::from_toml(&content)?;
+    let manifest = load_org_manifest(&manifest_path)?;
 
     let connector = if prefix.is_empty() {
         ""
@@ -740,23 +792,14 @@ fn print_tree(
         format!("{}│   ", prefix)
     };
 
-    // Also show linked vaults
+    // Also show linked vaults (requires unlock, so just list vault dirs)
     let home = sigyn_home();
     let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
-    if let Ok(vaults) = vault_paths.list_vaults_for_org(&org_str) {
-        let direct_vaults: Vec<_> = vaults
-            .into_iter()
-            .filter(|v| {
-                vault_paths.manifest_path(v).exists()
-                    && std::fs::read_to_string(vault_paths.manifest_path(v))
-                        .ok()
-                        .and_then(|c| sigyn_engine::vault::VaultManifest::from_toml(&c).ok())
-                        .and_then(|m| m.org_path)
-                        .as_deref()
-                        == Some(&org_str)
-            })
-            .collect();
+    // Note: vault manifests are encrypted, so we can't filter by org_path without unlocking.
+    // Show all vaults under this org dir as potential matches.
+    if let Ok(vaults) = vault_paths.list_vaults_for_org(&org_str, None) {
+        let direct_vaults: Vec<_> = vaults;
 
         let total_items = children.len() + direct_vaults.len();
         for (i, vault_name) in direct_vaults.iter().enumerate() {
@@ -785,8 +828,7 @@ fn print_tree(
 
 fn build_tree_json(paths: &HierarchyPaths, org_path: &OrgPath) -> Result<serde_json::Value> {
     let manifest_path = paths.manifest_path(org_path);
-    let content = std::fs::read_to_string(&manifest_path)?;
-    let manifest = NodeManifest::from_toml(&content)?;
+    let manifest = load_org_manifest(&manifest_path)?;
 
     let children_names = paths.list_children(org_path)?;
     let mut children_json = Vec::new();
@@ -800,18 +842,8 @@ fn build_tree_json(paths: &HierarchyPaths, org_path: &OrgPath) -> Result<serde_j
     let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
     let direct_vaults: Vec<String> = vault_paths
-        .list_vaults_for_org(&org_str)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|v| {
-            std::fs::read_to_string(vault_paths.manifest_path(v))
-                .ok()
-                .and_then(|c| sigyn_engine::vault::VaultManifest::from_toml(&c).ok())
-                .and_then(|m| m.org_path)
-                .as_deref()
-                == Some(&org_str)
-        })
-        .collect();
+        .list_vaults_for_org(&org_str, None)
+        .unwrap_or_default();
 
     Ok(serde_json::json!({
         "name": manifest.name,

@@ -12,11 +12,9 @@ pub struct MfaSession {
 }
 
 /// Compute an HMAC-like tag over the timestamp using blake3 keyed hash.
-/// Uses the fingerprint bytes (padded to 32 bytes) as the key.
-pub fn compute_hmac(timestamp: &DateTime<Utc>, fingerprint_bytes: &[u8; 16]) -> String {
-    let mut key = [0u8; 32];
-    key[..16].copy_from_slice(fingerprint_bytes);
-    let hasher = blake3::Hasher::new_keyed(&key);
+/// Uses a 32-byte secret key (derived from the device key via HKDF).
+pub fn compute_hmac(timestamp: &DateTime<Utc>, hmac_key: &[u8; 32]) -> String {
+    let hasher = blake3::Hasher::new_keyed(hmac_key);
     let ts_str = timestamp.to_rfc3339();
     let mut h = hasher;
     h.update(ts_str.as_bytes());

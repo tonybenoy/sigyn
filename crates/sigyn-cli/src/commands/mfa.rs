@@ -37,8 +37,19 @@ fn mfa_store() -> MfaStore {
     MfaStore::new(sigyn_home().join("identities"))
 }
 
+/// Derive a 32-byte HMAC key from the device key for MFA session authentication.
+fn session_hmac_key() -> [u8; 32] {
+    let home = sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home)
+        .expect("failed to load device key for session HMAC");
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-session-hmac-v1")
+            .expect("failed to derive session HMAC key");
+    *cipher.key_bytes()
+}
+
 fn session_store() -> MfaSessionStore {
-    MfaSessionStore::new(sigyn_home().join("sessions"))
+    MfaSessionStore::new(sigyn_home().join("sessions"), session_hmac_key())
 }
 
 fn encryption_key_bytes(loaded: &LoadedIdentity) -> [u8; 32] {

@@ -36,6 +36,17 @@ pub enum AuditCommands {
     Anchor,
 }
 
+fn derive_audit_cipher(
+    ctx: &super::secret::UnlockedVaultContext,
+) -> Result<sigyn_engine::crypto::vault_cipher::VaultCipher> {
+    sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to derive audit cipher: {}", e))
+}
+
 pub fn handle(
     cmd: AuditCommands,
     vault: Option<&str>,
@@ -59,7 +70,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
             let entries = log.tail(n)?;
 
             if json {
@@ -96,7 +107,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
             match log.verify_chain() {
                 Ok(count) => {
                     if json {
@@ -142,7 +153,7 @@ pub fn handle(
                 return Ok(());
             }
 
-            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
             let all = log.tail(1000)?;
             let filtered: Vec<_> = all
                 .into_iter()
@@ -185,7 +196,7 @@ pub fn handle(
                 anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
             }
 
-            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
             let entries = log.tail(1)?;
             let latest = entries.last().ok_or_else(|| {
                 anyhow::anyhow!("audit log is empty for vault '{}'", ctx.vault_name)
@@ -199,9 +210,16 @@ pub fn handle(
                 timestamp: chrono::Utc::now(),
             };
 
-            // Persist to the witnesses file next to the audit log
+            // Persist to the witnesses file next to the audit log (encrypted)
             let witnesses_path = ctx.paths.witnesses_path(&ctx.vault_name);
-            let mut witness_log = sigyn_engine::audit::WitnessLog::open(&witnesses_path)?;
+            let witness_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.cipher.key_bytes(),
+                b"sigyn-witness-v1",
+                &ctx.manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to derive witness cipher: {}", e))?;
+            let mut witness_log =
+                sigyn_engine::audit::WitnessLog::open(&witnesses_path, witness_cipher)?;
             witness_log.add_witness(latest.entry_hash, witness_sig)?;
 
             let witness_count = witness_log.witnesses_for(&latest.entry_hash).len();
@@ -279,7 +297,7 @@ pub fn handle(
                 anyhow::bail!("no audit log found for vault '{}'", ctx.vault_name);
             }
 
-            let log = sigyn_engine::audit::AuditLog::open(&audit_path)?;
+            let log = sigyn_engine::audit::AuditLog::open(&audit_path, derive_audit_cipher(&ctx)?)?;
             let entries = log.tail(usize::MAX)?;
 
             match format.as_str() {

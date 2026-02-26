@@ -99,6 +99,12 @@ pub enum SigynError {
     SyncConflict { key: String, env: String },
     #[error("git operation failed: {0}")]
     GitError(String),
+    #[error(
+        "rollback detected: remote HEAD {remote} does not descend from local checkpoint {local}"
+    )]
+    RollbackDetected { remote: String, local: String },
+    #[error("vault origin mismatch: expected owner {expected}, found {found}")]
+    OriginMismatch { expected: String, found: String },
 
     // Rotation errors
     #[error("rotation failed for key {0}: {1}")]

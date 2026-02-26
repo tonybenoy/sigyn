@@ -109,20 +109,34 @@ fn build_delegation_tree(policy: &VaultPolicy, owner_fp: &KeyFingerprint) -> Vec
     roots
 }
 
-/// Save the envelope header to disk.
-fn save_header(header: &EnvelopeHeader, paths: &VaultPaths, vault_name: &str) -> Result<()> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(header, &mut buf)
-        .map_err(|e| anyhow::anyhow!("failed to encode header: {}", e))?;
+/// Save the envelope header to disk (signed with the actor's signing key).
+fn save_header(
+    header: &EnvelopeHeader,
+    paths: &VaultPaths,
+    vault_name: &str,
+    signing_key: &sigyn_engine::crypto::keys::SigningKeyPair,
+    vault_id: uuid::Uuid,
+) -> Result<()> {
+    let signed = envelope::sign_header(header, signing_key, vault_id)
+        .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
     let members_path = paths.members_path(vault_name);
-    std::fs::write(&members_path, &buf).context("failed to write members file")?;
+    crate::config::secure_write(&members_path, &signed)
+        .map_err(|e| anyhow::anyhow!("failed to write members file: {}", e))?;
     Ok(())
 }
 
 /// Append an audit entry (best-effort).
 fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    if let Ok(mut log) = AuditLog::open(&audit_path) {
+    let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
         let _ = log.append(
             &ctx.fingerprint,
             action,
@@ -261,11 +275,8 @@ pub fn handle(
             let mut policy = ctx.policy.clone();
             policy.add_member(member);
 
-            // Add recipient to envelope header
-            let header_bytes = std::fs::read(ctx.paths.members_path(&ctx.vault_name))
-                .context("failed to read vault members")?;
-            let mut header: EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
-                .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+            // Use the already-verified header from unlock_vault()
+            let mut header: EnvelopeHeader = ctx.header.clone();
 
             envelope::add_recipient(
                 &mut header,
@@ -279,7 +290,13 @@ pub fn handle(
             policy
                 .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
-            save_header(&header, &ctx.paths, &ctx.vault_name)?;
+            save_header(
+                &header,
+                &ctx.paths,
+                &ctx.vault_name,
+                ctx.loaded_identity.signing_key(),
+                ctx.manifest.vault_id,
+            )?;
 
             // Write invitation file to ~/.sigyn/invitations/<uuid>.json
             let invitation_id = uuid::Uuid::new_v4();
@@ -297,6 +314,7 @@ pub fn handle(
             );
             let invitation_sig = ctx.loaded_identity.signing_key().sign(&signing_payload);
 
+            let now = chrono::Utc::now();
             let invitation_file = InvitationFile {
                 id: invitation_id,
                 vault_name: ctx.vault_name.clone(),
@@ -307,7 +325,8 @@ pub fn handle(
                 secret_patterns,
                 max_delegation_depth,
                 signature: invitation_sig,
-                created_at: chrono::Utc::now(),
+                created_at: now,
+                expires_at: Some(now + chrono::Duration::days(7)),
             };
 
             let invitations_dir = home.join("invitations");
@@ -316,8 +335,8 @@ pub fn handle(
             let invitation_path = invitations_dir.join(format!("{}.json", invitation_id));
             let invitation_json = serde_json::to_string_pretty(&invitation_file)
                 .context("failed to serialize invitation")?;
-            std::fs::write(&invitation_path, &invitation_json)
-                .context("failed to write invitation file")?;
+            crate::config::secure_write(&invitation_path, invitation_json.as_bytes())
+                .map_err(|e| anyhow::anyhow!("failed to write invitation file: {}", e))?;
 
             // Audit
             audit_log(
@@ -369,20 +388,29 @@ pub fn handle(
                 .iter()
                 .find(|id| id.fingerprint == invite_file.inviter_fingerprint);
 
-            if let Some(inviter) = inviter_identity {
-                invite_file.verify(&inviter.signing_pubkey).map_err(|_| {
-                    anyhow::anyhow!(
-                        "invitation signature verification failed for inviter {}",
-                        invite_file.inviter_fingerprint.to_hex()
-                    )
-                })?;
-            } else {
-                // Inviter identity not in local store; warn but proceed
-                eprintln!(
-                    "{} inviter identity {} not found locally; signature could not be verified",
-                    style("WARNING").yellow().bold(),
-                    &invite_file.inviter_fingerprint.to_hex()[..12]
-                );
+            let inviter = inviter_identity.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "inviter identity {} not found locally — cannot verify invitation signature.\n  \
+                     Import the inviter's identity first, then re-accept the invitation.",
+                    invite_file.inviter_fingerprint.to_hex()
+                )
+            })?;
+            invite_file.verify(&inviter.signing_pubkey).map_err(|_| {
+                anyhow::anyhow!(
+                    "invitation signature verification failed for inviter {}",
+                    invite_file.inviter_fingerprint.to_hex()
+                )
+            })?;
+
+            // Check invitation expiry
+            if let Some(expires_at) = invite_file.expires_at {
+                if chrono::Utc::now() > expires_at {
+                    anyhow::bail!(
+                        "invitation {} has expired (expired at {}). Ask the inviter to create a new invitation.",
+                        invite_file.id,
+                        expires_at.format("%Y-%m-%d %H:%M UTC")
+                    );
+                }
             }
 
             if json {
@@ -394,7 +422,7 @@ pub fn handle(
                     "inviter": invite_file.inviter_fingerprint.to_hex(),
                     "role": invite_file.proposed_role.to_string(),
                     "envs": invite_file.allowed_envs,
-                    "signature_verified": inviter_identity.is_some(),
+                    "signature_verified": true,
                 }))?;
             } else {
                 crate::output::print_success("Invitation accepted");
@@ -406,11 +434,7 @@ pub fn handle(
                 );
                 println!("  Role:          {}", invite_file.proposed_role);
                 println!("  Environments:  {}", invite_file.allowed_envs.join(", "));
-                if inviter_identity.is_some() {
-                    println!("  Signature:     verified");
-                } else {
-                    println!("  Signature:     not verified (inviter not in local store)");
-                }
+                println!("  Signature:     verified");
 
                 eprintln!();
                 eprintln!(
@@ -453,11 +477,8 @@ pub fn handle(
             let target_fp = KeyFingerprint::from_hex(&fingerprint)
                 .map_err(|e| anyhow::anyhow!("invalid fingerprint: {}", e))?;
 
-            // Load current header
-            let header_bytes = std::fs::read(ctx.paths.members_path(&ctx.vault_name))
-                .context("failed to read vault members")?;
-            let mut header: EnvelopeHeader = ciborium::from_reader(header_bytes.as_slice())
-                .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+            // Use the already-verified header from unlock_vault()
+            let mut header: EnvelopeHeader = ctx.header.clone();
 
             let mut policy = ctx.policy.clone();
 
@@ -537,7 +558,13 @@ pub fn handle(
             }
 
             // Save the updated header
-            save_header(&header, &ctx.paths, &ctx.vault_name)?;
+            save_header(
+                &header,
+                &ctx.paths,
+                &ctx.vault_name,
+                ctx.loaded_identity.signing_key(),
+                ctx.manifest.vault_id,
+            )?;
 
             // Audit log entries
             audit_log(

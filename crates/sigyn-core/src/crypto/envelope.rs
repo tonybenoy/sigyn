@@ -25,6 +25,9 @@ pub struct RecipientSlot {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct EnvelopeHeader {
     pub slots: Vec<RecipientSlot>,
+    /// Vault UUID — allows reading vault_id from members.cbor before decrypting vault.toml.
+    #[serde(default)]
+    pub vault_id: Option<Uuid>,
 }
 
 fn derive_slot_key(shared_secret: &[u8; 32], vault_id: &Uuid) -> Result<[u8; 32]> {
@@ -117,7 +120,10 @@ pub fn seal_master_key(
         });
     }
 
-    Ok(EnvelopeHeader { slots })
+    Ok(EnvelopeHeader {
+        slots,
+        vault_id: Some(vault_id),
+    })
 }
 
 pub fn unseal_master_key(
@@ -165,6 +171,67 @@ pub fn add_recipient(
 
 pub fn remove_recipient(header: &mut EnvelopeHeader, fingerprint: &KeyFingerprint) {
     header.slots.retain(|s| &s.fingerprint != fingerprint);
+}
+
+/// Serialize an EnvelopeHeader to CBOR, then wrap it in the SGSN signed format.
+///
+/// The signature covers `blake3(cbor_bytes || vault_id_bytes)`.
+pub fn sign_header(
+    header: &EnvelopeHeader,
+    signing_key: &super::keys::SigningKeyPair,
+    vault_id: Uuid,
+) -> Result<Vec<u8>> {
+    let mut cbor_bytes = Vec::new();
+    ciborium::into_writer(header, &mut cbor_bytes)
+        .map_err(|e| SigynError::CborEncode(e.to_string()))?;
+    Ok(super::sealed::signed_wrap(
+        &cbor_bytes,
+        signing_key,
+        vault_id.as_bytes(),
+    ))
+}
+
+/// Verify a signed members file and deserialize the EnvelopeHeader.
+///
+/// Requires the SGSN signed format — unsigned data is rejected.
+/// A verifying key is required; pass `None` only for the initial bootstrap
+/// read where vault_id must be extracted before the signer is known
+/// (use `extract_header_unverified` for that case).
+pub fn verify_and_load_header(
+    data: &[u8],
+    vault_id: Uuid,
+    verifying_key: &super::keys::VerifyingKeyWrapper,
+) -> Result<EnvelopeHeader> {
+    if !super::sealed::is_signed(data) {
+        return Err(SigynError::Decryption(
+            "members file is not in signed format (SGSN) — file may be tampered or corrupted"
+                .into(),
+        ));
+    }
+    let cbor_bytes = super::sealed::signed_unwrap(data, verifying_key, vault_id.as_bytes())?;
+    ciborium::from_reader(cbor_bytes.as_slice()).map_err(|e| SigynError::CborDecode(e.to_string()))
+}
+
+/// Extract an EnvelopeHeader without signature verification.
+///
+/// Used ONLY during the bootstrap sequence to read vault_id from the header
+/// before the signer's key is known. The caller MUST subsequently verify
+/// the header with `verify_and_load_header` once they have the verifying key.
+///
+/// Rejects data that is not in SGSN signed format.
+pub fn extract_header_unverified(data: &[u8]) -> Result<EnvelopeHeader> {
+    if !super::sealed::is_signed(data) {
+        return Err(SigynError::Decryption(
+            "members file is not in signed format (SGSN) — file may be tampered or corrupted"
+                .into(),
+        ));
+    }
+    // 5 bytes header + payload + 64 bytes sig
+    if data.len() < 69 {
+        return Err(SigynError::Decryption("signed data too short".into()));
+    }
+    let cbor_bytes = &data[5..data.len() - 64];
+    ciborium::from_reader(cbor_bytes).map_err(|e| SigynError::CborDecode(e.to_string()))
 }
 
 #[cfg(test)]

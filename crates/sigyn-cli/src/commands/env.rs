@@ -5,7 +5,7 @@ use sigyn_engine::audit::entry::AuditOutcome;
 use sigyn_engine::audit::{AuditAction, AuditLog};
 use sigyn_engine::environment::promotion::promote_env;
 use sigyn_engine::policy::engine::AccessAction;
-use sigyn_engine::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
+use sigyn_engine::vault::{env_file, PlaintextEnv, VaultPaths};
 
 use super::secret::{check_access, unlock_vault};
 use crate::config::sigyn_home;
@@ -67,8 +67,9 @@ pub fn handle(
 
     match cmd {
         EnvCommands::List => {
-            let content = std::fs::read_to_string(paths.manifest_path(&vault_name))?;
-            let manifest = VaultManifest::from_toml(&content)?;
+            // Always requires unlock — manifests are encrypted
+            let ctx = unlock_vault(identity, vault, None)?;
+            let manifest = ctx.manifest;
 
             if json {
                 crate::output::print_json(&manifest.environments)?;
@@ -88,26 +89,35 @@ pub fn handle(
             check_access(&ctx, AccessAction::CreateEnv, None)?;
 
             let manifest_path = paths.manifest_path(&vault_name);
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let mut manifest = VaultManifest::from_toml(&content)?;
+            let mut manifest = ctx.manifest.clone();
 
             if manifest.environments.contains(&name) {
                 anyhow::bail!("environment '{}' already exists", name);
             }
 
             manifest.environments.push(name.clone());
-            std::fs::write(&manifest_path, manifest.to_toml()?)?;
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
 
             // Audit log
             let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-            if let Ok(mut log) = AuditLog::open(&audit_path) {
-                let _ = log.append(
-                    &ctx.fingerprint,
-                    AuditAction::EnvironmentCreated { name: name.clone() },
-                    None,
-                    AuditOutcome::Success,
-                    ctx.loaded_identity.signing_key(),
-                );
+            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            );
+            if let Ok(ac) = audit_cipher {
+                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                    let _ = log.append(
+                        &ctx.fingerprint,
+                        AuditAction::EnvironmentCreated { name: name.clone() },
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    );
+                }
             }
 
             crate::output::print_success(&format!(
@@ -246,8 +256,7 @@ pub fn handle(
 
             // Verify target does not exist
             let manifest_path = paths.manifest_path(&vault_name);
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let mut manifest = VaultManifest::from_toml(&content)?;
+            let mut manifest = ctx.manifest.clone();
 
             if manifest.environments.contains(&target) {
                 anyhow::bail!("target environment '{}' already exists", target);
@@ -264,20 +273,30 @@ pub fn handle(
 
             // Add target env to manifest
             manifest.environments.push(target.clone());
-            std::fs::write(&manifest_path, manifest.to_toml()?)?;
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
 
             // Audit
             let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-            if let Ok(mut log) = AuditLog::open(&audit_path) {
-                let _ = log.append(
-                    &ctx.fingerprint,
-                    AuditAction::EnvironmentCreated {
-                        name: target.clone(),
-                    },
-                    None,
-                    AuditOutcome::Success,
-                    ctx.loaded_identity.signing_key(),
-                );
+            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            );
+            if let Ok(ac) = audit_cipher {
+                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                    let _ = log.append(
+                        &ctx.fingerprint,
+                        AuditAction::EnvironmentCreated {
+                            name: target.clone(),
+                        },
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    );
+                }
             }
 
             if json {
@@ -326,17 +345,24 @@ pub fn handle(
 
             // Audit log
             let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-            if let Ok(mut log) = AuditLog::open(&audit_path) {
-                let _ = log.append(
-                    &ctx.fingerprint,
-                    AuditAction::EnvironmentPromoted {
-                        source: from.clone(),
-                        target: to.clone(),
-                    },
-                    None,
-                    AuditOutcome::Success,
-                    ctx.loaded_identity.signing_key(),
-                );
+            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                ctx.cipher.key_bytes(),
+                b"sigyn-audit-v1",
+                &ctx.manifest.vault_id,
+            );
+            if let Ok(ac) = audit_cipher {
+                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                    let _ = log.append(
+                        &ctx.fingerprint,
+                        AuditAction::EnvironmentPromoted {
+                            source: from.clone(),
+                            target: to.clone(),
+                        },
+                        None,
+                        AuditOutcome::Success,
+                        ctx.loaded_identity.signing_key(),
+                    );
+                }
             }
 
             if json {

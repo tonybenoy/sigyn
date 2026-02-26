@@ -36,4 +36,33 @@ impl VaultManifest {
     pub fn from_toml(s: &str) -> crate::Result<Self> {
         toml::from_str(s).map_err(|e| crate::SigynError::Deserialization(e.to_string()))
     }
+
+    /// Serialize to TOML, then encrypt with the sealed file format.
+    /// AAD is set to the vault_id bytes for binding.
+    pub fn to_sealed_bytes(
+        &self,
+        cipher: &crate::crypto::vault_cipher::VaultCipher,
+    ) -> crate::Result<Vec<u8>> {
+        let toml = self.to_toml()?;
+        crate::crypto::sealed::sealed_encrypt(cipher, toml.as_bytes(), self.vault_id.as_bytes())
+    }
+
+    /// Decrypt sealed bytes back into a VaultManifest.
+    /// Requires the SGYN sealed format — plaintext is rejected.
+    pub fn from_sealed_bytes(
+        cipher: &crate::crypto::vault_cipher::VaultCipher,
+        data: &[u8],
+        vault_id: Uuid,
+    ) -> crate::Result<Self> {
+        if !crate::crypto::sealed::is_sealed(data) {
+            return Err(crate::SigynError::Decryption(
+                "vault manifest is not in sealed format (SGYN) — file may be tampered or corrupted"
+                    .into(),
+            ));
+        }
+        let plaintext = crate::crypto::sealed::sealed_decrypt(cipher, data, vault_id.as_bytes())?;
+        let s = std::str::from_utf8(&plaintext)
+            .map_err(|e| crate::SigynError::Deserialization(e.to_string()))?;
+        Self::from_toml(s)
+    }
 }

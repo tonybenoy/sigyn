@@ -5,29 +5,50 @@ use uuid::Uuid;
 use super::manifest::NodeManifest;
 use super::path::{HierarchyPaths, OrgPath};
 use crate::crypto::envelope::{self, EnvelopeHeader};
-use crate::crypto::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
+use crate::crypto::keys::{
+    KeyFingerprint, SigningKeyPair, VerifyingKeyWrapper, X25519PrivateKey, X25519PublicKey,
+};
 use crate::crypto::vault_cipher::VaultCipher;
 use crate::error::{Result, SigynError};
 use crate::policy::storage::{VaultPolicy, VaultPolicyExt};
 use crate::vault::VaultPaths;
 
-/// Read an envelope header from a CBOR file.
-fn read_header(path: &Path) -> Result<EnvelopeHeader> {
+/// Read an envelope header from a signed (SGSN) file.
+/// If the file doesn't exist, returns a default empty header.
+/// Verifies the signature when a verifying key and domain_id are provided.
+fn read_header(
+    path: &Path,
+    verifying_key: Option<&VerifyingKeyWrapper>,
+    domain_id: Option<Uuid>,
+) -> Result<EnvelopeHeader> {
     if !path.exists() {
         return Ok(EnvelopeHeader::default());
     }
     let data = std::fs::read(path)?;
+    // Try signed format first
+    if crate::crypto::sealed::is_signed(&data) {
+        if let (Some(vk), Some(did)) = (verifying_key, domain_id) {
+            return envelope::verify_and_load_header(&data, did, vk);
+        }
+        // No key available — extract but warn
+        return envelope::extract_header_unverified(&data);
+    }
+    // Fallback: legacy raw CBOR (pre-signing migration)
     ciborium::from_reader(data.as_slice()).map_err(|e| SigynError::CborDecode(e.to_string()))
 }
 
-/// Write an envelope header to a CBOR file.
-fn write_header(path: &Path, header: &EnvelopeHeader) -> Result<()> {
+/// Write an envelope header as a signed (SGSN) file.
+fn write_header(
+    path: &Path,
+    header: &EnvelopeHeader,
+    signing_key: &SigningKeyPair,
+    domain_id: Uuid,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut buf = Vec::new();
-    ciborium::into_writer(header, &mut buf).map_err(|e| SigynError::CborEncode(e.to_string()))?;
-    std::fs::write(path, buf)?;
+    let signed = envelope::sign_header(header, signing_key, domain_id)?;
+    std::fs::write(path, signed)?;
     Ok(())
 }
 
@@ -37,15 +58,17 @@ fn add_recipient_to_node(
     master_key: &[u8; 32],
     new_pubkey: &X25519PublicKey,
     domain_id: Uuid,
+    signing_key: &SigningKeyPair,
+    verifying_key: Option<&VerifyingKeyWrapper>,
 ) -> Result<()> {
-    let mut header = read_header(members_path)?;
+    let mut header = read_header(members_path, verifying_key, Some(domain_id))?;
     // Check if slot already exists
     let new_fp = new_pubkey.fingerprint();
     if header.slots.iter().any(|s| s.fingerprint == new_fp) {
         return Ok(()); // Already has a slot
     }
     envelope::add_recipient(&mut header, master_key, new_pubkey, domain_id)?;
-    write_header(members_path, &header)?;
+    write_header(members_path, &header, signing_key, domain_id)?;
     Ok(())
 }
 
@@ -59,16 +82,17 @@ pub fn cascade_add_recipient(
     org_path: &OrgPath,
     actor_private_key: &X25519PrivateKey,
     new_pubkey: &X25519PublicKey,
+    signing_key: &SigningKeyPair,
 ) -> Result<Vec<String>> {
     let mut affected = Vec::new();
 
-    // Process the target node itself
     add_recipient_to_subtree(
         hierarchy_paths,
         vault_paths,
         org_path,
         actor_private_key,
         new_pubkey,
+        signing_key,
         &mut affected,
     )?;
 
@@ -81,6 +105,7 @@ fn add_recipient_to_subtree(
     path: &OrgPath,
     actor_private_key: &X25519PrivateKey,
     new_pubkey: &X25519PublicKey,
+    signing_key: &SigningKeyPair,
     affected: &mut Vec<String>,
 ) -> Result<()> {
     let members_path = hierarchy_paths.members_path(path);
@@ -91,25 +116,32 @@ fn add_recipient_to_subtree(
         let manifest = NodeManifest::from_toml(&manifest_content)?;
 
         // Unseal the node's master key using actor's private key
-        let header = read_header(&members_path)?;
+        let header = read_header(&members_path, None, Some(manifest.node_id))?;
         let master_key = envelope::unseal_master_key(&header, actor_private_key, manifest.node_id)?;
 
         // Add recipient to this node
-        add_recipient_to_node(&members_path, &master_key, new_pubkey, manifest.node_id)?;
+        add_recipient_to_node(
+            &members_path,
+            &master_key,
+            new_pubkey,
+            manifest.node_id,
+            signing_key,
+            None,
+        )?;
         affected.push(format!("node:{}", path));
     }
 
     // Process linked vaults
     let org_str = path.as_str();
-    let vaults = vault_paths.list_vaults_for_org(&org_str)?;
+    let vaults = vault_paths.list_vaults_for_org(&org_str, None)?;
     for vault_name in vaults {
         let vault_manifest_path = vault_paths.manifest_path(&vault_name);
         if let Ok(content) = std::fs::read_to_string(&vault_manifest_path) {
             if let Ok(vault_manifest) = crate::vault::VaultManifest::from_toml(&content) {
-                // Only process vaults directly at this org_path level
                 if vault_manifest.org_path.as_deref() == Some(&org_str) {
                     let vault_members = vault_paths.members_path(&vault_name);
-                    let vault_header = read_header(&vault_members)?;
+                    let vault_header =
+                        read_header(&vault_members, None, Some(vault_manifest.vault_id))?;
                     let vault_mk = envelope::unseal_master_key(
                         &vault_header,
                         actor_private_key,
@@ -120,6 +152,8 @@ fn add_recipient_to_subtree(
                         &vault_mk,
                         new_pubkey,
                         vault_manifest.vault_id,
+                        signing_key,
+                        None,
                     )?;
                     affected.push(format!("vault:{}", vault_name));
                 }
@@ -137,6 +171,7 @@ fn add_recipient_to_subtree(
             &child_path,
             actor_private_key,
             new_pubkey,
+            signing_key,
             affected,
         )?;
     }
@@ -156,6 +191,7 @@ pub fn cascade_remove_recipient(
     fingerprint: &KeyFingerprint,
     actor_private_key: &X25519PrivateKey,
     remaining_pubkeys: &[(KeyFingerprint, X25519PublicKey)],
+    signing_key: &SigningKeyPair,
 ) -> Result<Vec<String>> {
     let mut affected = Vec::new();
 
@@ -166,12 +202,14 @@ pub fn cascade_remove_recipient(
         fingerprint,
         actor_private_key,
         remaining_pubkeys,
+        signing_key,
         &mut affected,
     )?;
 
     Ok(affected)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remove_recipient_from_subtree(
     hierarchy_paths: &HierarchyPaths,
     vault_paths: &VaultPaths,
@@ -179,6 +217,7 @@ fn remove_recipient_from_subtree(
     fingerprint: &KeyFingerprint,
     actor_private_key: &X25519PrivateKey,
     remaining_pubkeys: &[(KeyFingerprint, X25519PublicKey)],
+    signing_key: &SigningKeyPair,
     affected: &mut Vec<String>,
 ) -> Result<()> {
     let members_path = hierarchy_paths.members_path(path);
@@ -189,7 +228,7 @@ fn remove_recipient_from_subtree(
         let manifest_content = std::fs::read_to_string(&manifest_path)?;
         let manifest = NodeManifest::from_toml(&manifest_content)?;
 
-        let header = read_header(&members_path)?;
+        let header = read_header(&members_path, None, Some(manifest.node_id))?;
 
         // Check if the target even has a slot here
         if header.slots.iter().any(|s| &s.fingerprint == fingerprint) {
@@ -209,13 +248,12 @@ fn remove_recipient_from_subtree(
 
             let new_header =
                 envelope::seal_master_key(new_cipher.key_bytes(), &pubkeys, manifest.node_id)?;
-            write_header(&members_path, &new_header)?;
+            write_header(&members_path, &new_header, signing_key, manifest.node_id)?;
 
             // Re-encrypt policy with new master key if it exists
             if policy_path.exists() {
                 let old_cipher = VaultCipher::new(old_master_key);
                 let mut policy = VaultPolicy::load_encrypted(&policy_path, &old_cipher)?;
-                // Also remove from node-level policy
                 policy.remove_member(fingerprint);
                 policy.save_encrypted(&policy_path, &new_cipher)?;
             }
@@ -226,14 +264,15 @@ fn remove_recipient_from_subtree(
 
     // Process linked vaults at this exact path
     let org_str = path.as_str();
-    let vaults = vault_paths.list_vaults_for_org(&org_str)?;
+    let vaults = vault_paths.list_vaults_for_org(&org_str, None)?;
     for vault_name in vaults {
         let vault_manifest_path = vault_paths.manifest_path(&vault_name);
         if let Ok(content) = std::fs::read_to_string(&vault_manifest_path) {
             if let Ok(vault_manifest) = crate::vault::VaultManifest::from_toml(&content) {
                 if vault_manifest.org_path.as_deref() == Some(&org_str) {
                     let vault_members = vault_paths.members_path(&vault_name);
-                    let vault_header = read_header(&vault_members)?;
+                    let vault_header =
+                        read_header(&vault_members, None, Some(vault_manifest.vault_id))?;
 
                     if vault_header
                         .slots
@@ -256,7 +295,12 @@ fn remove_recipient_from_subtree(
                             &pubkeys,
                             vault_manifest.vault_id,
                         )?;
-                        write_header(&vault_members, &new_header)?;
+                        write_header(
+                            &vault_members,
+                            &new_header,
+                            signing_key,
+                            vault_manifest.vault_id,
+                        )?;
 
                         // Re-encrypt vault policy
                         let vault_policy_path = vault_paths.policy_path(&vault_name);
@@ -311,6 +355,7 @@ fn remove_recipient_from_subtree(
             fingerprint,
             actor_private_key,
             remaining_pubkeys,
+            signing_key,
             affected,
         )?;
     }
@@ -322,7 +367,7 @@ fn remove_recipient_from_subtree(
 mod tests {
     use super::*;
     use crate::crypto::envelope;
-    use crate::crypto::keys::X25519PrivateKey;
+    use crate::crypto::keys::{SigningKeyPair, X25519PrivateKey};
 
     #[test]
     fn test_read_write_header_roundtrip() {
@@ -331,13 +376,14 @@ mod tests {
 
         let master_key = [0xABu8; 32];
         let alice = X25519PrivateKey::generate();
+        let signer = SigningKeyPair::generate();
         let vault_id = Uuid::new_v4();
 
         let header =
             envelope::seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
 
-        write_header(&path, &header).unwrap();
-        let loaded = read_header(&path).unwrap();
+        write_header(&path, &header, &signer, vault_id).unwrap();
+        let loaded = read_header(&path, Some(&signer.verifying_key()), Some(vault_id)).unwrap();
         assert_eq!(loaded.slots.len(), 1);
 
         let recovered = envelope::unseal_master_key(&loaded, &alice, vault_id).unwrap();
@@ -348,7 +394,7 @@ mod tests {
     fn test_read_header_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.cbor");
-        let header = read_header(&path).unwrap();
+        let header = read_header(&path, None, None).unwrap();
         assert!(header.slots.is_empty());
     }
 
@@ -360,20 +406,57 @@ mod tests {
         let master_key = [0xCDu8; 32];
         let alice = X25519PrivateKey::generate();
         let bob = X25519PrivateKey::generate();
+        let signer = SigningKeyPair::generate();
         let vault_id = Uuid::new_v4();
 
         let header =
             envelope::seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
-        write_header(&path, &header).unwrap();
+        write_header(&path, &header, &signer, vault_id).unwrap();
 
         // Add bob
-        add_recipient_to_node(&path, &master_key, &bob.public_key(), vault_id).unwrap();
-        let h = read_header(&path).unwrap();
+        add_recipient_to_node(
+            &path,
+            &master_key,
+            &bob.public_key(),
+            vault_id,
+            &signer,
+            None,
+        )
+        .unwrap();
+        let h = read_header(&path, None, None).unwrap();
         assert_eq!(h.slots.len(), 2);
 
         // Add bob again — should be idempotent
-        add_recipient_to_node(&path, &master_key, &bob.public_key(), vault_id).unwrap();
-        let h = read_header(&path).unwrap();
+        add_recipient_to_node(
+            &path,
+            &master_key,
+            &bob.public_key(),
+            vault_id,
+            &signer,
+            None,
+        )
+        .unwrap();
+        let h = read_header(&path, None, None).unwrap();
         assert_eq!(h.slots.len(), 2);
+    }
+
+    #[test]
+    fn test_read_header_rejects_wrong_signer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("members.cbor");
+
+        let master_key = [0xEFu8; 32];
+        let alice = X25519PrivateKey::generate();
+        let signer = SigningKeyPair::generate();
+        let other_signer = SigningKeyPair::generate();
+        let vault_id = Uuid::new_v4();
+
+        let header =
+            envelope::seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
+        write_header(&path, &header, &signer, vault_id).unwrap();
+
+        // Verify with wrong key should fail
+        let result = read_header(&path, Some(&other_signer.verifying_key()), Some(vault_id));
+        assert!(result.is_err());
     }
 }

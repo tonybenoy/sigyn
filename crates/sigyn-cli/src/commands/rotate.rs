@@ -82,36 +82,88 @@ pub enum ScheduleCommands {
     },
 }
 
-/// Load rotation schedules from vault dir
+/// Load rotation schedules from vault dir (encrypted with master key when available).
 fn load_schedules(
     vault_dir: &std::path::Path,
+    cipher: Option<&sigyn_engine::crypto::vault_cipher::VaultCipher>,
+    vault_id: Option<uuid::Uuid>,
 ) -> std::collections::HashMap<String, RotationSchedule> {
     let path = vault_dir.join("rotation_schedules.toml");
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(schedules) = toml::from_str(&content) {
-                return schedules;
+    if !path.exists() {
+        return std::collections::HashMap::new();
+    }
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    if !sigyn_engine::crypto::sealed::is_sealed(&data) {
+        eprintln!(
+            "{} rotation_schedules.toml is not in sealed format — ignoring (possible tampering)",
+            console::style("warning:").yellow().bold()
+        );
+        return std::collections::HashMap::new();
+    }
+    if let (Some(cipher), Some(vid)) = (cipher, vault_id) {
+        if let Ok(rotation_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+            cipher.key_bytes(),
+            b"sigyn-rotation-v1",
+            &vid,
+        ) {
+            if let Ok(plaintext) = sigyn_engine::crypto::sealed::sealed_decrypt(
+                &rotation_cipher,
+                &data,
+                b"rotation_schedules.toml",
+            ) {
+                if let Ok(s) = std::str::from_utf8(&plaintext) {
+                    if let Ok(schedules) = toml::from_str(s) {
+                        return schedules;
+                    }
+                }
             }
         }
     }
     std::collections::HashMap::new()
 }
 
-/// Save rotation schedules to vault dir
+/// Save rotation schedules to vault dir (encrypted with master key).
 fn save_schedules(
     vault_dir: &std::path::Path,
     schedules: &std::collections::HashMap<String, RotationSchedule>,
+    cipher: Option<&sigyn_engine::crypto::vault_cipher::VaultCipher>,
+    vault_id: Option<uuid::Uuid>,
 ) -> Result<()> {
     let path = vault_dir.join("rotation_schedules.toml");
     let content = toml::to_string_pretty(schedules)?;
-    std::fs::write(path, content)?;
+    if let (Some(cipher), Some(vid)) = (cipher, vault_id) {
+        let rotation_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+            cipher.key_bytes(),
+            b"sigyn-rotation-v1",
+            &vid,
+        )?;
+        let sealed = sigyn_engine::crypto::sealed::sealed_encrypt(
+            &rotation_cipher,
+            content.as_bytes(),
+            b"rotation_schedules.toml",
+        )?;
+        crate::config::secure_write(&path, &sealed)?;
+    } else {
+        crate::config::secure_write(&path, content.as_bytes())?;
+    }
     Ok(())
 }
 
 /// Append an audit entry (best-effort -- don't fail the operation on audit error)
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-    if let Ok(mut log) = AuditLog::open(&audit_path) {
+    let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        ctx.cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &ctx.manifest.vault_id,
+    ) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
         let _ = log.append(
             &ctx.fingerprint,
             action,
@@ -184,7 +236,8 @@ pub fn handle(
             let vault_dir = crate::config::sigyn_home()
                 .join("vaults")
                 .join(&ctx.vault_name);
-            let schedules = load_schedules(&vault_dir);
+            let schedules =
+                load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
             if let Some(schedule) = schedules.get(&key) {
                 if !schedule.hooks.is_empty() {
                     match sigyn_engine::rotation::hooks::execute_rotation_hooks(
@@ -240,17 +293,15 @@ pub fn handle(
             }
         }
         RotateCommands::Schedule { command } => {
-            let vault_name = vault.unwrap_or("default");
-            let home = crate::config::sigyn_home();
-            let vault_dir = home.join("vaults").join(vault_name);
-
-            if !vault_dir.exists() {
-                anyhow::bail!("vault '{}' not found", vault_name);
-            }
+            let ctx = unlock_vault(identity, vault, None)?;
+            let vault_dir = crate::config::sigyn_home()
+                .join("vaults")
+                .join(&ctx.vault_name);
 
             match command {
                 ScheduleCommands::List => {
-                    let schedules = load_schedules(&vault_dir);
+                    let schedules =
+                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
                     if schedules.is_empty() {
                         println!("{}", style("Rotation Schedules").bold());
                         println!("{}", style("─".repeat(60)).dim());
@@ -278,12 +329,18 @@ pub fn handle(
                     grace_hours,
                     hooks,
                 } => {
-                    let mut schedules = load_schedules(&vault_dir);
+                    let mut schedules =
+                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
                     let mut schedule = RotationSchedule::new(&cron, grace_hours);
                     schedule.key_pattern = key.clone();
                     schedule.hooks = hooks;
                     schedules.insert(key.clone(), schedule);
-                    save_schedules(&vault_dir, &schedules)?;
+                    save_schedules(
+                        &vault_dir,
+                        &schedules,
+                        Some(&ctx.cipher),
+                        Some(ctx.manifest.vault_id),
+                    )?;
 
                     if json {
                         crate::output::print_json(&serde_json::json!({
@@ -300,11 +357,17 @@ pub fn handle(
                     }
                 }
                 ScheduleCommands::Remove { key } => {
-                    let mut schedules = load_schedules(&vault_dir);
+                    let mut schedules =
+                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
                     if schedules.remove(&key).is_none() {
                         anyhow::bail!("no rotation schedule found for '{}'", key);
                     }
-                    save_schedules(&vault_dir, &schedules)?;
+                    save_schedules(
+                        &vault_dir,
+                        &schedules,
+                        Some(&ctx.cipher),
+                        Some(ctx.manifest.vault_id),
+                    )?;
 
                     crate::output::print_success(&format!(
                         "Removed rotation schedule for '{}'",

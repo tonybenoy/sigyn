@@ -194,14 +194,41 @@ pub fn try_notify(
 
 pub fn load_notification_config(sigyn_home: &std::path::Path) -> NotificationConfig {
     let path = sigyn_home.join("notifications.toml");
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(config) = toml::from_str(&content) {
-                return config;
+    if !path.exists() {
+        return NotificationConfig::default();
+    }
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(_) => return NotificationConfig::default(),
+    };
+    if !sigyn_engine::crypto::sealed::is_sealed(&data) {
+        eprintln!(
+            "{} notifications.toml is not in sealed format — ignoring (possible tampering)",
+            console::style("warning:").yellow().bold()
+        );
+        return NotificationConfig::default();
+    }
+    let device_key = match sigyn_engine::device::load_or_create_device_key(sigyn_home) {
+        Ok(k) => k,
+        Err(_) => return NotificationConfig::default(),
+    };
+    let cipher = match sigyn_engine::crypto::sealed::derive_file_cipher(
+        &device_key,
+        b"sigyn-notifications-v1",
+    ) {
+        Ok(c) => c,
+        Err(_) => return NotificationConfig::default(),
+    };
+    match sigyn_engine::crypto::sealed::sealed_decrypt(&cipher, &data, b"notifications.toml") {
+        Ok(plaintext) => {
+            if let Ok(s) = std::str::from_utf8(&plaintext) {
+                toml::from_str(s).unwrap_or_default()
+            } else {
+                NotificationConfig::default()
             }
         }
+        Err(_) => NotificationConfig::default(),
     }
-    NotificationConfig::default()
 }
 
 #[allow(dead_code)]
@@ -211,7 +238,15 @@ pub fn save_notification_config(
 ) -> Result<()> {
     let path = sigyn_home.join("notifications.toml");
     let content = toml::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    let device_key = sigyn_engine::device::load_or_create_device_key(sigyn_home)?;
+    let cipher =
+        sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-notifications-v1")?;
+    let sealed = sigyn_engine::crypto::sealed::sealed_encrypt(
+        &cipher,
+        content.as_bytes(),
+        b"notifications.toml",
+    )?;
+    crate::config::secure_write(&path, &sealed)?;
     Ok(())
 }
 
