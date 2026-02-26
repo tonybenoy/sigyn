@@ -91,17 +91,35 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             manifest.org_path = org.clone();
             let vault_id = manifest.vault_id;
 
-            let master_cipher = VaultCipher::generate();
-            let header = envelope::seal_master_key(
-                master_cipher.key_bytes(),
-                std::slice::from_ref(&loaded.identity.encryption_pubkey),
+            // Generate vault-level key (manifest/policy/audit) and per-env keys
+            let vault_cipher = VaultCipher::generate();
+            let recipients = std::slice::from_ref(&loaded.identity.encryption_pubkey);
+
+            // Build per-env keys: every default env gets its own key, creator gets all slots
+            let mut env_keys = std::collections::BTreeMap::new();
+            let mut env_recipients = std::collections::BTreeMap::new();
+            for env_name in &manifest.environments {
+                let env_key = VaultCipher::generate();
+                env_keys.insert(env_name.clone(), env_key);
+                env_recipients.insert(env_name.clone(), recipients.to_vec());
+            }
+            let env_key_bytes: std::collections::BTreeMap<String, [u8; 32]> = env_keys
+                .iter()
+                .map(|(name, cipher)| (name.clone(), *cipher.key_bytes()))
+                .collect();
+
+            let header = envelope::seal_v2(
+                vault_cipher.key_bytes(),
+                &env_key_bytes,
+                recipients,
+                &env_recipients,
                 vault_id,
             )?;
 
             std::fs::create_dir_all(paths.env_dir(&name))?;
 
             let sealed_manifest = manifest
-                .to_sealed_bytes(&master_cipher)
+                .to_sealed_bytes(&vault_cipher)
                 .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
             crate::config::secure_write(&paths.manifest_path(&name), &sealed_manifest)?;
 
@@ -117,12 +135,13 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             crate::config::secure_write(&paths.members_path(&name), &signed_header)?;
 
             let policy = sigyn_engine::policy::storage::VaultPolicy::new();
-            policy.save_encrypted(&paths.policy_path(&name), &master_cipher)?;
+            policy.save_encrypted(&paths.policy_path(&name), &vault_cipher)?;
 
             for env_name in &manifest.environments {
                 let env = sigyn_engine::vault::PlaintextEnv::new();
+                let env_cipher = env_keys.get(env_name).unwrap();
                 let encrypted =
-                    sigyn_engine::vault::env_file::encrypt_env(&env, &master_cipher, env_name)?;
+                    sigyn_engine::vault::env_file::encrypt_env(&env, env_cipher, env_name)?;
                 sigyn_engine::vault::env_file::write_encrypted_env(
                     &paths.env_path(&name, env_name),
                     &encrypted,
@@ -136,7 +155,7 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
 
             // Audit: vault created
             if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                master_cipher.key_bytes(),
+                vault_cipher.key_bytes(),
                 b"sigyn-audit-v1",
                 &vault_id,
             ) {
@@ -251,7 +270,7 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
 
             manifest.org_path = Some(org.clone());
             let sealed = manifest
-                .to_sealed_bytes(&ctx.cipher)
+                .to_sealed_bytes(&ctx.vault_cipher)
                 .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
             crate::config::secure_write(&manifest_path, &sealed)?;
             {
@@ -285,7 +304,7 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
 
             let old_org = manifest.org_path.take();
             let sealed = manifest
-                .to_sealed_bytes(&ctx.cipher)
+                .to_sealed_bytes(&ctx.vault_cipher)
                 .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
             crate::config::secure_write(&manifest_path, &sealed)?;
             let _ = std::fs::remove_file(paths.vault_dir(&name).join(".org_link"));

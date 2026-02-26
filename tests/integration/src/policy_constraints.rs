@@ -1,6 +1,6 @@
 use chrono::{TimeZone, Utc};
 use sigyn_engine::crypto::keys::KeyFingerprint;
-use sigyn_engine::policy::constraints::{Constraints, TimeWindow};
+use sigyn_engine::policy::constraints::{Constraints, MfaActions, TimeWindow};
 use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision, PolicyEngine};
 use sigyn_engine::policy::member::MemberPolicy;
 use sigyn_engine::policy::roles::Role;
@@ -9,9 +9,8 @@ use sigyn_engine::policy::storage::VaultPolicy;
 fn make_constraints() -> Constraints {
     Constraints {
         time_windows: vec![],
-
         expires_at: None,
-        require_mfa: false,
+        mfa_actions: MfaActions::none(),
     }
 }
 

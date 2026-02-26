@@ -58,9 +58,9 @@ sequenceDiagram
     CLI->>User: Prompt for Passphrase
     CLI->>Core: PolicyEngine::evaluate()
     Core-->>CLI: Access Granted
-    CLI->>Core: unseal_master_key(envelope)
-    Core-->>CLI: Master Key
-    CLI->>Core: decrypt_env(vault_file, master_key)
+    CLI->>Core: unseal_header(envelope)
+    Core-->>CLI: Vault Key + Env Keys
+    CLI->>Core: decrypt_env(vault_file, env_key)
     Core-->>CLI: Plaintext Secrets
     CLI->>Engine: Append Audit Entry
     Engine->>Disk: Write audit log
@@ -118,10 +118,10 @@ All Sigyn data lives under `~/.sigyn/` by default (determined via the `directori
   vaults/
     <name>/
       vault.toml                # Vault metadata (UUID, name, created_at)
-      members.cbor              # Envelope header: encrypted master key slots
+      members.cbor              # Envelope header: vault key slots + per-env key slots
       policy.cbor               # RBAC policy, member list, constraints
       envs/
-        dev.vault               # Encrypted environment file (CBOR)
+        dev.vault               # Encrypted environment file (CBOR, per-env key)
         staging.vault
         prod.vault
       audit.log.json            # Hash-chained audit trail (JSON Lines)
@@ -192,7 +192,7 @@ Sigyn is organized into logical modules split across the core library, engine, a
 
 | Module | Responsibility |
 |---|---|
-| **crypto** | Key generation, X25519 Diffie-Hellman, envelope encryption/decryption, ChaCha20-Poly1305 AEAD, Argon2id KDF, HKDF key derivation, nonce management |
+| **crypto** | Key generation, X25519 Diffie-Hellman, envelope encryption/decryption (vault key + per-env key slots), ChaCha20-Poly1305 AEAD, Argon2id KDF, HKDF key derivation, nonce management |
 | **vault** | Vault manifest types, env file encryption/decryption (pure computation) |
 | **secrets** | Secret value types, validation rules, cross-references, random secret generation, per-key ACLs |
 | **identity** | Identity/LoadedIdentity types, passphrase wrapping, Shamir secret sharing, MFA types and sessions |
@@ -247,8 +247,8 @@ User runs: sigyn secret get DATABASE_URL --env dev
 
   sigyn-core (pure)
     5. PolicyEngine::evaluate() -- check RBAC, constraints, ACLs
-    6. unseal_master_key() -- X25519 DH to recover master key from envelope
-    7. VaultCipher::decrypt() -- ChaCha20-Poly1305 decrypt the env file
+    6. unseal_header() -- X25519 DH to recover vault key + per-env keys from envelope
+    7. VaultCipher::decrypt() -- ChaCha20-Poly1305 decrypt the env file with that env's key
     8. Extract the requested key from the decrypted map
 
   sigyn-engine (I/O)

@@ -10,7 +10,7 @@ sigyn env create staging
 sigyn env create prod
 ```
 
-Each environment is stored as a separate encrypted file (`envs/<name>.vault`), so members can be granted access to specific environments without exposing others.
+Each environment is stored as a separate encrypted file (`envs/<name>.vault`), encrypted with its own independent 256-bit key. Members only receive decryption keys for environments they are authorized to access, providing **cryptographic isolation** between environments -- not just policy-level separation.
 
 ## Listing Environments
 
@@ -49,3 +49,23 @@ sigyn policy member add <fingerprint> --role contributor --env dev,staging
 ```
 
 Members with access to an environment can read and write secrets within that environment, subject to their role and any additional constraints (time windows, IP allowlists, expiry).
+
+## Cryptographic Isolation
+
+Each environment has its own independent encryption key. When a member is granted access to specific environments (e.g., `--env dev,staging`), they receive key slots only for those environments. They physically cannot decrypt environments they are not authorized for.
+
+This means:
+
+- A Contributor with `allowed_envs: ["dev"]` cannot decrypt `prod` secrets, even with direct access to the encrypted files on disk.
+- Revoking a member only rotates keys for environments they had access to -- unaffected environments are untouched.
+- Granting or revoking access to individual environments is supported without affecting other environments:
+
+```bash
+# Grant access to an additional environment
+sigyn delegation grant-env <fingerprint> staging
+
+# Revoke access to a specific environment (rotates that env's key)
+sigyn delegation revoke-env <fingerprint> staging
+```
+
+See [Security Model](security.md) for details on the envelope encryption scheme.

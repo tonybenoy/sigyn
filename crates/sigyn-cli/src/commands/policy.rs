@@ -4,6 +4,7 @@ use console::style;
 use sigyn_engine::audit::entry::AuditOutcome;
 use sigyn_engine::audit::{AuditAction, AuditLog};
 use sigyn_engine::crypto::keys::KeyFingerprint;
+use sigyn_engine::policy::constraints::MfaActions;
 use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision};
 use sigyn_engine::policy::member::MemberPolicy;
 use sigyn_engine::policy::roles::Role;
@@ -50,12 +51,26 @@ pub enum PolicyCommands {
         #[arg(long, short)]
         key: Option<String>,
     },
+    /// Set per-action MFA requirements on global constraints
+    #[command(name = "require-mfa")]
+    RequireMfa {
+        /// Actions requiring MFA (comma-separated): read,write,delete,manage-members,manage-policy,create-env,promote,all,none
+        actions: String,
+    },
+    /// Set per-action MFA requirements on a specific member
+    #[command(name = "member-require-mfa")]
+    MemberRequireMfa {
+        /// Member fingerprint (hex)
+        fingerprint: String,
+        /// Actions requiring MFA (comma-separated): read,write,delete,manage-members,manage-policy,create-env,promote,all,none
+        actions: String,
+    },
 }
 
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.cipher.key_bytes(),
+        ctx.vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     ) {
@@ -139,27 +154,48 @@ pub fn handle(
             }
 
             if json {
+                let global_mfa = ctx
+                    .policy
+                    .global_constraints
+                    .as_ref()
+                    .map(|c| c.mfa_actions.to_csv())
+                    .unwrap_or_else(|| "none".into());
                 let members: Vec<_> = ctx
                     .policy
                     .members
                     .values()
                     .map(|m| {
+                        let mfa = m
+                            .constraints
+                            .as_ref()
+                            .map(|c| c.mfa_actions.to_csv())
+                            .unwrap_or_else(|| "none".into());
                         serde_json::json!({
                             "fingerprint": m.fingerprint.to_hex(),
                             "role": m.role.to_string(),
                             "envs": m.allowed_envs,
                             "patterns": m.secret_patterns,
+                            "mfa": mfa,
                             "delegated_by": m.delegated_by.as_ref().map(|f| f.to_hex()),
                         })
                     })
                     .collect();
                 crate::output::print_json(&serde_json::json!({
                     "owner": ctx.manifest.owner.to_hex(),
+                    "global_mfa": global_mfa,
                     "members": members,
                 }))?;
             } else {
                 println!("{}", style("Vault Policy").bold());
                 println!("  Owner: {}", style(ctx.manifest.owner.to_hex()).cyan());
+                if let Some(global) = &ctx.policy.global_constraints {
+                    if global.mfa_actions.any_enabled() {
+                        println!(
+                            "  Global MFA: {}",
+                            style(global.mfa_actions.to_csv()).yellow()
+                        );
+                    }
+                }
                 println!("{}", style("-".repeat(60)).dim());
                 for m in ctx.policy.members.values() {
                     let fp_short = &m.fingerprint.to_hex()[..16];
@@ -168,12 +204,19 @@ pub fn handle(
                         .as_ref()
                         .map(|f| format!(" (via {})", &f.to_hex()[..16]))
                         .unwrap_or_default();
+                    let mfa_info = m
+                        .constraints
+                        .as_ref()
+                        .filter(|c| c.mfa_actions.any_enabled())
+                        .map(|c| format!(" mfa=[{}]", c.mfa_actions.to_csv()))
+                        .unwrap_or_default();
                     println!(
-                        "  {} {} envs=[{}] patterns=[{}]{}",
+                        "  {} {} envs=[{}] patterns=[{}]{}{}",
                         style(fp_short).cyan(),
                         style(m.role.to_string()).bold(),
                         m.allowed_envs.join(","),
                         m.secret_patterns.join(","),
+                        style(mfa_info).yellow(),
                         style(delegated).dim(),
                     );
                 }
@@ -212,7 +255,7 @@ pub fn handle(
 
             let mut policy = ctx.policy.clone();
             policy.add_member(member);
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)?;
+            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
 
             audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
 
@@ -242,7 +285,7 @@ pub fn handle(
                 anyhow::bail!("member {} not found in policy", fingerprint);
             }
 
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)?;
+            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
 
             audit(
                 &ctx,
@@ -312,6 +355,82 @@ pub fn handle(
                         println!("{} Access: REQUIRES MFA", style("!").yellow().bold());
                     }
                 }
+            }
+        }
+
+        PolicyCommands::RequireMfa { actions } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::ManagePolicy, None)?;
+
+            let mfa_actions =
+                MfaActions::from_csv(&actions).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let mut policy = ctx.policy.clone();
+            let global = policy.global_constraints.get_or_insert_with(|| {
+                sigyn_engine::policy::constraints::Constraints {
+                    time_windows: vec![],
+                    expires_at: None,
+                    mfa_actions: MfaActions::none(),
+                }
+            });
+            global.mfa_actions = mfa_actions.clone();
+            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "global_mfa_updated",
+                    "mfa_actions": mfa_actions.to_csv(),
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Global MFA requirement set: {}",
+                    mfa_actions.to_csv()
+                ));
+            }
+        }
+
+        PolicyCommands::MemberRequireMfa {
+            fingerprint,
+            actions,
+        } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::ManagePolicy, None)?;
+
+            let fp = parse_fingerprint(&fingerprint)?;
+            let mfa_actions =
+                MfaActions::from_csv(&actions).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let mut policy = ctx.policy.clone();
+            let member = policy
+                .get_member_mut(&fp)
+                .ok_or_else(|| anyhow::anyhow!("member {} not found in policy", fingerprint))?;
+
+            let constraints = member.constraints.get_or_insert_with(|| {
+                sigyn_engine::policy::constraints::Constraints {
+                    time_windows: vec![],
+                    expires_at: None,
+                    mfa_actions: MfaActions::none(),
+                }
+            });
+            constraints.mfa_actions = mfa_actions.clone();
+            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "member_mfa_updated",
+                    "fingerprint": fingerprint,
+                    "mfa_actions": mfa_actions.to_csv(),
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "MFA for member {}: {}",
+                    &fingerprint[..16.min(fingerprint.len())],
+                    mfa_actions.to_csv()
+                ));
             }
         }
     }

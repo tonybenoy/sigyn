@@ -62,12 +62,18 @@ fn add_recipient_to_node(
     verifying_key: Option<&VerifyingKeyWrapper>,
 ) -> Result<()> {
     let mut header = read_header(members_path, verifying_key, Some(domain_id))?;
-    // Check if slot already exists
-    let new_fp = new_pubkey.fingerprint();
-    if header.slots.iter().any(|s| s.fingerprint == new_fp) {
-        return Ok(()); // Already has a slot
+
+    if header.version >= 2 {
+        // V2: add vault_key_slot (env slots are managed by the vault, not the hierarchy)
+        envelope::add_vault_key_recipient(&mut header, master_key, new_pubkey, domain_id)?;
+    } else {
+        // V1: single master key slot
+        let new_fp = new_pubkey.fingerprint();
+        if header.slots.iter().any(|s| s.fingerprint == new_fp) {
+            return Ok(()); // Already has a slot
+        }
+        envelope::add_recipient(&mut header, master_key, new_pubkey, domain_id)?;
     }
-    envelope::add_recipient(&mut header, master_key, new_pubkey, domain_id)?;
     write_header(members_path, &header, signing_key, domain_id)?;
     Ok(())
 }
@@ -228,34 +234,55 @@ fn remove_recipient_from_subtree(
         let manifest_content = std::fs::read_to_string(&manifest_path)?;
         let manifest = NodeManifest::from_toml(&manifest_content)?;
 
-        let header = read_header(&members_path, None, Some(manifest.node_id))?;
+        let mut header = read_header(&members_path, None, Some(manifest.node_id))?;
 
-        // Check if the target even has a slot here
-        if header.slots.iter().any(|s| &s.fingerprint == fingerprint) {
-            // Unseal current master key
-            let old_master_key =
-                envelope::unseal_master_key(&header, actor_private_key, manifest.node_id)?;
-
-            // Generate new master key
-            let new_cipher = VaultCipher::generate();
-
-            // Rebuild header with only remaining (non-revoked) pubkeys
-            let pubkeys: Vec<X25519PublicKey> = remaining_pubkeys
+        // Check if the target has a slot here (v1 or v2)
+        let has_slot = if header.version >= 2 {
+            header
+                .vault_key_slots
                 .iter()
-                .filter(|(fp, _)| fp != fingerprint)
-                .map(|(_, pk)| pk.clone())
-                .collect();
+                .any(|s| &s.fingerprint == fingerprint)
+        } else {
+            header.slots.iter().any(|s| &s.fingerprint == fingerprint)
+        };
 
-            let new_header =
-                envelope::seal_master_key(new_cipher.key_bytes(), &pubkeys, manifest.node_id)?;
-            write_header(&members_path, &new_header, signing_key, manifest.node_id)?;
+        if has_slot {
+            if header.version >= 2 {
+                // V2: remove from vault_key_slots + all env_slots, rotate env keys
+                let old_vault_key =
+                    envelope::unseal_vault_key(&header, actor_private_key, manifest.node_id)?;
+                let old_cipher = VaultCipher::new(old_vault_key);
 
-            // Re-encrypt policy with new master key if it exists
-            if policy_path.exists() {
-                let old_cipher = VaultCipher::new(old_master_key);
-                let mut policy = VaultPolicy::load_encrypted(&policy_path, &old_cipher)?;
-                policy.remove_member(fingerprint);
-                policy.save_encrypted(&policy_path, &new_cipher)?;
+                envelope::remove_recipient_v2(&mut header, fingerprint);
+
+                // Re-encrypt policy with existing vault key (vault key not rotated for hierarchy)
+                if policy_path.exists() {
+                    let mut policy = VaultPolicy::load_encrypted(&policy_path, &old_cipher)?;
+                    policy.remove_member(fingerprint);
+                    policy.save_encrypted(&policy_path, &old_cipher)?;
+                }
+
+                write_header(&members_path, &header, signing_key, manifest.node_id)?;
+            } else {
+                // V1: rotate master key
+                let old_master_key =
+                    envelope::unseal_master_key(&header, actor_private_key, manifest.node_id)?;
+                let new_cipher = VaultCipher::generate();
+                let pubkeys: Vec<X25519PublicKey> = remaining_pubkeys
+                    .iter()
+                    .filter(|(fp, _)| fp != fingerprint)
+                    .map(|(_, pk)| pk.clone())
+                    .collect();
+                let new_header =
+                    envelope::seal_master_key(new_cipher.key_bytes(), &pubkeys, manifest.node_id)?;
+                write_header(&members_path, &new_header, signing_key, manifest.node_id)?;
+
+                if policy_path.exists() {
+                    let old_cipher = VaultCipher::new(old_master_key);
+                    let mut policy = VaultPolicy::load_encrypted(&policy_path, &old_cipher)?;
+                    policy.remove_member(fingerprint);
+                    policy.save_encrypted(&policy_path, &new_cipher)?;
+                }
             }
 
             affected.push(format!("node:{}", path));
@@ -274,65 +301,146 @@ fn remove_recipient_from_subtree(
                     let vault_header =
                         read_header(&vault_members, None, Some(vault_manifest.vault_id))?;
 
-                    if vault_header
-                        .slots
-                        .iter()
-                        .any(|s| &s.fingerprint == fingerprint)
-                    {
-                        let old_mk = envelope::unseal_master_key(
-                            &vault_header,
-                            actor_private_key,
-                            vault_manifest.vault_id,
-                        )?;
-                        let new_cipher = VaultCipher::generate();
-                        let pubkeys: Vec<X25519PublicKey> = remaining_pubkeys
+                    let has_vault_slot = if vault_header.version >= 2 {
+                        vault_header
+                            .vault_key_slots
                             .iter()
-                            .filter(|(fp, _)| fp != fingerprint)
-                            .map(|(_, pk)| pk.clone())
-                            .collect();
-                        let new_header = envelope::seal_master_key(
-                            new_cipher.key_bytes(),
-                            &pubkeys,
-                            vault_manifest.vault_id,
-                        )?;
-                        write_header(
-                            &vault_members,
-                            &new_header,
-                            signing_key,
-                            vault_manifest.vault_id,
-                        )?;
+                            .any(|s| &s.fingerprint == fingerprint)
+                    } else {
+                        vault_header
+                            .slots
+                            .iter()
+                            .any(|s| &s.fingerprint == fingerprint)
+                    };
 
-                        // Re-encrypt vault policy
-                        let vault_policy_path = vault_paths.policy_path(&vault_name);
-                        if vault_policy_path.exists() {
-                            let old_cipher = VaultCipher::new(old_mk);
-                            let policy =
-                                VaultPolicy::load_encrypted(&vault_policy_path, &old_cipher)?;
-                            policy.save_encrypted(&vault_policy_path, &new_cipher)?;
-                        }
+                    if has_vault_slot {
+                        if vault_header.version >= 2 {
+                            // V2: remove from all slots, rotate env keys
+                            let old_vault_key = envelope::unseal_vault_key(
+                                &vault_header,
+                                actor_private_key,
+                                vault_manifest.vault_id,
+                            )?;
+                            let old_vault_cipher = VaultCipher::new(old_vault_key);
 
-                        // Re-encrypt env files
-                        let env_dir = vault_paths.env_dir(&vault_name);
-                        if env_dir.exists() {
-                            let old_cipher = VaultCipher::new(old_mk);
+                            let mut vh = vault_header.clone();
+                            envelope::remove_recipient_v2(&mut vh, fingerprint);
+
+                            // Rotate env keys for remaining members
+                            let remaining: Vec<X25519PublicKey> = remaining_pubkeys
+                                .iter()
+                                .filter(|(fp, _)| fp != fingerprint)
+                                .map(|(_, pk)| pk.clone())
+                                .collect();
+
                             for env_name in &vault_manifest.environments {
+                                let new_env_key = envelope::rotate_env_key(
+                                    &mut vh,
+                                    env_name,
+                                    &remaining,
+                                    vault_manifest.vault_id,
+                                )?;
+
                                 let env_path = vault_paths.env_path(&vault_name, env_name);
                                 if env_path.exists() {
-                                    let encrypted =
-                                        crate::vault::env_file::read_encrypted_env(&env_path)?;
-                                    let plaintext = crate::vault::env_file::decrypt_env(
-                                        &encrypted,
-                                        &old_cipher,
-                                    )?;
-                                    let re_encrypted = crate::vault::env_file::encrypt_env(
-                                        &plaintext,
-                                        &new_cipher,
+                                    if let Ok(old_env_key) = envelope::unseal_env_key(
+                                        &vault_header,
                                         env_name,
-                                    )?;
-                                    crate::vault::env_file::write_encrypted_env(
-                                        &env_path,
-                                        &re_encrypted,
-                                    )?;
+                                        actor_private_key,
+                                        vault_manifest.vault_id,
+                                    ) {
+                                        let old_env_cipher = VaultCipher::new(old_env_key);
+                                        let encrypted =
+                                            crate::vault::env_file::read_encrypted_env(&env_path)?;
+                                        let plaintext = crate::vault::env_file::decrypt_env(
+                                            &encrypted,
+                                            &old_env_cipher,
+                                        )?;
+                                        let new_env_cipher = VaultCipher::new(new_env_key);
+                                        let re_encrypted = crate::vault::env_file::encrypt_env(
+                                            &plaintext,
+                                            &new_env_cipher,
+                                            env_name,
+                                        )?;
+                                        crate::vault::env_file::write_encrypted_env(
+                                            &env_path,
+                                            &re_encrypted,
+                                        )?;
+                                    }
+                                }
+                            }
+
+                            // Re-encrypt vault policy with existing vault key
+                            let vault_policy_path = vault_paths.policy_path(&vault_name);
+                            if vault_policy_path.exists() {
+                                let policy = VaultPolicy::load_encrypted(
+                                    &vault_policy_path,
+                                    &old_vault_cipher,
+                                )?;
+                                policy.save_encrypted(&vault_policy_path, &old_vault_cipher)?;
+                            }
+
+                            write_header(
+                                &vault_members,
+                                &vh,
+                                signing_key,
+                                vault_manifest.vault_id,
+                            )?;
+                        } else {
+                            // V1: rotate master key
+                            let old_mk = envelope::unseal_master_key(
+                                &vault_header,
+                                actor_private_key,
+                                vault_manifest.vault_id,
+                            )?;
+                            let new_cipher = VaultCipher::generate();
+                            let pubkeys: Vec<X25519PublicKey> = remaining_pubkeys
+                                .iter()
+                                .filter(|(fp, _)| fp != fingerprint)
+                                .map(|(_, pk)| pk.clone())
+                                .collect();
+                            let new_header = envelope::seal_master_key(
+                                new_cipher.key_bytes(),
+                                &pubkeys,
+                                vault_manifest.vault_id,
+                            )?;
+                            write_header(
+                                &vault_members,
+                                &new_header,
+                                signing_key,
+                                vault_manifest.vault_id,
+                            )?;
+
+                            let vault_policy_path = vault_paths.policy_path(&vault_name);
+                            if vault_policy_path.exists() {
+                                let old_cipher = VaultCipher::new(old_mk);
+                                let policy =
+                                    VaultPolicy::load_encrypted(&vault_policy_path, &old_cipher)?;
+                                policy.save_encrypted(&vault_policy_path, &new_cipher)?;
+                            }
+
+                            let env_dir = vault_paths.env_dir(&vault_name);
+                            if env_dir.exists() {
+                                let old_cipher = VaultCipher::new(old_mk);
+                                for env_name in &vault_manifest.environments {
+                                    let env_path = vault_paths.env_path(&vault_name, env_name);
+                                    if env_path.exists() {
+                                        let encrypted =
+                                            crate::vault::env_file::read_encrypted_env(&env_path)?;
+                                        let plaintext = crate::vault::env_file::decrypt_env(
+                                            &encrypted,
+                                            &old_cipher,
+                                        )?;
+                                        let re_encrypted = crate::vault::env_file::encrypt_env(
+                                            &plaintext,
+                                            &new_cipher,
+                                            env_name,
+                                        )?;
+                                        crate::vault::env_file::write_encrypted_env(
+                                            &env_path,
+                                            &re_encrypted,
+                                        )?;
+                                    }
                                 }
                             }
                         }

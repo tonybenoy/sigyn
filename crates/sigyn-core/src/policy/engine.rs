@@ -1,4 +1,5 @@
 use super::acl::matches_secret_pattern;
+use super::constraints::MfaActions;
 use super::storage::VaultPolicy;
 use crate::crypto::keys::KeyFingerprint;
 use crate::error::Result;
@@ -22,6 +23,22 @@ pub enum AccessAction {
     CreateEnv,
     Promote,
     Audit,
+}
+
+impl AccessAction {
+    /// Check if this action requires MFA given the per-action MFA config.
+    pub fn requires_mfa(&self, mfa: &MfaActions) -> bool {
+        match self {
+            AccessAction::Read => mfa.read,
+            AccessAction::Write => mfa.write,
+            AccessAction::Delete => mfa.delete,
+            AccessAction::ManageMembers => mfa.manage_members,
+            AccessAction::ManagePolicy => mfa.manage_policy,
+            AccessAction::CreateEnv => mfa.create_env,
+            AccessAction::Promote => mfa.promote,
+            AccessAction::Audit => false, // Audit never requires MFA
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,14 +159,17 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
-        // Check MFA requirement from global or member constraints
+        // Check per-action MFA requirement from global or member constraints
         if !request.mfa_verified {
             let global_requires = self
                 .policy
                 .global_constraints
                 .as_ref()
-                .is_some_and(|c| c.require_mfa);
-            let member_requires = member.constraints.as_ref().is_some_and(|c| c.require_mfa);
+                .is_some_and(|c| request.action.requires_mfa(&c.mfa_actions));
+            let member_requires = member
+                .constraints
+                .as_ref()
+                .is_some_and(|c| request.action.requires_mfa(&c.mfa_actions));
             if global_requires || member_requires {
                 return Ok(PolicyDecision::RequiresMfa);
             }
@@ -332,5 +352,102 @@ mod tests {
             engine.evaluate(&req).unwrap(),
             PolicyDecision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn test_per_action_mfa_member_level() {
+        use crate::policy::constraints::{Constraints, MfaActions};
+
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([5u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::Admin);
+        // Require MFA only for manage-members
+        mp.constraints = Some(Constraints {
+            time_windows: vec![],
+            expires_at: None,
+            mfa_actions: MfaActions::from_csv("manage-members").unwrap(),
+        });
+        policy.add_member(mp);
+
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Read should NOT require MFA
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+        // ManageMembers should require MFA
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::ManageMembers,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::RequiresMfa);
+
+        // ManageMembers with mfa_verified should allow
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::ManageMembers,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: true,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_per_action_mfa_global_level() {
+        use crate::policy::constraints::{Constraints, MfaActions};
+
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([6u8; 16]);
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(member.clone(), Role::Contributor));
+        // Require MFA globally for write and delete only
+        policy.global_constraints = Some(Constraints {
+            time_windows: vec![],
+            expires_at: None,
+            mfa_actions: MfaActions::from_csv("write,delete").unwrap(),
+        });
+
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Read should be fine
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+        // Write should require MFA
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Write,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::RequiresMfa);
+
+        // Delete should require MFA
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Delete,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::RequiresMfa);
     }
 }

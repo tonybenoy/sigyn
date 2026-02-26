@@ -1,11 +1,169 @@
 use serde::{Deserialize, Serialize};
 
+/// Per-action MFA requirements. Each field controls whether MFA is needed for
+/// that specific action. All default to `false`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MfaActions {
+    #[serde(default)]
+    pub read: bool,
+    #[serde(default)]
+    pub write: bool,
+    #[serde(default)]
+    pub delete: bool,
+    #[serde(default)]
+    pub manage_members: bool,
+    #[serde(default)]
+    pub manage_policy: bool,
+    #[serde(default)]
+    pub create_env: bool,
+    #[serde(default)]
+    pub promote: bool,
+}
+
+impl MfaActions {
+    /// All actions require MFA.
+    pub fn all() -> Self {
+        Self {
+            read: true,
+            write: true,
+            delete: true,
+            manage_members: true,
+            manage_policy: true,
+            create_env: true,
+            promote: true,
+        }
+    }
+
+    /// No actions require MFA.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Returns true if any action requires MFA.
+    pub fn any_enabled(&self) -> bool {
+        self.read
+            || self.write
+            || self.delete
+            || self.manage_members
+            || self.manage_policy
+            || self.create_env
+            || self.promote
+    }
+
+    /// Returns true if all actions require MFA.
+    pub fn all_enabled(&self) -> bool {
+        self.read
+            && self.write
+            && self.delete
+            && self.manage_members
+            && self.manage_policy
+            && self.create_env
+            && self.promote
+    }
+
+    /// Merge another MfaActions into this one (OR logic).
+    pub fn merge(&mut self, other: &MfaActions) {
+        self.read |= other.read;
+        self.write |= other.write;
+        self.delete |= other.delete;
+        self.manage_members |= other.manage_members;
+        self.manage_policy |= other.manage_policy;
+        self.create_env |= other.create_env;
+        self.promote |= other.promote;
+    }
+
+    /// Parse a comma-separated list of action names. Accepts "all" and "none".
+    pub fn from_csv(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(Self::all());
+        }
+        if s.eq_ignore_ascii_case("none") {
+            return Ok(Self::none());
+        }
+        let mut actions = Self::none();
+        for part in s.split(',') {
+            match part.trim().to_lowercase().as_str() {
+                "read" => actions.read = true,
+                "write" => actions.write = true,
+                "delete" => actions.delete = true,
+                "manage-members" | "manage_members" => actions.manage_members = true,
+                "manage-policy" | "manage_policy" => actions.manage_policy = true,
+                "create-env" | "create_env" => actions.create_env = true,
+                "promote" => actions.promote = true,
+                other => {
+                    return Err(format!(
+                        "unknown MFA action '{}'. Valid: read, write, delete, manage-members, manage-policy, create-env, promote, all, none",
+                        other
+                    ))
+                }
+            }
+        }
+        Ok(actions)
+    }
+
+    /// Return a comma-separated string of enabled actions.
+    pub fn to_csv(&self) -> String {
+        if self.all_enabled() {
+            return "all".into();
+        }
+        let mut parts = Vec::new();
+        if self.read {
+            parts.push("read");
+        }
+        if self.write {
+            parts.push("write");
+        }
+        if self.delete {
+            parts.push("delete");
+        }
+        if self.manage_members {
+            parts.push("manage-members");
+        }
+        if self.manage_policy {
+            parts.push("manage-policy");
+        }
+        if self.create_env {
+            parts.push("create-env");
+        }
+        if self.promote {
+            parts.push("promote");
+        }
+        if parts.is_empty() {
+            "none".into()
+        } else {
+            parts.join(",")
+        }
+    }
+}
+
+/// Custom deserializer: accept either the new `MfaActions` object or the legacy
+/// `require_mfa: true/false` boolean (which maps to all/none).
+fn deserialize_mfa<'de, D>(deserializer: D) -> Result<MfaActions, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MfaField {
+        Actions(MfaActions),
+        Legacy(bool),
+    }
+    match MfaField::deserialize(deserializer)? {
+        MfaField::Actions(a) => Ok(a),
+        MfaField::Legacy(true) => Ok(MfaActions::all()),
+        MfaField::Legacy(false) => Ok(MfaActions::none()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constraints {
     pub time_windows: Vec<TimeWindow>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub require_mfa: bool,
+    /// Per-action MFA requirements. Backward-compatible: accepts `true`/`false`
+    /// (legacy all-or-nothing) or the new `MfaActions` object.
+    #[serde(default, alias = "require_mfa", deserialize_with = "deserialize_mfa")]
+    pub mfa_actions: MfaActions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +255,7 @@ mod tests {
         Constraints {
             time_windows: vec![],
             expires_at: None,
-            require_mfa: false,
+            mfa_actions: MfaActions::none(),
         }
     }
 
@@ -144,5 +302,70 @@ mod tests {
 
         let mid_friday = Utc.with_ymd_and_hms(2025, 3, 14, 15, 0, 0).unwrap();
         assert!(!window.is_active(mid_friday));
+    }
+
+    #[test]
+    fn test_mfa_actions_csv_roundtrip() {
+        let actions = MfaActions::from_csv("read,write,manage-members").unwrap();
+        assert!(actions.read);
+        assert!(actions.write);
+        assert!(actions.manage_members);
+        assert!(!actions.delete);
+        assert!(!actions.manage_policy);
+        assert!(!actions.create_env);
+        assert!(!actions.promote);
+
+        let csv = actions.to_csv();
+        let parsed = MfaActions::from_csv(&csv).unwrap();
+        assert_eq!(actions, parsed);
+    }
+
+    #[test]
+    fn test_mfa_actions_all_none() {
+        let all = MfaActions::from_csv("all").unwrap();
+        assert!(all.all_enabled());
+        assert_eq!(all.to_csv(), "all");
+
+        let none = MfaActions::from_csv("none").unwrap();
+        assert!(!none.any_enabled());
+        assert_eq!(none.to_csv(), "none");
+    }
+
+    #[test]
+    fn test_mfa_actions_merge() {
+        let mut a = MfaActions::from_csv("read").unwrap();
+        let b = MfaActions::from_csv("write,delete").unwrap();
+        a.merge(&b);
+        assert!(a.read);
+        assert!(a.write);
+        assert!(a.delete);
+        assert!(!a.manage_members);
+    }
+
+    #[test]
+    fn test_mfa_actions_invalid_action() {
+        assert!(MfaActions::from_csv("read,bogus").is_err());
+    }
+
+    #[test]
+    fn test_legacy_require_mfa_deserialization() {
+        // Legacy format: require_mfa: true -> all actions
+        let json = r#"{"time_windows":[],"expires_at":null,"require_mfa":true}"#;
+        let c: Constraints = serde_json::from_str(json).unwrap();
+        assert!(c.mfa_actions.all_enabled());
+
+        // Legacy format: require_mfa: false -> no actions
+        let json = r#"{"time_windows":[],"expires_at":null,"require_mfa":false}"#;
+        let c: Constraints = serde_json::from_str(json).unwrap();
+        assert!(!c.mfa_actions.any_enabled());
+    }
+
+    #[test]
+    fn test_new_mfa_actions_deserialization() {
+        let json = r#"{"time_windows":[],"expires_at":null,"mfa_actions":{"read":true,"write":false,"delete":false,"manage_members":true,"manage_policy":false,"create_env":false,"promote":false}}"#;
+        let c: Constraints = serde_json::from_str(json).unwrap();
+        assert!(c.mfa_actions.read);
+        assert!(c.mfa_actions.manage_members);
+        assert!(!c.mfa_actions.write);
     }
 }

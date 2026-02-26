@@ -135,7 +135,7 @@ fn try_load_vault_data(state: &mut TuiState) -> Result<()> {
     crate::commands::secret::check_access(&ctx, AccessAction::Read, None)?;
 
     let manifest = &ctx.manifest;
-    let cipher = &ctx.cipher;
+    let cipher = ctx.current_env_cipher();
     let fingerprint = &ctx.fingerprint;
     let paths = &ctx.paths;
     let policy = &ctx.policy;

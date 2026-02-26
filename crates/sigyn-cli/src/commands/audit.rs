@@ -40,7 +40,7 @@ fn derive_audit_cipher(
     ctx: &super::secret::UnlockedVaultContext,
 ) -> Result<sigyn_engine::crypto::vault_cipher::VaultCipher> {
     sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.cipher.key_bytes(),
+        ctx.vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     )
@@ -213,7 +213,7 @@ pub fn handle(
             // Persist to the witnesses file next to the audit log (encrypted)
             let witnesses_path = ctx.paths.witnesses_path(&ctx.vault_name);
             let witness_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                ctx.cipher.key_bytes(),
+                ctx.vault_cipher.key_bytes(),
                 b"sigyn-witness-v1",
                 &ctx.manifest.vault_id,
             )

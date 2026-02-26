@@ -156,7 +156,7 @@ fn save_schedules(
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.cipher.key_bytes(),
+        ctx.vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     ) {
@@ -191,8 +191,9 @@ pub fn handle(
                 anyhow::bail!("environment '{}' has no secrets yet", ctx.env_name);
             }
 
+            let env_cipher = ctx.current_env_cipher();
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let mut plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let mut plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
 
             let entry = plaintext.get(&key).ok_or_else(|| {
                 anyhow::anyhow!("secret '{}' not found in env '{}'", key, ctx.env_name)
@@ -223,7 +224,7 @@ pub fn handle(
 
             plaintext.set(key.clone(), new_value, &ctx.fingerprint);
 
-            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted = env_file::encrypt_env(&plaintext, env_cipher, &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
             audit(
@@ -236,8 +237,11 @@ pub fn handle(
             let vault_dir = crate::config::sigyn_home()
                 .join("vaults")
                 .join(&ctx.vault_name);
-            let schedules =
-                load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
+            let schedules = load_schedules(
+                &vault_dir,
+                Some(&ctx.vault_cipher),
+                Some(ctx.manifest.vault_id),
+            );
             if let Some(schedule) = schedules.get(&key) {
                 if !schedule.hooks.is_empty() {
                     match sigyn_engine::rotation::hooks::execute_rotation_hooks(
@@ -300,8 +304,11 @@ pub fn handle(
 
             match command {
                 ScheduleCommands::List => {
-                    let schedules =
-                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
+                    let schedules = load_schedules(
+                        &vault_dir,
+                        Some(&ctx.vault_cipher),
+                        Some(ctx.manifest.vault_id),
+                    );
                     if schedules.is_empty() {
                         println!("{}", style("Rotation Schedules").bold());
                         println!("{}", style("─".repeat(60)).dim());
@@ -329,8 +336,11 @@ pub fn handle(
                     grace_hours,
                     hooks,
                 } => {
-                    let mut schedules =
-                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
+                    let mut schedules = load_schedules(
+                        &vault_dir,
+                        Some(&ctx.vault_cipher),
+                        Some(ctx.manifest.vault_id),
+                    );
                     let mut schedule = RotationSchedule::new(&cron, grace_hours);
                     schedule.key_pattern = key.clone();
                     schedule.hooks = hooks;
@@ -338,7 +348,7 @@ pub fn handle(
                     save_schedules(
                         &vault_dir,
                         &schedules,
-                        Some(&ctx.cipher),
+                        Some(&ctx.vault_cipher),
                         Some(ctx.manifest.vault_id),
                     )?;
 
@@ -357,15 +367,18 @@ pub fn handle(
                     }
                 }
                 ScheduleCommands::Remove { key } => {
-                    let mut schedules =
-                        load_schedules(&vault_dir, Some(&ctx.cipher), Some(ctx.manifest.vault_id));
+                    let mut schedules = load_schedules(
+                        &vault_dir,
+                        Some(&ctx.vault_cipher),
+                        Some(ctx.manifest.vault_id),
+                    );
                     if schedules.remove(&key).is_none() {
                         anyhow::bail!("no rotation schedule found for '{}'", key);
                     }
                     save_schedules(
                         &vault_dir,
                         &schedules,
-                        Some(&ctx.cipher),
+                        Some(&ctx.vault_cipher),
                         Some(ctx.manifest.vault_id),
                     )?;
 
@@ -386,7 +399,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             let dead = find_dead_secrets(&plaintext, &ctx.env_name, max_age);
 
@@ -441,8 +454,11 @@ pub fn handle(
                     continue;
                 }
 
+                let env_c = ctx
+                    .cipher_for_env(env_name)
+                    .ok_or_else(|| anyhow::anyhow!("no access to env '{}'", env_name))?;
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                let mut plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+                let mut plaintext = env_file::decrypt_env(&encrypted, env_c)?;
 
                 let keys: Vec<String> = plaintext.entries.keys().cloned().collect();
                 for key in &keys {
@@ -455,7 +471,7 @@ pub fn handle(
                     all_rotated_keys.push(format!("{}:{}", env_name, key));
                 }
 
-                let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, env_name)?;
+                let encrypted = env_file::encrypt_env(&plaintext, env_c, env_name)?;
                 env_file::write_encrypted_env(&env_path, &encrypted)?;
             }
 
@@ -472,8 +488,110 @@ pub fn handle(
                 policy.remove_member(fp);
             }
 
-            // Save updated policy
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)?;
+            // For v2 vaults: rotate vault key + all env keys, rebuild header
+            let master_key_rotated = if ctx.is_v2 {
+                use sigyn_engine::crypto::envelope;
+                use sigyn_engine::identity::keygen::IdentityStore;
+
+                let mut header = ctx.header.clone();
+
+                // Remove all delegated members from slots
+                for fp in &delegated_fps {
+                    envelope::remove_recipient_v2(&mut header, fp);
+                }
+
+                // Rotate vault key
+                let new_vault_cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::generate();
+                let home_for_ids = crate::config::sigyn_home();
+                let id_store = IdentityStore::new(home_for_ids);
+                let identities = id_store
+                    .list()
+                    .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+
+                // Rebuild vault_key_slots for remaining members
+                header.vault_key_slots.clear();
+                envelope::add_vault_key_recipient(
+                    &mut header,
+                    new_vault_cipher.key_bytes(),
+                    &ctx.loaded_identity.identity.encryption_pubkey,
+                    ctx.manifest.vault_id,
+                )?;
+                for mp in policy.members.values() {
+                    if let Some(id) = identities
+                        .iter()
+                        .find(|id| id.fingerprint == mp.fingerprint)
+                    {
+                        envelope::add_vault_key_recipient(
+                            &mut header,
+                            new_vault_cipher.key_bytes(),
+                            &id.encryption_pubkey,
+                            ctx.manifest.vault_id,
+                        )?;
+                    }
+                }
+
+                // Rotate all env keys and re-encrypt env files with new keys
+                for env_name in &environments {
+                    let mut remaining_pks =
+                        vec![ctx.loaded_identity.identity.encryption_pubkey.clone()];
+                    for mp in policy.members.values() {
+                        let has_access = mp.allowed_envs.iter().any(|e| e == "*" || e == env_name);
+                        if has_access {
+                            if let Some(id) = identities
+                                .iter()
+                                .find(|id| id.fingerprint == mp.fingerprint)
+                            {
+                                remaining_pks.push(id.encryption_pubkey.clone());
+                            }
+                        }
+                    }
+                    let new_env_key = envelope::rotate_env_key(
+                        &mut header,
+                        env_name,
+                        &remaining_pks,
+                        ctx.manifest.vault_id,
+                    )?;
+
+                    // Re-encrypt env file with new key
+                    let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
+                    if env_path.exists() {
+                        if let Some(old_cipher) = ctx.cipher_for_env(env_name) {
+                            let encrypted = env_file::read_encrypted_env(&env_path)?;
+                            let plaintext = env_file::decrypt_env(&encrypted, old_cipher)?;
+                            let new_cipher =
+                                sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key);
+                            let re_encrypted =
+                                env_file::encrypt_env(&plaintext, &new_cipher, env_name)?;
+                            env_file::write_encrypted_env(&env_path, &re_encrypted)?;
+                        }
+                    }
+                }
+
+                // Re-encrypt manifest and policy with new vault key
+                let manifest_path = ctx.paths.manifest_path(&ctx.vault_name);
+                let sealed = ctx
+                    .manifest
+                    .to_sealed_bytes(&new_vault_cipher)
+                    .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+                crate::config::secure_write(&manifest_path, &sealed)?;
+                policy
+                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &new_vault_cipher)?;
+
+                // Save header
+                let signed = envelope::sign_header(
+                    &header,
+                    ctx.loaded_identity.signing_key(),
+                    ctx.manifest.vault_id,
+                )?;
+                crate::config::secure_write(&ctx.paths.members_path(&ctx.vault_name), &signed)?;
+
+                true
+            } else {
+                // V1: just save policy (no key rotation in basic mode)
+                policy
+                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+                false
+            };
 
             // Audit
             audit(&ctx, AuditAction::MasterKeyRotated, AuditOutcome::Success);
@@ -482,7 +600,7 @@ pub fn handle(
             let report = BreachReport {
                 rotated_keys: all_rotated_keys.clone(),
                 revoked_members: delegated_fps.clone(),
-                new_master_key: false,
+                new_master_key: master_key_rotated,
                 vault_locked: false,
                 timestamp: chrono::Utc::now(),
             };
@@ -522,10 +640,16 @@ pub fn handle(
                         style(delegated_fps.len()).bold()
                     );
                 }
-                println!(
-                    "  Master key rotation: {}",
-                    style("skipped (basic mode)").dim()
-                );
+                if master_key_rotated {
+                    crate::output::print_info(
+                        "Vault key + all env keys rotated, environments re-encrypted",
+                    );
+                } else {
+                    println!(
+                        "  Master key rotation: {}",
+                        style("skipped (basic mode)").dim()
+                    );
+                }
             }
         }
         RotateCommands::DeadCheck { max_age, env } => {
@@ -538,7 +662,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             let dead = find_dead_secrets(&plaintext, &ctx.env_name, max_age);
 

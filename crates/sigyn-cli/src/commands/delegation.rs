@@ -50,6 +50,20 @@ pub enum DelegationCommands {
     },
     /// List pending invitations
     Pending,
+    /// Grant a member access to an additional environment (v2 only)
+    GrantEnv {
+        /// Member fingerprint
+        fingerprint: String,
+        /// Environment name to grant
+        env: String,
+    },
+    /// Revoke a member's access to a specific environment (v2 only)
+    RevokeEnv {
+        /// Member fingerprint
+        fingerprint: String,
+        /// Environment name to revoke
+        env: String,
+    },
 }
 
 /// Build a delegation tree from the vault policy members.
@@ -129,7 +143,7 @@ fn save_header(
 fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.cipher.key_bytes(),
+        ctx.vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     ) {
@@ -278,17 +292,54 @@ pub fn handle(
             // Use the already-verified header from unlock_vault()
             let mut header: EnvelopeHeader = ctx.header.clone();
 
-            envelope::add_recipient(
-                &mut header,
-                ctx.cipher.key_bytes(),
-                &invitee_identity.encryption_pubkey,
-                ctx.manifest.vault_id,
-            )
-            .map_err(|e| anyhow::anyhow!("failed to add recipient: {}", e))?;
+            if ctx.is_v2 {
+                // V2: add vault_key_slot + per-env slots
+                envelope::add_vault_key_recipient(
+                    &mut header,
+                    ctx.vault_cipher.key_bytes(),
+                    &invitee_identity.encryption_pubkey,
+                    ctx.manifest.vault_id,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to add vault key recipient: {}", e))?;
+
+                // Add env slots for each allowed env
+                let envs_to_grant: Vec<String> = if allowed_envs.iter().any(|e| e == "*") {
+                    ctx.manifest.environments.clone()
+                } else {
+                    allowed_envs.clone()
+                };
+                for env_name in &envs_to_grant {
+                    let env_key = ctx.env_ciphers.get(env_name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot grant access to env '{}' — you don't hold its key",
+                            env_name
+                        )
+                    })?;
+                    envelope::add_env_recipient(
+                        &mut header,
+                        env_name,
+                        env_key.key_bytes(),
+                        &invitee_identity.encryption_pubkey,
+                        ctx.manifest.vault_id,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to add env recipient for '{}': {}", env_name, e)
+                    })?;
+                }
+            } else {
+                // V1: single master key slot
+                envelope::add_recipient(
+                    &mut header,
+                    ctx.cipher.key_bytes(),
+                    &invitee_identity.encryption_pubkey,
+                    ctx.manifest.vault_id,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to add recipient: {}", e))?;
+            }
 
             // Save policy and header
             policy
-                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)
+                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             save_header(
                 &header,
@@ -513,6 +564,149 @@ pub fn handle(
             }
 
             // Perform the revocation
+            if ctx.is_v2 {
+                // V2: per-env key rotation
+                // Build member_env_access map
+                let mut member_env_access = std::collections::BTreeMap::new();
+                // Owner has access to all envs
+                member_env_access
+                    .insert(ctx.fingerprint.clone(), ctx.manifest.environments.clone());
+                for mp in policy.members.values() {
+                    let envs = if mp.allowed_envs.iter().any(|e| e == "*") {
+                        ctx.manifest.environments.clone()
+                    } else {
+                        mp.allowed_envs.clone()
+                    };
+                    member_env_access.insert(mp.fingerprint.clone(), envs);
+                }
+
+                let (result_v2,) = sigyn_engine::delegation::revoke::revoke_member_v2(
+                    &target_fp,
+                    cascade,
+                    &mut policy,
+                    &mut header,
+                    ctx.manifest.vault_id,
+                    &remaining_pubkeys,
+                    &member_env_access,
+                )
+                .map_err(|e| anyhow::anyhow!("revocation failed: {}", e))?;
+
+                // Re-encrypt affected env files with new env ciphers
+                for (env_name, new_cipher) in &result_v2.rotated_env_ciphers {
+                    let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
+                    if env_path.exists() {
+                        let old_cipher = ctx.cipher_for_env(env_name).ok_or_else(|| {
+                            anyhow::anyhow!("no access to env '{}' for re-encryption", env_name)
+                        })?;
+                        let encrypted = env_file::read_encrypted_env(&env_path).map_err(|e| {
+                            anyhow::anyhow!("failed to read env '{}': {}", env_name, e)
+                        })?;
+                        let plaintext =
+                            env_file::decrypt_env(&encrypted, old_cipher).map_err(|e| {
+                                anyhow::anyhow!("failed to decrypt env '{}': {}", env_name, e)
+                            })?;
+                        let re_encrypted = env_file::encrypt_env(&plaintext, new_cipher, env_name)
+                            .map_err(|e| {
+                                anyhow::anyhow!("failed to re-encrypt env '{}': {}", env_name, e)
+                            })?;
+                        env_file::write_encrypted_env(&env_path, &re_encrypted).map_err(|e| {
+                            anyhow::anyhow!("failed to write env '{}': {}", env_name, e)
+                        })?;
+                    }
+                }
+
+                // Save policy with vault cipher
+                policy
+                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                    .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
+
+                // Save updated header
+                save_header(
+                    &header,
+                    &ctx.paths,
+                    &ctx.vault_name,
+                    ctx.loaded_identity.signing_key(),
+                    ctx.manifest.vault_id,
+                )?;
+
+                // Audit
+                audit_log(
+                    &ctx,
+                    AuditAction::MemberRevoked {
+                        fingerprint: target_fp.clone(),
+                    },
+                );
+                for cascade_fp in &result_v2.cascade_revoked {
+                    audit_log(
+                        &ctx,
+                        AuditAction::MemberRevoked {
+                            fingerprint: cascade_fp.clone(),
+                        },
+                    );
+                }
+
+                crate::notifications::try_notify(
+                    &ctx.vault_name,
+                    None,
+                    None,
+                    &ctx.fingerprint.to_hex(),
+                    "member.revoked",
+                    &format!(
+                        "Member {} revoked{}",
+                        &fingerprint[..12.min(fingerprint.len())],
+                        if cascade { " (cascade)" } else { "" }
+                    ),
+                );
+
+                if json {
+                    let cascade_hex: Vec<String> = result_v2
+                        .cascade_revoked
+                        .iter()
+                        .map(|fp| fp.to_hex())
+                        .collect();
+                    crate::output::print_json(&serde_json::json!({
+                        "action": "revoked",
+                        "fingerprint": fingerprint,
+                        "cascade": cascade,
+                        "cascade_revoked": cascade_hex,
+                        "affected_envs": result_v2.affected_envs,
+                        "env_keys_rotated": result_v2.rotated_env_ciphers.len(),
+                    }))?;
+                } else {
+                    crate::output::print_success(&format!(
+                        "Revoked access for {}{}",
+                        &fingerprint[..12.min(fingerprint.len())],
+                        if cascade { " (cascade)" } else { "" }
+                    ));
+                    if !result_v2.cascade_revoked.is_empty() {
+                        println!(
+                            "  Cascade revoked {} additional member(s)",
+                            result_v2.cascade_revoked.len()
+                        );
+                    }
+                    if !result_v2.affected_envs.is_empty() {
+                        crate::output::print_info(&format!(
+                            "Env keys rotated for: {}",
+                            result_v2.affected_envs.join(", ")
+                        ));
+                    }
+                }
+
+                // Auto-sync after revoke
+                if crate::config::load_config().auto_sync {
+                    eprintln!("{} auto-syncing...", style("note:").cyan().bold());
+                    if let Err(e) = crate::commands::sync::auto_push(vault_name) {
+                        eprintln!(
+                            "{} auto-sync failed: {}",
+                            style("warning:").yellow().bold(),
+                            e
+                        );
+                    }
+                }
+
+                return Ok(());
+            }
+
             let (result, new_cipher_opt) = revoke_member(
                 &target_fp,
                 cascade,
@@ -691,6 +885,193 @@ pub fn handle(
                         );
                     }
                 }
+            }
+        }
+        DelegationCommands::GrantEnv { fingerprint, env } => {
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            check_access(&ctx, AccessAction::ManageMembers, None)?;
+
+            if !ctx.is_v2 {
+                anyhow::bail!("grant-env requires a v2 vault with per-environment key isolation");
+            }
+
+            let target_fp = KeyFingerprint::from_hex(&fingerprint)
+                .map_err(|e| anyhow::anyhow!("invalid fingerprint: {}", e))?;
+
+            // Verify the target member exists
+            let mut policy = ctx.policy.clone();
+            let _member = policy
+                .get_member(&target_fp)
+                .ok_or_else(|| anyhow::anyhow!("member {} not found", fingerprint))?;
+
+            // Verify env exists
+            if !ctx.manifest.environments.contains(&env) {
+                anyhow::bail!("environment '{}' does not exist", env);
+            }
+
+            // Get the env key from our ciphers
+            let env_key = ctx.env_ciphers.get(&env).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot grant access to env '{}' — you don't hold its key",
+                    env
+                )
+            })?;
+
+            // Look up the member's public key
+            let home = sigyn_home();
+            let store = IdentityStore::new(home);
+            let identities = store
+                .list()
+                .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+            let member_id = identities
+                .iter()
+                .find(|id| id.fingerprint == target_fp)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("member identity not found locally for {}", fingerprint)
+                })?;
+
+            let mut header = ctx.header.clone();
+            envelope::add_env_recipient(
+                &mut header,
+                &env,
+                env_key.key_bytes(),
+                &member_id.encryption_pubkey,
+                ctx.manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to add env recipient: {}", e))?;
+
+            // Update policy: add env to allowed_envs if not already there
+            if let Some(mp) = policy.get_member_mut(&target_fp) {
+                if !mp.allowed_envs.contains(&env) && !mp.allowed_envs.iter().any(|e| e == "*") {
+                    mp.allowed_envs.push(env.clone());
+                }
+            }
+
+            policy
+                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
+            save_header(
+                &header,
+                &ctx.paths,
+                &ctx.vault_name,
+                ctx.loaded_identity.signing_key(),
+                ctx.manifest.vault_id,
+            )?;
+
+            audit_log(&ctx, AuditAction::PolicyChanged);
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "grant_env",
+                    "fingerprint": fingerprint,
+                    "env": env,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Granted '{}' access to env '{}'",
+                    &fingerprint[..12.min(fingerprint.len())],
+                    env
+                ));
+            }
+        }
+        DelegationCommands::RevokeEnv { fingerprint, env } => {
+            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            check_access(&ctx, AccessAction::ManageMembers, None)?;
+
+            if !ctx.is_v2 {
+                anyhow::bail!("revoke-env requires a v2 vault with per-environment key isolation");
+            }
+
+            let target_fp = KeyFingerprint::from_hex(&fingerprint)
+                .map_err(|e| anyhow::anyhow!("invalid fingerprint: {}", e))?;
+
+            let mut policy = ctx.policy.clone();
+            if policy.get_member(&target_fp).is_none() {
+                anyhow::bail!("member {} not found", fingerprint);
+            }
+
+            // Remove env from member's allowed_envs
+            if let Some(mp) = policy.get_member_mut(&target_fp) {
+                mp.allowed_envs.retain(|e| e != &env);
+            }
+
+            // Remove env slot and rotate env key
+            let mut header = ctx.header.clone();
+            envelope::remove_env_recipient(&mut header, &env, &target_fp);
+
+            // Rotate the env key for remaining members
+            let home = sigyn_home();
+            let store = IdentityStore::new(home);
+            let identities = store
+                .list()
+                .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+
+            // Find remaining members with access to this env
+            let mut remaining_pubkeys = Vec::new();
+            // Owner always has access
+            remaining_pubkeys.push(ctx.loaded_identity.identity.encryption_pubkey.clone());
+            for mp in policy.members.values() {
+                if mp.fingerprint == target_fp {
+                    continue;
+                }
+                let has_access = mp.allowed_envs.iter().any(|e| e == "*" || e == &env);
+                if has_access {
+                    if let Some(id) = identities
+                        .iter()
+                        .find(|id| id.fingerprint == mp.fingerprint)
+                    {
+                        remaining_pubkeys.push(id.encryption_pubkey.clone());
+                    }
+                }
+            }
+
+            let new_env_key = envelope::rotate_env_key(
+                &mut header,
+                &env,
+                &remaining_pubkeys,
+                ctx.manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to rotate env key: {}", e))?;
+
+            // Re-encrypt env file with new key
+            let env_path = ctx.paths.env_path(&ctx.vault_name, &env);
+            if env_path.exists() {
+                let old_cipher = ctx.cipher_for_env(&env).ok_or_else(|| {
+                    anyhow::anyhow!("no access to env '{}' for re-encryption", env)
+                })?;
+                let encrypted = env_file::read_encrypted_env(&env_path)?;
+                let plaintext = env_file::decrypt_env(&encrypted, old_cipher)?;
+                let new_cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key);
+                let re_encrypted = env_file::encrypt_env(&plaintext, &new_cipher, &env)?;
+                env_file::write_encrypted_env(&env_path, &re_encrypted)?;
+            }
+
+            policy
+                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
+            save_header(
+                &header,
+                &ctx.paths,
+                &ctx.vault_name,
+                ctx.loaded_identity.signing_key(),
+                ctx.manifest.vault_id,
+            )?;
+
+            audit_log(&ctx, AuditAction::PolicyChanged);
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "revoke_env",
+                    "fingerprint": fingerprint,
+                    "env": env,
+                    "env_key_rotated": true,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Revoked '{}' access to env '{}' (key rotated)",
+                    &fingerprint[..12.min(fingerprint.len())],
+                    env
+                ));
             }
         }
     }

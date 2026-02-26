@@ -97,7 +97,7 @@ fn store_pairs(
     let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
     let mut plaintext = if env_path.exists() {
         let encrypted = env_file::read_encrypted_env(&env_path)?;
-        env_file::decrypt_env(&encrypted, &ctx.cipher)?
+        env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
     } else {
         sigyn_engine::vault::PlaintextEnv::new()
     };
@@ -118,7 +118,7 @@ fn store_pairs(
     }
 
     if count > 0 {
-        let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+        let encrypted = env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
         env_file::write_encrypted_env(&env_path, &encrypted)?;
     }
 
@@ -142,7 +142,7 @@ pub fn handle(
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             let mut plaintext = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
@@ -151,7 +151,8 @@ pub fn handle(
                 crate::importexport::import_dotenv(&content, &mut plaintext, &ctx.fingerprint)?;
 
             if count > 0 {
-                let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+                let encrypted =
+                    env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
                 env_file::write_encrypted_env(&env_path, &encrypted)?;
             }
 
@@ -167,7 +168,7 @@ pub fn handle(
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             let mut plaintext = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
@@ -176,7 +177,8 @@ pub fn handle(
                 crate::importexport::import_json(&content, &mut plaintext, &ctx.fingerprint)?;
 
             if count > 0 {
-                let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+                let encrypted =
+                    env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
                 env_file::write_encrypted_env(&env_path, &encrypted)?;
             }
 

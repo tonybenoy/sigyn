@@ -2,7 +2,7 @@
 
 This document describes how Sigyn manages vault membership through a delegation tree,
 including invitation creation, acceptance, role constraints, cascade revocation, and
-master key rotation.
+per-environment key rotation.
 
 ## Overview
 
@@ -14,7 +14,7 @@ Three governing principles:
 
 1. **Least privilege**: members can only grant roles at or below their own level.
 2. **Traceability**: every delegation is recorded, forming an auditable tree.
-3. **Secure revocation**: removing a member cascades to their entire subtree and triggers master key rotation.
+3. **Secure revocation**: removing a member cascades to their entire subtree and triggers per-environment key rotation for affected environments.
 
 ```
 Owner (alice)
@@ -99,7 +99,7 @@ During acceptance:
 
 1. **Signature verification**: the invitation's Ed25519 signature is verified against the inviter's public key via `InvitationFile::verify()`. If invalid, acceptance is rejected.
 2. **Role validation**: the system confirms the inviter has sufficient privileges to delegate the proposed role.
-3. **Envelope update**: the invitee's X25519 public key is registered in the vault's `EnvelopeHeader` as a new `RecipientSlot`, encrypting the master key to the invitee via X25519 ECDH + HKDF + ChaCha20-Poly1305.
+3. **Envelope update**: the invitee's X25519 public key is registered in the vault's `EnvelopeHeader`. A `vault_key_slot` is created (encrypting the vault key via X25519 ECDH + HKDF + ChaCha20-Poly1305), and `env_slots` are created for each environment in the invitee's `allowed_envs` list, each encrypting that environment's independent key.
 4. **Policy update**: a `MemberPolicy` entry is created with the proposed role, allowed environments, and `delegated_by` set to the inviter's fingerprint.
 5. **Audit entry**: the acceptance is recorded in the hash-chained audit log.
 
@@ -247,35 +247,55 @@ is useful when you want to remove a specific member without disrupting their del
 sigyn delegation revoke <bob-fingerprint>
 ```
 
-## Master Key Rotation on Revoke
+## Per-Environment Key Rotation on Revoke
 
-Every revocation triggers a master key rotation. This is a critical security property:
-it ensures revoked members can no longer decrypt any vault data, even if they retained
-a copy of the encrypted files.
+Every revocation triggers key rotation for the affected environments. This is a
+critical security property: it ensures revoked members can no longer decrypt any
+vault data they previously had access to, even if they retained a copy of the
+encrypted files.
 
 ### Rotation Process
 
-1. A new 256-bit master key is generated via `VaultCipher::generate()`.
-2. The `revoke_member()` function builds the full list of fingerprints to remove (target + cascade, if applicable).
-3. All affected members are removed from the `VaultPolicy`.
-4. The `EnvelopeHeader` is rebuilt from scratch: the new master key is sealed (via X25519 ECDH + HKDF + ChaCha20-Poly1305) to each remaining member's public key.
-5. All encrypted environment files are re-encrypted with the new master key.
+1. The `revoke_member_v2()` function builds the full list of fingerprints to remove (target + cascade, if applicable).
+2. All affected members are removed from the `VaultPolicy`.
+3. The revoked members' `vault_key_slots` and `env_slots` are removed from the `EnvelopeHeader`.
+4. For each environment the revoked members had access to, a new 256-bit environment key is generated and sealed to the remaining authorized members.
+5. Only the affected environment files are re-encrypted with their new keys. **Unaffected environments are untouched** -- this is a key benefit of per-environment key isolation.
 6. The updated `EnvelopeHeader` and `VaultPolicy` are persisted atomically.
 
 ### RevocationResult
 
-The `revoke_member()` function returns:
+The `revoke_member_v2()` function returns:
 
 ```rust
-RevocationResult {
-    directly_revoked: KeyFingerprint,     // The target member
-    cascade_revoked: Vec<KeyFingerprint>, // Transitively revoked delegates
-    master_key_rotated: bool,             // Always true
+RevocationResultV2 {
+    directly_revoked: KeyFingerprint,                 // The target member
+    cascade_revoked: Vec<KeyFingerprint>,             // Transitively revoked delegates
+    new_vault_cipher: Option<VaultCipher>,            // Rotated vault cipher (if applicable)
+    rotated_env_ciphers: BTreeMap<String, VaultCipher>, // New ciphers per affected env
+    affected_envs: Vec<String>,                       // Environments that were re-keyed
 }
 ```
 
-The `master_key_rotated` field is always `true` -- there is no code path that
-revokes a member without rotating the key.
+Only environments the revoked members had access to are re-keyed. For example,
+revoking a member with `allowed_envs: ["dev", "staging"]` rotates only the dev
+and staging keys -- the prod key and env file are untouched.
+
+### Per-Environment Access Management
+
+Beyond full revocation, individual environment access can be adjusted:
+
+```bash
+# Grant a member access to an additional environment
+sigyn delegation grant-env <fingerprint> staging
+
+# Revoke a member's access to a specific environment (rotates that env key)
+sigyn delegation revoke-env <fingerprint> staging
+```
+
+`revoke-env` removes the member's slot for that environment, rotates the environment
+key, and re-encrypts the environment file -- without affecting other environments
+or other members' access.
 
 ## Constraints on Delegated Access
 
@@ -314,7 +334,7 @@ Members can be restricted to secrets matching specific glob patterns (e.g., `DB_
 ## Breach Mode
 
 In an emergency, breach mode provides a one-command response that revokes all
-delegated members and rotates all secrets:
+delegated members and rotates all keys:
 
 ```bash
 sigyn rotate breach-mode
@@ -322,10 +342,12 @@ sigyn rotate breach-mode
 
 This:
 
-1. Rotates every secret in every environment to a new random value.
-2. Removes all members with `delegated_by` set (i.e., everyone except the Owner and directly-added members).
-3. Saves the updated policy.
-4. Logs an audit entry for the breach mode activation.
+1. Rotates the vault key and re-encrypts vault-level metadata (manifest, policy, audit).
+2. Rotates every per-environment key and re-encrypts every environment file.
+3. Rotates every secret in every environment to a new random value.
+4. Removes all delegated members from all slots.
+5. Saves the updated policy.
+6. Logs an audit entry for the breach mode activation.
 
 Only members with Admin role or higher can activate breach mode
 (`AccessAction::ManagePolicy` is required).

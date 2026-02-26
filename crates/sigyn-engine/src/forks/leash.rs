@@ -5,6 +5,7 @@ use sigyn_core::crypto::keys::KeyFingerprint;
 use sigyn_core::crypto::vault_cipher::VaultCipher;
 use sigyn_core::error::{Result, SigynError};
 use sigyn_core::forks::types::*;
+use std::collections::BTreeMap;
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_leashed_fork(
@@ -12,6 +13,7 @@ pub fn create_leashed_fork(
     parent_name: &str,
     fork_name: &str,
     parent_cipher: &VaultCipher,
+    parent_env_ciphers: &BTreeMap<String, VaultCipher>,
     parent_manifest: &VaultManifest,
     fork_owner_pubkey: &sigyn_core::crypto::X25519PublicKey,
     parent_admin_pubkey: &sigyn_core::crypto::X25519PublicKey,
@@ -54,8 +56,9 @@ pub fn create_leashed_fork(
     for env_name in &parent_manifest.environments {
         let parent_env_path = parent_paths.env_path(parent_name, env_name);
         if parent_env_path.exists() {
+            let env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
             let encrypted = env_file::read_encrypted_env(&parent_env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, parent_cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
             let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_cipher, env_name)?;
             env_file::write_encrypted_env(
                 &fork_paths.env_path(fork_name, env_name),
@@ -88,11 +91,13 @@ pub fn create_leashed_fork(
     Ok(fork)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_unleashed_fork(
     parent_paths: &VaultPaths,
     parent_name: &str,
     fork_name: &str,
     parent_cipher: &VaultCipher,
+    parent_env_ciphers: &BTreeMap<String, VaultCipher>,
     parent_manifest: &VaultManifest,
     fork_owner_pubkey: &sigyn_core::crypto::X25519PublicKey,
     creator: &KeyFingerprint,
@@ -127,8 +132,9 @@ pub fn create_unleashed_fork(
     for env_name in &parent_manifest.environments {
         let parent_env_path = parent_paths.env_path(parent_name, env_name);
         if parent_env_path.exists() {
+            let env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
             let encrypted = env_file::read_encrypted_env(&parent_env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, parent_cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
             let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_cipher, env_name)?;
             env_file::write_encrypted_env(
                 &fork_paths.env_path(fork_name, env_name),

@@ -223,7 +223,7 @@ fn exec_with_secrets(
     }
 
     let encrypted = env_file::read_encrypted_env(&env_path)?;
-    let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+    let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
     if dry_run {
         println!(
@@ -288,7 +288,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             let export_format = crate::inject::ExportFormat::from_str(&format)?;
             let output = crate::inject::export_secrets(&plaintext, export_format, &name)?;
@@ -309,7 +309,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             let socket_path = socket.unwrap_or_else(|| {
                 let sigyn_dir = crate::config::sigyn_home();
@@ -393,7 +393,7 @@ pub fn handle_watch(
         interval
     );
 
-    let mut child = spawn_child(command, &ctx.cipher)?;
+    let mut child = spawn_child(command, ctx.current_env_cipher())?;
 
     loop {
         std::thread::sleep(poll_duration);
@@ -428,7 +428,7 @@ pub fn handle_watch(
                 );
                 let _ = child.kill();
                 let _ = child.wait();
-                child = spawn_child(command, &ctx.cipher)?;
+                child = spawn_child(command, ctx.current_env_cipher())?;
                 last_mtime = mtime;
             }
             _ => {}

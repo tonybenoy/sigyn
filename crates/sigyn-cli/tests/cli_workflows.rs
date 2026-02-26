@@ -1552,7 +1552,7 @@ fn test_rotate_key_no_env() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("has no secrets"));
+        .stderr(predicate::str::contains("not found"));
 }
 
 #[test]

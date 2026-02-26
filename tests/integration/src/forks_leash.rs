@@ -6,6 +6,7 @@ use sigyn_engine::forks::types::{ForkMode, ForkSharingPolicy, ForkStatus};
 use sigyn_engine::policy::storage::VaultPolicyExt;
 use sigyn_engine::secrets::types::SecretValue;
 use sigyn_engine::vault::{env_file, PlaintextEnv, VaultManifest, VaultPaths};
+use std::collections::BTreeMap;
 
 fn setup_parent_vault(
     dir: &std::path::Path,
@@ -74,6 +75,7 @@ fn test_create_leashed_fork() {
         "parent",
         "leashed-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &parent_admin.public_key(),
@@ -109,6 +111,7 @@ fn test_create_unleashed_fork() {
         "parent",
         "unleashed-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &fp,
@@ -136,6 +139,7 @@ fn test_leashed_fork_preserves_secrets() {
         "parent",
         "fork-with-secrets",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &parent_admin.public_key(),
@@ -168,6 +172,7 @@ fn test_leashed_fork_has_two_slots() {
         "parent",
         "dual-access-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &parent_admin.public_key(),
@@ -203,6 +208,7 @@ fn test_unleashed_fork_has_single_slot() {
         "parent",
         "solo-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &fp,
@@ -233,6 +239,7 @@ fn test_fork_duplicate_name_fails() {
         "parent",
         "dupe-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &fp,
@@ -245,6 +252,7 @@ fn test_fork_duplicate_name_fails() {
         "parent",
         "dupe-fork",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &fp,
@@ -264,6 +272,7 @@ fn test_fork_ids_differ() {
         "parent",
         "fork-a",
         &cipher,
+        &BTreeMap::new(),
         &manifest,
         &fork_owner.public_key(),
         &fp,

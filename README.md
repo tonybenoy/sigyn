@@ -32,7 +32,7 @@ what Sigyn is about.
 - **CRDT conflict resolution** -- vector clocks and LWW-Map CRDTs merge concurrent edits deterministically.
 - **Role-based access control** -- seven-level hierarchy: ReadOnly, Auditor, Operator, Contributor, Manager, Admin, Owner.
 - **Delegation trees** -- delegate permissions to peers with automatic cascade revocation.
-- **Per-environment secrets** -- first-class support for dev, staging, production, and custom environments.
+- **Per-environment secrets** -- first-class support for dev, staging, production, and custom environments with cryptographic key isolation (each environment has its own independent encryption key).
 - **Per-key ACLs** -- granular constraints including time windows, expiry, and MFA enforcement.
 - **TOTP-based MFA** -- optional multi-factor authentication per identity with session-based grace periods and backup codes.
 - **Signed audit trail** -- hash-chained, Ed25519-signed log of every secret operation.
@@ -202,8 +202,8 @@ Run `sigyn <command> --help` for detailed usage of any command.
 
 ## Security model
 
-- **Encryption at rest**: every secret value is encrypted with ChaCha20-Poly1305. A unique data encryption key (DEK) is generated per secret and sealed under the recipient's X25519 public key (envelope encryption).
-- **Key derivation**: the user passphrase is processed through Argon2id to derive the master secret.
+- **Encryption at rest**: every secret value is encrypted with ChaCha20-Poly1305. Each environment has its own independent 256-bit key, sealed under each authorized member's X25519 public key (envelope encryption with per-environment key isolation).
+- **Key derivation**: the user passphrase is processed through Argon2id to derive the wrapping key for the identity keypair.
 - **Signing**: all audit log entries are signed with Ed25519. The log is hash-chained so any tampering is detectable.
 - **Access control**: a seven-level RBAC hierarchy combined with per-key ACL constraints (time windows, expiry, MFA) governs who can read, write, or administer secrets.
 - **Recovery**: the master key can be split into Shamir shards (K-of-N) and distributed to trusted parties for disaster recovery.

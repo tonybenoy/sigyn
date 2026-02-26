@@ -156,7 +156,16 @@ pub enum SecretCommands {
 }
 
 pub struct UnlockedVaultContext {
+    /// V1: the single master key cipher. V2: vault-level cipher (manifest/policy/audit).
     pub cipher: VaultCipher,
+    /// V2: vault-level cipher (manifest/policy/audit). Same as `cipher` for v1.
+    pub vault_cipher: VaultCipher,
+    /// V2: current env's cipher (None = no access). For v1, always Some(master_key).
+    pub env_cipher: Option<VaultCipher>,
+    /// V2: all accessible env ciphers. Empty for v1.
+    pub env_ciphers: std::collections::BTreeMap<String, VaultCipher>,
+    /// True if the vault header is v2 (per-env isolation).
+    pub is_v2: bool,
     pub vault_name: String,
     pub env_name: String,
     pub fingerprint: sigyn_engine::crypto::KeyFingerprint,
@@ -166,6 +175,22 @@ pub struct UnlockedVaultContext {
     pub loaded_identity: LoadedIdentity,
     /// The envelope header, already verified against the owner's signing key.
     pub header: sigyn_engine::crypto::EnvelopeHeader,
+}
+
+impl UnlockedVaultContext {
+    /// Get the cipher for the current environment. Falls back to the vault cipher for v1.
+    pub fn current_env_cipher(&self) -> &VaultCipher {
+        self.env_cipher.as_ref().unwrap_or(&self.cipher)
+    }
+
+    /// Get the cipher for a specific environment. Falls back to the vault cipher for v1.
+    pub fn cipher_for_env(&self, env_name: &str) -> Option<&VaultCipher> {
+        if self.is_v2 {
+            self.env_ciphers.get(env_name)
+        } else {
+            Some(&self.cipher)
+        }
+    }
 }
 
 pub fn unlock_vault(
@@ -276,18 +301,24 @@ pub fn unlock_vault(
         )
     })?;
 
-    // Unseal master key using the unverified header (to get the cipher for manifest)
-    let master_key =
-        envelope::unseal_master_key(&header_preview, loaded.encryption_key(), vault_id).context(
-            format!(
-                "failed to unseal vault '{}' (not a member or wrong key)\n\n  \
-                 Check your membership: sigyn delegation tree -v {}\n  \
-                 Or ask the vault owner to re-invite you.",
-                vault_name, vault_name
-            ),
-        )?;
+    // Unseal keys using the unverified header.
+    // For v2 headers, this returns (vault_key, {env_name: env_key}).
+    // For v1, returns (master_key, {}).
+    let is_v2 = header_preview.version >= 2;
+    let (vault_key_bytes, env_key_map) = envelope::unseal_header(
+        &header_preview,
+        loaded.encryption_key(),
+        vault_id,
+        &[], // requested_envs not known yet; unseal_header tries all available slots
+    )
+    .context(format!(
+        "failed to unseal vault '{}' (not a member or wrong key)\n\n  \
+         Check your membership: sigyn delegation tree -v {}\n  \
+         Or ask the vault owner to re-invite you.",
+        vault_name, vault_name
+    ))?;
 
-    let cipher = VaultCipher::new(master_key);
+    let cipher = VaultCipher::new(vault_key_bytes);
 
     // Decrypt manifest (rejects plaintext — must be sealed)
     let manifest = VaultManifest::from_sealed_bytes(&cipher, &manifest_data, vault_id)?;
@@ -410,8 +441,28 @@ pub fn unlock_vault(
     let policy =
         VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &cipher).unwrap_or_default();
 
+    // Build env ciphers map
+    let mut env_ciphers = std::collections::BTreeMap::new();
+    if is_v2 {
+        for (ename, ekey) in &env_key_map {
+            env_ciphers.insert(ename.clone(), VaultCipher::new(*ekey));
+        }
+    }
+    let env_cipher = if is_v2 {
+        env_ciphers
+            .get(&env_name)
+            .map(|c| VaultCipher::new(*c.key_bytes()))
+    } else {
+        Some(VaultCipher::new(vault_key_bytes))
+    };
+    let vault_cipher = VaultCipher::new(vault_key_bytes);
+
     Ok(UnlockedVaultContext {
         cipher,
+        vault_cipher,
+        env_cipher,
+        env_ciphers,
+        is_v2,
         vault_name,
         env_name,
         fingerprint,
@@ -579,7 +630,7 @@ fn derive_audit_cipher(
     ctx: &UnlockedVaultContext,
 ) -> Option<sigyn_engine::crypto::vault_cipher::VaultCipher> {
     sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.cipher.key_bytes(),
+        ctx.vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     )
@@ -645,7 +696,7 @@ pub fn handle(
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             let existing = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
@@ -664,7 +715,8 @@ pub fn handle(
             let mut plaintext = existing;
             plaintext.set(key.clone(), SecretValue::String(value), &ctx.fingerprint);
 
-            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted =
+                env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
             audit(
@@ -717,7 +769,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             let entry = plaintext.get(&key).ok_or_else(|| {
                 anyhow::anyhow!("secret '{}' not found in env '{}'", key, ctx.env_name)
@@ -776,7 +828,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             if plaintext.is_empty() {
                 println!("No secrets in env '{}'", ctx.env_name);
@@ -822,7 +874,7 @@ pub fn handle(
             }
 
             let encrypted = env_file::read_encrypted_env(&env_path)?;
-            let mut plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+            let mut plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
             if plaintext.get(&key).is_none() {
                 anyhow::bail!("secret '{}' not found in env '{}'", key, ctx.env_name);
@@ -838,7 +890,8 @@ pub fn handle(
 
             plaintext.remove(&key);
 
-            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted =
+                env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
             audit(
@@ -867,7 +920,7 @@ pub fn handle(
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             let original = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
@@ -987,7 +1040,8 @@ pub fn handle(
                 );
             }
 
-            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted =
+                env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
             audit(
@@ -1040,7 +1094,7 @@ pub fn handle(
                 }
 
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+                let plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
                 for (key, entry) in &plaintext.entries {
                     if glob_match(&pattern, key) {
@@ -1107,7 +1161,7 @@ pub fn handle(
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             let mut plaintext = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
-                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
@@ -1118,7 +1172,8 @@ pub fn handle(
                 &ctx.fingerprint,
             );
 
-            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            let encrypted =
+                env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
             audit(

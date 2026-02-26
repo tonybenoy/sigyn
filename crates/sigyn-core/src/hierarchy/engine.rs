@@ -160,10 +160,13 @@ impl HierarchicalPolicyEngine {
             }
         }
 
-        // 10. Check MFA requirement from any level
+        // 10. Check per-action MFA requirement from any level
         if !request.mfa_verified {
             for m in &member_entries {
-                if m.constraints.as_ref().is_some_and(|c| c.require_mfa) {
+                if m.constraints
+                    .as_ref()
+                    .is_some_and(|c| request.action.requires_mfa(&c.mfa_actions))
+                {
                     return Ok(PolicyDecision::RequiresMfa);
                 }
             }
@@ -172,7 +175,7 @@ impl HierarchicalPolicyEngine {
                     .policy
                     .global_constraints
                     .as_ref()
-                    .is_some_and(|c| c.require_mfa)
+                    .is_some_and(|c| request.action.requires_mfa(&c.mfa_actions))
                 {
                     return Ok(PolicyDecision::RequiresMfa);
                 }

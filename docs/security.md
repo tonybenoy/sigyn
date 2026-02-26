@@ -19,47 +19,77 @@ All cryptographic operations use audited Rust crates from the RustCrypto project
 
 ## Envelope Encryption
 
-Sigyn uses envelope encryption to allow multiple members to access a vault without
-sharing a single passphrase. The scheme works as follows:
+Sigyn uses envelope encryption with **per-environment key isolation** to allow
+multiple members to access a vault without sharing a single passphrase, while
+cryptographically enforcing environment-level access boundaries.
+
+### Two-Tier Key Architecture
+
+Each vault has two tiers of symmetric keys:
+
+1. **Vault key** (256-bit) -- encrypts vault-level metadata: manifest, policy, audit log, rotation schedules.
+2. **Per-environment keys** (256-bit each) -- each environment (`dev`, `staging`, `prod`, etc.) has its own independent key that encrypts only that environment's secret data.
 
 ```
                     +-------------------+
-                    |   Master Key      |  (random 256-bit, encrypts all secrets)
+                    |   Vault Key       |  (encrypts manifest, policy, audit)
                     +-------------------+
                             |
               +-------------+-------------+
               |             |             |
         +-----------+ +-----------+ +-----------+
-        | Slot: Alice| | Slot: Bob | | Slot: Carol|
+        | Slot: Alice| | Slot: Bob | | Slot: Carol|  (vault_key_slots)
         +-----------+ +-----------+ +-----------+
-        | ephemeral  | | ephemeral  | | ephemeral  |
-        | X25519 pub | | X25519 pub | | X25519 pub |
-        | encrypted  | | encrypted  | | encrypted  |
-        | master key | | master key | | master key |
-        +-----------+ +-----------+ +-----------+
+
+
+    +-------------------+  +-------------------+  +-------------------+
+    |  Dev Env Key      |  | Staging Env Key   |  |  Prod Env Key     |
+    +-------------------+  +-------------------+  +-------------------+
+            |                       |                       |
+      +-----------+           +-----------+           +-----------+
+      | Slot: Alice|          | Slot: Alice|          | Slot: Alice|
+      | Slot: Bob  |          | Slot: Alice|          +-----------+
+      | Slot: Carol|          | Slot: Bob  |
+      +-----------+           +-----------+           (env_slots)
 ```
 
-### Sealing (encrypt master key for a recipient)
+A member only receives slots for environments they are authorized to access. A
+Contributor with `allowed_envs: ["dev"]` physically cannot decrypt `prod` secrets
+because they never receive the prod environment key. This is a **cryptographic
+barrier**, not just a policy-layer check.
+
+### Sealing (encrypt a key for a recipient)
 
 1. Generate an ephemeral X25519 keypair.
 2. Perform Diffie-Hellman: `shared_secret = ephemeral_private * recipient_public`.
 3. Derive a slot key via HKDF-SHA256: `slot_key = HKDF(salt=vault_id, ikm=shared_secret, info="sigyn-envelope-v1")`.
-4. Encrypt the master key with ChaCha20-Poly1305 using the slot key and a random nonce.
-5. Store `(recipient_fingerprint, ephemeral_public_key, nonce || ciphertext)` as the slot in the `EnvelopeHeader`.
+4. Encrypt the key with ChaCha20-Poly1305 using the slot key and a random nonce.
+5. Store `(recipient_fingerprint, ephemeral_public_key, nonce || ciphertext)` as the slot.
 
-### Unsealing (decrypt master key)
+For vault key slots, the AEAD Additional Authenticated Data (AAD) is
+`fingerprint || vault_id`. For environment key slots, the AAD is
+`fingerprint || vault_id || env_name_len (4 LE bytes) || env_name_bytes`.
+The length prefix prevents collisions between environment names (e.g., "dev" + "prod"
+cannot be confused with "devprod").
 
-1. Find the `RecipientSlot` matching your key fingerprint in the `EnvelopeHeader`.
+### Unsealing
+
+1. Find the `RecipientSlot` matching your key fingerprint.
 2. Perform Diffie-Hellman: `shared_secret = my_private * slot.ephemeral_public`.
 3. Derive the same slot key via HKDF-SHA256 with the vault UUID as salt.
-4. Decrypt the master key with ChaCha20-Poly1305.
+4. Decrypt the key with ChaCha20-Poly1305.
+
+For vault operations (manifest, policy, audit), unseal from `vault_key_slots`.
+For environment operations, unseal the specific environment key from `env_slots[env_name]`.
 
 ### Key Properties
 
 - Each slot uses a unique ephemeral keypair, so compromising one slot reveals nothing about others.
 - The vault UUID is used as HKDF salt, binding each slot key to a specific vault.
-- Adding or removing a member only requires re-encrypting the master key, not re-encrypting all secrets.
-- On member revocation, the master key is rotated and all remaining slots are rebuilt with the new key.
+- Environment names are bound into the AAD, preventing cross-environment slot reuse.
+- A member without a slot for a given environment **cannot** decrypt that environment's secrets, regardless of any policy bypass.
+- On member revocation, only the affected environment keys are rotated and re-sealed to remaining members. Unaffected environments are untouched.
+- Adding a member to a new environment requires the inviter to hold that environment's key -- you cannot grant access you don't have.
 
 ## Identity
 
@@ -67,7 +97,7 @@ Each Sigyn user has an identity consisting of two keypairs:
 
 | Keypair | Algorithm | Purpose |
 |---|---|---|
-| Encryption keypair | X25519 | Receive sealed master key slots |
+| Encryption keypair | X25519 | Receive sealed vault and environment key slots |
 | Signing keypair | Ed25519 | Sign audit entries, invitations |
 
 Both keypairs are stored on disk encrypted with an Argon2id-derived key from the user's
@@ -206,14 +236,14 @@ See [Delegation](delegation.md) for a full deep dive. Key security properties:
 - Members can only delegate roles **strictly below** their own level (e.g., a Manager can invite Contributors but not Managers). The Owner can invite any role except Owner.
 - Each delegation records `delegated_by`, forming a tree rooted at the Owner.
 - **Cascade revocation**: revoking a member revokes everyone they invited, transitively (BFS traversal of the delegation tree).
-- **Master key rotation on revoke**: when any member is revoked, a new master key is generated via `VaultCipher::generate()` and re-encrypted to all remaining members. The revoked subtree immediately loses decryption access.
+- **Per-environment key rotation on revoke**: when a member is revoked, only the environment keys they had access to are rotated. Each affected environment gets a new random key, re-sealed to the remaining authorized members. Unaffected environments are untouched. The revoked member (and their cascade subtree) immediately lose decryption access.
 - **Invitation expiry**: invitations are created with a 7-day expiry (`expires_at`). Attempting to accept an expired invitation is rejected with a clear error message. This limits the window for invitation file theft or replay.
 
 ## Audit Trail
 
 Sigyn maintains a hash-chained, signed, and encrypted audit log for every vault,
 stored at `<vault>/audit.log.json`. Each line is individually encrypted with a
-vault-derived cipher (HKDF from master key with context `sigyn-audit-v1` and
+vault-derived cipher (HKDF from the vault key with context `sigyn-audit-v1` and
 vault_id as salt), then base64-encoded.
 
 ### Entry Structure
@@ -365,9 +395,12 @@ another.
 Hierarchy node `members.cbor` files also use the SGSN signed format with Ed25519
 signatures, verified on read when the signer's verifying key is available.
 
-### Tier C: Vault Master Key
+### Tier C: Vault Key and Per-Environment Keys
 
-After vault unlock, a per-file cipher is derived via HKDF from the master key:
+After vault unlock, vault-level files are protected by a cipher derived from the
+vault key, and each environment file is protected by its own independent key:
+
+**Vault key** -- protects metadata files via HKDF-derived ciphers:
 
 | File | HKDF Context | HKDF Salt |
 |---|---|---|
@@ -375,6 +408,10 @@ After vault unlock, a per-file cipher is derived via HKDF from the master key:
 | `rotation_schedules.toml` | `sigyn-rotation-v1` | vault_id |
 | `audit.log.json` entries | `sigyn-audit-v1` | vault_id |
 | `witnesses.json` | `sigyn-witness-v1` | vault_id |
+
+**Per-environment keys** -- each `envs/<name>.vault` file is encrypted with that
+environment's dedicated 256-bit key, using the environment name as AEAD AAD.
+Members only receive env key slots for environments in their `allowed_envs` list.
 
 ### Sealed File Format
 
@@ -498,7 +535,7 @@ for backward compatibility.
 | Threat | Mitigation |
 |---|---|
 | Stolen vault files | ChaCha20-Poly1305 encryption; attacker needs a member's private key |
-| Compromised member | Revoke member; master key is rotated; cascade revocation removes their delegates |
+| Compromised member | Revoke member; affected environment keys are rotated; cascade revocation removes their delegates |
 | Tampered audit log | Hash chain breaks on tamper; Ed25519 signatures prove authorship |
 | Tampered config/manifest | AEAD authentication; device key or master key required to forge |
 | Tampered members.cbor | Ed25519 signature over content + vault_id; forgery requires signing key |

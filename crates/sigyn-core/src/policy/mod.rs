@@ -5,7 +5,7 @@ pub mod member;
 pub mod roles;
 pub mod storage;
 
-pub use constraints::Constraints;
+pub use constraints::{Constraints, MfaActions};
 pub use engine::{AccessRequest, PolicyDecision, PolicyEngine};
 pub use member::MemberPolicy;
 pub use roles::Role;

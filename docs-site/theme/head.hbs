@@ -19,6 +19,23 @@
 <meta name="twitter:title" content="{{title}} - Sigyn">
 <meta name="twitter:description" content="Open-source serverless encrypted P2P secret manager. End-to-end encryption, RBAC, git-native sync, and zero infrastructure.">
 
+<!-- Mermaid diagrams -->
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+  // mdbook wraps ```mermaid in <pre><code class="language-mermaid">.
+  // Convert these to <div class="mermaid"> so mermaid.js can find them.
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('code.language-mermaid').forEach((el) => {
+      const div = document.createElement('pre');
+      div.classList.add('mermaid');
+      div.textContent = el.textContent;
+      el.parentElement.replaceWith(div);
+    });
+    mermaid.run();
+  });
+</script>
+
 <!-- Canonical -->
 <link rel="canonical" href="https://sigyn.org/">
 
