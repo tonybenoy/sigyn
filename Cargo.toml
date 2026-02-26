@@ -69,6 +69,9 @@ flate2 = "1"
 tar = "0.4"
 hex = "0.4"
 
+# System
+libc = "0.2"
+
 # Other
 indexmap = { version = "2.7", features = ["serde"] }
 globset = "0.4"

@@ -3129,6 +3129,7 @@ dependencies = [
  "hex",
  "hkdf",
  "indexmap",
+ "libc",
  "predicates",
  "qr2term",
  "rand 0.8.5",

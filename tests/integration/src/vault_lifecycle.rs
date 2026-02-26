@@ -1,4 +1,6 @@
-use sigyn_engine::crypto::envelope::{seal_master_key, unseal_master_key};
+use std::collections::BTreeMap;
+
+use sigyn_engine::crypto::envelope::{seal_v2, unseal_vault_key};
 use sigyn_engine::crypto::keys::KeyFingerprint;
 use sigyn_engine::crypto::vault_cipher::VaultCipher;
 use sigyn_engine::identity::keygen::IdentityStore;
@@ -34,21 +36,32 @@ fn test_full_vault_lifecycle() {
     let manifest_toml = manifest.to_toml().unwrap();
     std::fs::write(vault_dir.join("manifest.toml"), &manifest_toml).unwrap();
 
-    // 3. Seal a master key for the owner
-    let master_key: [u8; 32] = rand_key();
-    let header = seal_master_key(
-        &master_key,
+    // 3. Seal a vault key + env key for the owner
+    let vault_key: [u8; 32] = rand_key();
+    let dev_key: [u8; 32] = rand_key();
+    let mut env_keys = BTreeMap::new();
+    env_keys.insert("dev".to_string(), dev_key);
+    let mut env_recipients = BTreeMap::new();
+    env_recipients.insert(
+        "dev".to_string(),
+        vec![loaded.identity.encryption_pubkey.clone()],
+    );
+
+    let header = seal_v2(
+        &vault_key,
+        &env_keys,
         &[loaded.identity.encryption_pubkey.clone()],
+        &env_recipients,
         vault_id,
     )
     .unwrap();
 
-    // Verify the owner can unseal
-    let recovered = unseal_master_key(&header, loaded.encryption_key(), vault_id).unwrap();
-    assert_eq!(master_key, recovered);
+    // Verify the owner can unseal the vault key
+    let recovered = unseal_vault_key(&header, loaded.encryption_key(), vault_id).unwrap();
+    assert_eq!(vault_key, recovered);
 
-    // 4. Create a cipher from the master key and set a secret
-    let cipher = VaultCipher::new(master_key);
+    // 4. Create a cipher from the env key and set a secret
+    let cipher = VaultCipher::new(dev_key);
     let fp = identity.fingerprint.clone();
     let mut env = PlaintextEnv::new();
     env.set(

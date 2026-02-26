@@ -170,17 +170,19 @@ Manage encrypted vaults.
 
 ### vault create
 
-Create a new vault. The caller's identity becomes the Owner. Generates a random
+Create one or more vaults. The caller's identity becomes the Owner. Generates a random
 256-bit master key and seals it to the creator's X25519 public key.
 
 ```bash
 sigyn vault create myapp
+sigyn vault create frontend backend worker --org acme -i alice
 ```
 
+Accepts multiple names for batch creation. All vaults share the same `--org` and flags.
 Creates the vault directory with `vault.toml`, `members.cbor`, `policy.cbor`, default
 environments (dev, staging, prod), and an audit log. After creation, Sigyn prints
 suggested next steps and offers to create a `.sigyn.toml` project config in the
-current directory (interactive terminals only).
+current directory (interactive terminals only, single vault only).
 
 ### vault list
 
@@ -222,16 +224,34 @@ Manage secrets within a vault environment.
 
 ### secret set
 
-Set a secret value. Reads from stdin if value is omitted.
+Set one or more secrets. Supports `KEY VALUE`, `KEY=VALUE`, or multiple `KEY=VALUE` pairs.
+Reads from stdin if a single key is given with no value.
 
 ```bash
 sigyn secret set DATABASE_URL 'postgres://localhost/mydb' --env dev
+sigyn secret set DATABASE_URL='postgres://localhost/mydb' --env dev
+sigyn secret set DB_URL=postgres://localhost API_KEY=sk-123 REDIS=redis://localhost -e dev
 echo 'supersecret' | sigyn secret set API_KEY --env prod
 ```
 
 | Flag | Description |
 |---|---|
 | `--env, -e <ENV>` | Target environment (default: dev) |
+
+### secret import (alias: imp)
+
+Import secrets from a `.env` file.
+
+```bash
+sigyn secret import .env --env dev
+sigyn secret import .env.production --env prod --force
+cat secrets.env | sigyn secret import - --env dev
+```
+
+| Flag | Description |
+|---|---|
+| `--env, -e <ENV>` | Target environment (default: dev) |
+| `--force` | Overwrite existing secrets without prompting |
 
 ### secret get
 
@@ -266,11 +286,12 @@ sigyn secret list --env dev --reveal
 
 ### secret remove (alias: rm)
 
-Delete a secret from an environment.
+Delete one or more secrets from an environment.
 
 ```bash
 sigyn secret remove OLD_KEY --env dev
 sigyn secret rm UNUSED_VAR --env staging
+sigyn secret remove OLD_KEY1 OLD_KEY2 OLD_KEY3 -e dev
 ```
 
 ### secret generate
@@ -342,11 +363,11 @@ sigyn env list --vault myapp
 
 ### env create
 
-Create a new environment.
+Create one or more environments.
 
 ```bash
 sigyn env create qa
-sigyn env create canary --vault myapp
+sigyn env create staging canary prod --vault myapp
 ```
 
 ### env diff
@@ -531,15 +552,33 @@ sigyn delegation invite accept ./invitation-abc123.json
 
 ### delegation revoke
 
-Revoke a member's access. The master key is always rotated on revoke.
+Revoke one or more members' access. Environment keys are rotated on revoke.
 
 ```bash
 sigyn delegation revoke a1b2c3d4e5f6...
-sigyn delegation revoke a1b2c3d4e5f6... --cascade
+sigyn delegation revoke a1b2c3d4 b5c6d7e8 f9a0b1c2 --cascade
 ```
 
 With `--cascade`, performs BFS traversal of the delegation tree and revokes the target
 plus everyone they transitively invited. See [Delegation](delegation.md) for details.
+
+### delegation grant-env
+
+Grant one or more members access to an additional environment.
+
+```bash
+sigyn delegation grant-env a1b2c3d4 --env prod
+sigyn delegation grant-env a1b2c3d4 b5c6d7e8 --env staging
+```
+
+### delegation revoke-env
+
+Revoke one or more members' access to a specific environment. The environment key is rotated.
+
+```bash
+sigyn delegation revoke-env a1b2c3d4 --env prod
+sigyn delegation revoke-env a1b2c3d4 b5c6d7e8 --env staging
+```
 
 ### delegation pending
 
@@ -1193,6 +1232,51 @@ List available vault snapshots from git history.
 
 ```bash
 sigyn-recovery snapshots --vault myapp
+```
+
+## agent
+
+Manage the passphrase agent — an ssh-agent style daemon that caches decrypted keys in
+memory, eliminating repeated passphrase prompts when running multiple commands.
+
+### agent start
+
+Start the agent daemon in the background.
+
+```bash
+eval $(sigyn agent start)
+eval $(sigyn agent start --timeout 60)   # 60-minute cache
+```
+
+Prints a shell-eval-able export statement for `SIGYN_AGENT_SOCK`. The agent forks to
+background and listens on a Unix socket with owner-only permissions (0600).
+
+| Flag | Description |
+|---|---|
+| `--timeout <MINUTES>` | Key cache timeout (default: 30 minutes) |
+
+### agent stop
+
+Stop the agent daemon and zeroize all cached keys.
+
+```bash
+sigyn agent stop
+```
+
+### agent lock
+
+Clear all cached keys but keep the daemon running.
+
+```bash
+sigyn agent lock
+```
+
+### agent status
+
+Show whether the agent is running and how many keys are cached.
+
+```bash
+sigyn agent status
 ```
 
 ## Utility Commands

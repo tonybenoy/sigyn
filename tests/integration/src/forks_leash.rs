@@ -26,9 +26,11 @@ fn setup_parent_vault(
     let vault_id = manifest.vault_id;
 
     let cipher = VaultCipher::generate();
-    let header = envelope::seal_master_key(
+    let header = envelope::seal_v2(
         cipher.key_bytes(),
+        &BTreeMap::new(),
         std::slice::from_ref(&owner_pubkey),
+        &BTreeMap::new(),
         vault_id,
     )
     .unwrap();

@@ -184,9 +184,11 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
             // Create envelope with owner as sole recipient
             let master_cipher = VaultCipher::generate();
-            let header = envelope::seal_master_key(
+            let header = envelope::seal_v2(
                 master_cipher.key_bytes(),
+                &std::collections::BTreeMap::new(),
                 std::slice::from_ref(&loaded.identity.encryption_pubkey),
+                &std::collections::BTreeMap::new(),
                 node_id,
             )?;
 
@@ -260,9 +262,11 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 // Create envelope with owner as sole recipient
                 let master_cipher = VaultCipher::generate();
-                let header = envelope::seal_master_key(
+                let header = envelope::seal_v2(
                     master_cipher.key_bytes(),
+                    &std::collections::BTreeMap::new(),
                     std::slice::from_ref(&loaded.identity.encryption_pubkey),
+                    &std::collections::BTreeMap::new(),
                     node_id,
                 )?;
 
@@ -458,11 +462,8 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let header: sigyn_engine::crypto::EnvelopeHeader =
                     sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
-                let master_key = envelope::unseal_master_key(
-                    &header,
-                    loaded.encryption_key(),
-                    manifest.node_id,
-                )?;
+                let master_key =
+                    envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let policy =
                     VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
@@ -530,11 +531,8 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let header: sigyn_engine::crypto::EnvelopeHeader =
                     sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
-                let master_key = envelope::unseal_master_key(
-                    &header,
-                    loaded.encryption_key(),
-                    manifest.node_id,
-                )?;
+                let master_key =
+                    envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let mut policy =
                     VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
@@ -576,11 +574,8 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let header: sigyn_engine::crypto::EnvelopeHeader =
                     sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                         .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
-                let master_key = envelope::unseal_master_key(
-                    &header,
-                    loaded.encryption_key(),
-                    manifest.node_id,
-                )?;
+                let master_key =
+                    envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
                 let mut policy =
                     VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
@@ -630,7 +625,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     let header: sigyn_engine::crypto::EnvelopeHeader =
                         sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
                             .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
-                    let master_key = envelope::unseal_master_key(
+                    let master_key = envelope::unseal_vault_key(
                         &header,
                         loaded.encryption_key(),
                         manifest.node_id,

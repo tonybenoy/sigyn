@@ -86,12 +86,11 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
 #[derive(Subcommand)]
 pub enum SecretCommands {
-    /// Set a secret value
+    /// Set secret(s): KEY VALUE, KEY=VALUE, or multiple KEY=VALUE pairs
     Set {
-        /// Secret key name
-        key: String,
-        /// Secret value (omit to read from stdin)
-        value: Option<String>,
+        /// KEY VALUE or KEY=VALUE pairs
+        #[arg(required = true, num_args = 1..)]
+        args: Vec<String>,
         /// Environment
         #[arg(long, short)]
         env: Option<String>,
@@ -116,11 +115,12 @@ pub enum SecretCommands {
         #[arg(long, short)]
         reveal: bool,
     },
-    /// Remove a secret
+    /// Remove secret(s)
     #[command(alias = "rm")]
     Remove {
-        /// Secret key name
-        key: String,
+        /// Secret key name(s)
+        #[arg(required = true, num_args = 1..)]
+        keys: Vec<String>,
         /// Environment
         #[arg(long, short)]
         env: Option<String>,
@@ -138,6 +138,18 @@ pub enum SecretCommands {
         /// Show actual values
         #[arg(long, short)]
         reveal: bool,
+    },
+    /// Import secrets from a .env file
+    #[command(alias = "imp")]
+    Import {
+        /// Path to .env file (- for stdin)
+        path: String,
+        /// Environment
+        #[arg(long, short)]
+        env: Option<String>,
+        /// Overwrite existing secrets without asking
+        #[arg(long)]
+        force: bool,
     },
     /// Generate a random secret
     Generate {
@@ -162,8 +174,6 @@ pub struct UnlockedVaultContext {
     pub env_cipher: Option<VaultCipher>,
     /// All accessible env ciphers keyed by env name.
     pub env_ciphers: std::collections::BTreeMap<String, VaultCipher>,
-    /// True if the vault header is v2 (per-env isolation).
-    pub is_v2: bool,
     pub vault_name: String,
     pub env_name: String,
     pub fingerprint: sigyn_engine::crypto::KeyFingerprint,
@@ -177,21 +187,15 @@ pub struct UnlockedVaultContext {
 
 impl UnlockedVaultContext {
     /// Get the cipher for the current environment.
-    /// For v2 vaults, returns the per-env cipher if available, otherwise the vault cipher.
-    /// For v1 vaults, returns the vault cipher (which is the master key).
+    /// Returns the per-env cipher if available, otherwise the vault cipher.
     pub fn current_env_cipher(&self) -> &VaultCipher {
         self.env_cipher.as_ref().unwrap_or(&self.vault_cipher)
     }
 
     /// Get the cipher for a specific environment by name.
-    /// For v2 vaults, returns the per-env cipher (None if no access).
-    /// For v1 vaults, returns the vault cipher (master key).
+    /// Returns the per-env cipher (None if no access to that env).
     pub fn cipher_for_env(&self, env_name: &str) -> Option<&VaultCipher> {
-        if self.is_v2 {
-            self.env_ciphers.get(env_name)
-        } else {
-            Some(&self.vault_cipher)
-        }
+        self.env_ciphers.get(env_name)
     }
 }
 
@@ -303,10 +307,7 @@ pub fn unlock_vault(
         )
     })?;
 
-    // Unseal keys using the unverified header.
-    // For v2 headers, this returns (vault_key, {env_name: env_key}).
-    // For v1, returns (master_key, {}).
-    let is_v2 = header_preview.version >= 2;
+    // Unseal keys: returns (vault_key, {env_name: env_key}).
     let (vault_key_bytes, env_key_map) = envelope::unseal_header(
         &header_preview,
         loaded.encryption_key(),
@@ -445,24 +446,17 @@ pub fn unlock_vault(
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();
-    if is_v2 {
-        for (ename, ekey) in &env_key_map {
-            env_ciphers.insert(ename.clone(), VaultCipher::new(*ekey));
-        }
+    for (ename, ekey) in &env_key_map {
+        env_ciphers.insert(ename.clone(), VaultCipher::new(*ekey));
     }
-    let env_cipher = if is_v2 {
-        env_ciphers
-            .get(&env_name)
-            .map(|c| VaultCipher::new(*c.key_bytes()))
-    } else {
-        Some(VaultCipher::new(vault_key_bytes))
-    };
+    let env_cipher = env_ciphers
+        .get(&env_name)
+        .map(|c| VaultCipher::new(*c.key_bytes()));
 
     Ok(UnlockedVaultContext {
         vault_cipher,
         env_cipher,
         env_ciphers,
-        is_v2,
         vault_name,
         env_name,
         fingerprint,
@@ -525,7 +519,7 @@ pub fn check_access(
                                 // (the owner's signing key may not be locally available)
                                 if let Ok(header) = envelope::extract_header_unverified(&hdr_bytes)
                                 {
-                                    if let Ok(mk) = envelope::unseal_master_key(
+                                    if let Ok(mk) = envelope::unseal_vault_key(
                                         &header,
                                         ctx.loaded_identity.encryption_key(),
                                         manifest.node_id,
@@ -677,84 +671,138 @@ pub fn handle(
     dry_run: bool,
 ) -> Result<()> {
     match cmd {
-        SecretCommands::Set { key, value, env } => {
-            sigyn_engine::secrets::validate_key_name(&key)?;
-
-            let ctx = unlock_vault(identity, vault, env.as_deref())?;
-            check_access(&ctx, AccessAction::Write, Some(&key))?;
-
-            let value = match value {
-                Some(v) => v,
-                None => {
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    std::io::stdin().read_to_string(&mut buf)?;
-                    buf.trim_end().to_string()
+        SecretCommands::Set { args, env } => {
+            // Parse args: either "KEY VALUE" (2 args, no '=') or "KEY=VALUE ..." pairs
+            let pairs: Vec<(String, String)> = if args.len() == 1 && !args[0].contains('=') {
+                // Single key, no value — read from stdin
+                let key = args[0].clone();
+                sigyn_engine::secrets::validate_key_name(&key)?;
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                vec![(key, buf.trim_end().to_string())]
+            } else if args.len() == 2 && !args[0].contains('=') && !args[1].contains('=') {
+                // Legacy: KEY VALUE (two positional args)
+                let key = args[0].clone();
+                sigyn_engine::secrets::validate_key_name(&key)?;
+                vec![(key, args[1].clone())]
+            } else {
+                // KEY=VALUE pairs
+                let mut pairs = Vec::new();
+                for arg in &args {
+                    let (k, v) = arg.split_once('=').ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invalid argument '{}': expected KEY=VALUE format when setting multiple secrets",
+                            arg
+                        )
+                    })?;
+                    sigyn_engine::secrets::validate_key_name(k)?;
+                    pairs.push((k.to_string(), v.to_string()));
                 }
+                pairs
             };
 
+            let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            let is_batch = pairs.len() > 1;
+
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
-            let existing = if env_path.exists() {
+            let mut plaintext = if env_path.exists() {
                 let encrypted = env_file::read_encrypted_env(&env_path)?;
                 env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
 
-            let is_update = existing.get(&key).is_some();
+            let mut set_count = 0usize;
+            let mut updated_count = 0usize;
+            let mut failed = 0usize;
+            let mut json_results: Vec<serde_json::Value> = Vec::new();
+
+            for (key, value) in &pairs {
+                if let Err(e) = check_access(&ctx, AccessAction::Write, Some(key)) {
+                    failed += 1;
+                    if json {
+                        json_results.push(serde_json::json!({
+                            "key": key,
+                            "status": "failed",
+                            "error": e.to_string(),
+                        }));
+                    } else {
+                        crate::output::print_error(&format!("'{}': {}", key, e));
+                    }
+                    continue;
+                }
+
+                let is_update = plaintext.get(key).is_some();
+
+                if dry_run {
+                    let action = if is_update { "update" } else { "create" };
+                    println!(
+                        "[dry-run] Would {} '{}' in env '{}'",
+                        action, key, ctx.env_name
+                    );
+                    continue;
+                }
+
+                plaintext.set(
+                    key.clone(),
+                    SecretValue::String(value.clone()),
+                    &ctx.fingerprint,
+                );
+
+                audit(
+                    &ctx,
+                    AuditAction::SecretWritten { key: key.clone() },
+                    AuditOutcome::Success,
+                );
+
+                if is_update {
+                    updated_count += 1;
+                } else {
+                    set_count += 1;
+                }
+
+                if json {
+                    json_results.push(serde_json::json!({
+                        "key": key,
+                        "env": ctx.env_name,
+                        "action": if is_update { "updated" } else { "created" },
+                    }));
+                } else if !is_batch {
+                    let action = if is_update { "Updated" } else { "Set" };
+                    crate::output::print_success(&format!(
+                        "{} '{}' in env '{}'",
+                        action, key, ctx.env_name
+                    ));
+                }
+            }
 
             if dry_run {
-                let action = if is_update { "update" } else { "create" };
-                println!(
-                    "[dry-run] Would {} '{}' in env '{}'",
-                    action, key, ctx.env_name
-                );
                 return Ok(());
             }
 
-            let mut plaintext = existing;
-            plaintext.set(key.clone(), SecretValue::String(value), &ctx.fingerprint);
-
+            // Write once after all mutations
             let encrypted =
                 env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
             env_file::write_encrypted_env(&env_path, &encrypted)?;
 
-            audit(
-                &ctx,
-                AuditAction::SecretWritten { key: key.clone() },
-                AuditOutcome::Success,
-            );
-
-            crate::notifications::try_notify(
-                &ctx.vault_name,
-                Some(&ctx.env_name),
-                Some(&key),
-                &ctx.fingerprint.to_hex(),
-                if is_update {
-                    "secret.updated"
-                } else {
-                    "secret.created"
-                },
-                &format!(
-                    "Secret '{}' {} in env '{}'",
-                    key,
-                    if is_update { "updated" } else { "created" },
-                    ctx.env_name
-                ),
-            );
-
             if json {
-                crate::output::print_json(&serde_json::json!({
-                    "key": key,
-                    "env": ctx.env_name,
-                    "action": if is_update { "updated" } else { "created" }
-                }))?;
-            } else {
-                let action = if is_update { "Updated" } else { "Set" };
-                crate::output::print_success(&format!(
-                    "{} '{}' in env '{}'",
-                    action, key, ctx.env_name
-                ));
+                if is_batch {
+                    crate::output::print_json(&json_results)?;
+                } else if let Some(result) = json_results.into_iter().next() {
+                    crate::output::print_json(&result)?;
+                }
+            } else if is_batch {
+                println!(
+                    "{} set, {} updated, {} failed",
+                    style(set_count).green().bold(),
+                    style(updated_count).cyan(),
+                    if failed > 0 {
+                        style(failed).red().bold()
+                    } else {
+                        style(failed).dim()
+                    }
+                );
             }
 
             maybe_auto_sync(&ctx.vault_name);
@@ -864,9 +912,8 @@ pub fn handle(
                 }
             }
         }
-        SecretCommands::Remove { key, env } => {
+        SecretCommands::Remove { keys, env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
-            check_access(&ctx, AccessAction::Delete, Some(&key))?;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             if !env_path.exists() {
@@ -876,40 +923,81 @@ pub fn handle(
             let encrypted = env_file::read_encrypted_env(&env_path)?;
             let mut plaintext = env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?;
 
-            if plaintext.get(&key).is_none() {
-                anyhow::bail!("secret '{}' not found in env '{}'", key, ctx.env_name);
+            let is_batch = keys.len() > 1;
+            let mut removed = 0usize;
+            let mut failed = 0usize;
+
+            for key in &keys {
+                if let Err(e) = check_access(&ctx, AccessAction::Delete, Some(key)) {
+                    failed += 1;
+                    crate::output::print_error(&format!("'{}': {}", key, e));
+                    continue;
+                }
+
+                if plaintext.get(key).is_none() {
+                    failed += 1;
+                    crate::output::print_error(&format!(
+                        "secret '{}' not found in env '{}'",
+                        key, ctx.env_name
+                    ));
+                    continue;
+                }
+
+                if dry_run {
+                    println!(
+                        "[dry-run] Would remove '{}' from env '{}'",
+                        key, ctx.env_name
+                    );
+                    continue;
+                }
+
+                plaintext.remove(key);
+
+                audit(
+                    &ctx,
+                    AuditAction::SecretDeleted { key: key.clone() },
+                    AuditOutcome::Success,
+                );
+
+                crate::notifications::try_notify(
+                    &ctx.vault_name,
+                    Some(&ctx.env_name),
+                    Some(key),
+                    &ctx.fingerprint.to_hex(),
+                    "secret.deleted",
+                    &format!("Secret '{}' removed from env '{}'", key, ctx.env_name),
+                );
+
+                removed += 1;
+                if !is_batch {
+                    crate::output::print_success(&format!(
+                        "Removed '{}' from env '{}'",
+                        key, ctx.env_name
+                    ));
+                }
             }
 
             if dry_run {
-                println!(
-                    "[dry-run] Would remove '{}' from env '{}'",
-                    key, ctx.env_name
-                );
                 return Ok(());
             }
 
-            plaintext.remove(&key);
+            if removed > 0 {
+                let encrypted =
+                    env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
+                env_file::write_encrypted_env(&env_path, &encrypted)?;
+            }
 
-            let encrypted =
-                env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
-            env_file::write_encrypted_env(&env_path, &encrypted)?;
-
-            audit(
-                &ctx,
-                AuditAction::SecretDeleted { key: key.clone() },
-                AuditOutcome::Success,
-            );
-
-            crate::notifications::try_notify(
-                &ctx.vault_name,
-                Some(&ctx.env_name),
-                Some(&key),
-                &ctx.fingerprint.to_hex(),
-                "secret.deleted",
-                &format!("Secret '{}' removed from env '{}'", key, ctx.env_name),
-            );
-
-            crate::output::print_success(&format!("Removed '{}' from env '{}'", key, ctx.env_name));
+            if is_batch {
+                println!(
+                    "{} removed, {} failed",
+                    style(removed).green().bold(),
+                    if failed > 0 {
+                        style(failed).red().bold()
+                    } else {
+                        style(failed).dim()
+                    }
+                );
+            }
 
             maybe_auto_sync(&ctx.vault_name);
         }
@@ -1203,6 +1291,144 @@ pub fn handle(
                     key, ctx.env_name
                 ));
                 println!("  Value: {}", generated);
+            }
+
+            maybe_auto_sync(&ctx.vault_name);
+        }
+        SecretCommands::Import { path, env, force } => {
+            // Read .env file content
+            let content = if path == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                let p = std::path::Path::new(&path);
+                if !p.exists() {
+                    anyhow::bail!("file not found: {}", path);
+                }
+                std::fs::read_to_string(p).with_context(|| format!("failed to read '{}'", path))?
+            };
+
+            // Parse KEY=VALUE lines (skip comments and blanks)
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                // Support export KEY=VALUE syntax
+                let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    let key = k.trim().to_string();
+                    // Strip surrounding quotes from value
+                    let val = v.trim();
+                    let val = if (val.starts_with('"') && val.ends_with('"'))
+                        || (val.starts_with('\'') && val.ends_with('\''))
+                    {
+                        val[1..val.len() - 1].to_string()
+                    } else {
+                        val.to_string()
+                    };
+                    if let Err(e) = sigyn_engine::secrets::validate_key_name(&key) {
+                        eprintln!(
+                            "{} skipping invalid key '{}': {}",
+                            style("warning:").yellow().bold(),
+                            key,
+                            e
+                        );
+                        continue;
+                    }
+                    pairs.push((key, val));
+                }
+            }
+
+            if pairs.is_empty() {
+                anyhow::bail!("no valid KEY=VALUE entries found in '{}'", path);
+            }
+
+            let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            check_access(&ctx, AccessAction::Write, None)?;
+
+            let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
+            let mut plaintext = if env_path.exists() {
+                let encrypted = env_file::read_encrypted_env(&env_path)?;
+                env_file::decrypt_env(&encrypted, ctx.current_env_cipher())?
+            } else {
+                sigyn_engine::vault::PlaintextEnv::new()
+            };
+
+            let mut set_count = 0usize;
+            let mut updated_count = 0usize;
+            let mut skipped = 0usize;
+
+            for (key, value) in &pairs {
+                let is_update = plaintext.get(key).is_some();
+
+                if is_update && !force {
+                    if crate::config::is_interactive() {
+                        let confirm = dialoguer::Confirm::new()
+                            .with_prompt(format!("Overwrite existing secret '{}'?", key))
+                            .default(false)
+                            .interact()?;
+                        if !confirm {
+                            skipped += 1;
+                            continue;
+                        }
+                    } else {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+
+                plaintext.set(
+                    key.clone(),
+                    SecretValue::String(value.clone()),
+                    &ctx.fingerprint,
+                );
+
+                audit(
+                    &ctx,
+                    AuditAction::SecretWritten { key: key.clone() },
+                    AuditOutcome::Success,
+                );
+
+                if is_update {
+                    updated_count += 1;
+                } else {
+                    set_count += 1;
+                }
+            }
+
+            let total_written = set_count + updated_count;
+            if total_written > 0 {
+                let encrypted =
+                    env_file::encrypt_env(&plaintext, ctx.current_env_cipher(), &ctx.env_name)?;
+                env_file::write_encrypted_env(&env_path, &encrypted)?;
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "source": path,
+                    "env": ctx.env_name,
+                    "created": set_count,
+                    "updated": updated_count,
+                    "skipped": skipped,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Imported {} secret(s) from '{}' into env '{}'",
+                    total_written, path, ctx.env_name
+                ));
+                if set_count > 0 {
+                    println!("  {} new", set_count);
+                }
+                if updated_count > 0 {
+                    println!("  {} updated", updated_count);
+                }
+                if skipped > 0 {
+                    println!("  {} skipped (use --force to overwrite)", skipped);
+                }
             }
 
             maybe_auto_sync(&ctx.vault_name);

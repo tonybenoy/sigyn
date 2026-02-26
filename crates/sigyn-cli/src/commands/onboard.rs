@@ -120,7 +120,7 @@ pub fn handle(json: bool) -> Result<()> {
 
             crate::commands::vault::handle(
                 crate::commands::vault::VaultCommands::Create {
-                    name: name.clone(),
+                    names: vec![name.clone()],
                     org: None,
                     split_audit: false,
                 },

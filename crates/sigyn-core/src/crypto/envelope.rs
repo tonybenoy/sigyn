@@ -9,10 +9,6 @@ use zeroize::Zeroize;
 use super::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
 use crate::error::{Result, SigynError};
 
-fn default_version() -> u8 {
-    1
-}
-
 /// Build AAD bytes binding ciphertext to a specific recipient and vault.
 fn slot_aad(fingerprint: &KeyFingerprint, vault_id: &Uuid) -> Vec<u8> {
     let mut aad = Vec::with_capacity(32);
@@ -42,19 +38,15 @@ pub struct RecipientSlot {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct EnvelopeHeader {
-    /// Format version. Absent/1 = legacy single-key. 2 = per-env isolation.
-    #[serde(default = "default_version")]
+    /// Format version. Always 2 (per-env isolation).
+    #[serde(default)]
     pub version: u8,
 
-    /// V1 legacy: wraps the single master key. Empty in v2.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub slots: Vec<RecipientSlot>,
-
-    /// V2: vault-level key slots (manifest, policy, audit). Every member gets one.
+    /// Vault-level key slots (manifest, policy, audit). Every member gets one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vault_key_slots: Vec<RecipientSlot>,
 
-    /// V2: per-environment key slots. Only members allowed for that env get a slot.
+    /// Per-environment key slots. Only members allowed for that env get a slot.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_slots: BTreeMap<String, Vec<RecipientSlot>>,
 
@@ -129,90 +121,6 @@ fn decrypt_slot(encrypted: &[u8], slot_key: &[u8; 32], aad: &[u8]) -> Result<[u8
     Ok(key)
 }
 
-pub fn seal_master_key(
-    master_key: &[u8; 32],
-    recipients: &[X25519PublicKey],
-    vault_id: Uuid,
-) -> Result<EnvelopeHeader> {
-    let mut slots = Vec::with_capacity(recipients.len());
-
-    for recipient_pubkey in recipients {
-        let ephemeral = X25519PrivateKey::generate();
-        let ephemeral_pub = ephemeral.public_key();
-        let mut shared = ephemeral.diffie_hellman(recipient_pubkey);
-        let slot_key = derive_slot_key(&shared, &vault_id)?;
-        shared.zeroize();
-        let fp = recipient_pubkey.fingerprint();
-        let aad = slot_aad(&fp, &vault_id);
-        let encrypted = encrypt_slot(master_key, &slot_key, &aad)?;
-
-        slots.push(RecipientSlot {
-            fingerprint: fp,
-            ephemeral_pubkey: ephemeral_pub,
-            encrypted_master_key: encrypted,
-        });
-    }
-
-    Ok(EnvelopeHeader {
-        version: 1,
-        slots,
-        vault_key_slots: Vec::new(),
-        env_slots: BTreeMap::new(),
-        vault_id: Some(vault_id),
-    })
-}
-
-pub fn unseal_master_key(
-    header: &EnvelopeHeader,
-    private_key: &X25519PrivateKey,
-    vault_id: Uuid,
-) -> Result<[u8; 32]> {
-    let my_fingerprint = private_key.public_key().fingerprint();
-
-    for slot in &header.slots {
-        if slot.fingerprint == my_fingerprint {
-            let mut shared = private_key.diffie_hellman(&slot.ephemeral_pubkey);
-            let slot_key = derive_slot_key(&shared, &vault_id)?;
-            shared.zeroize();
-            let aad = slot_aad(&slot.fingerprint, &vault_id);
-            return decrypt_slot(&slot.encrypted_master_key, &slot_key, &aad);
-        }
-    }
-
-    Err(SigynError::NoMatchingSlot)
-}
-
-pub fn add_recipient(
-    header: &mut EnvelopeHeader,
-    master_key: &[u8; 32],
-    pubkey: &X25519PublicKey,
-    vault_id: Uuid,
-) -> Result<()> {
-    let ephemeral = X25519PrivateKey::generate();
-    let ephemeral_pub = ephemeral.public_key();
-    let mut shared = ephemeral.diffie_hellman(pubkey);
-    let slot_key = derive_slot_key(&shared, &vault_id)?;
-    shared.zeroize();
-    let fp = pubkey.fingerprint();
-    let aad = slot_aad(&fp, &vault_id);
-    let encrypted = encrypt_slot(master_key, &slot_key, &aad)?;
-
-    header.slots.push(RecipientSlot {
-        fingerprint: fp,
-        ephemeral_pubkey: ephemeral_pub,
-        encrypted_master_key: encrypted,
-    });
-    Ok(())
-}
-
-pub fn remove_recipient(header: &mut EnvelopeHeader, fingerprint: &KeyFingerprint) {
-    header.slots.retain(|s| &s.fingerprint != fingerprint);
-}
-
-// ---------------------------------------------------------------------------
-// V2: Per-environment key isolation
-// ---------------------------------------------------------------------------
-
 /// Create a single recipient slot for a given key.
 fn make_slot(
     key: &[u8; 32],
@@ -233,7 +141,7 @@ fn make_slot(
     })
 }
 
-/// Build a complete v2 envelope header.
+/// Build an envelope header with per-environment key isolation.
 ///
 /// * `vault_key` — 32-byte key for manifest/policy/audit.
 /// * `env_keys` — per-environment 32-byte keys.
@@ -265,7 +173,6 @@ pub fn seal_v2(
 
     Ok(EnvelopeHeader {
         version: 2,
-        slots: Vec::new(),
         vault_key_slots,
         env_slots,
         vault_id: Some(vault_id),
@@ -315,10 +222,9 @@ pub fn unseal_env_key(
     Err(SigynError::NoMatchingSlot)
 }
 
-/// Unified unseal helper that works for both v1 and v2 headers.
+/// Unseal a header: returns `(vault_key, {env_name: env_key, ...})`.
 ///
-/// * v1: returns `(master_key, empty_map)` — callers use master_key for everything.
-/// * v2: returns `(vault_key, {env_name: env_key, ...})` — only envs user has slots for.
+/// Unseals the vault-level key and all environment keys the caller has access to.
 #[allow(clippy::type_complexity)]
 pub fn unseal_header(
     header: &EnvelopeHeader,
@@ -326,27 +232,22 @@ pub fn unseal_header(
     vault_id: Uuid,
     requested_envs: &[String],
 ) -> Result<([u8; 32], BTreeMap<String, [u8; 32]>)> {
-    if header.version >= 2 {
-        let vault_key = unseal_vault_key(header, private_key, vault_id)?;
-        let mut env_keys = BTreeMap::new();
-        for env_name in requested_envs {
+    let vault_key = unseal_vault_key(header, private_key, vault_id)?;
+    let mut env_keys = BTreeMap::new();
+    for env_name in requested_envs {
+        if let Ok(ek) = unseal_env_key(header, env_name, private_key, vault_id) {
+            env_keys.insert(env_name.clone(), ek);
+        }
+    }
+    // Also try all env_slots the user has access to
+    for env_name in header.env_slots.keys() {
+        if !env_keys.contains_key(env_name) {
             if let Ok(ek) = unseal_env_key(header, env_name, private_key, vault_id) {
                 env_keys.insert(env_name.clone(), ek);
             }
         }
-        // Also try all env_slots the user has access to
-        for env_name in header.env_slots.keys() {
-            if !env_keys.contains_key(env_name) {
-                if let Ok(ek) = unseal_env_key(header, env_name, private_key, vault_id) {
-                    env_keys.insert(env_name.clone(), ek);
-                }
-            }
-        }
-        Ok((vault_key, env_keys))
-    } else {
-        let master_key = unseal_master_key(header, private_key, vault_id)?;
-        Ok((master_key, BTreeMap::new()))
     }
+    Ok((vault_key, env_keys))
 }
 
 /// Add a vault-key recipient slot to a v2 header.
@@ -492,62 +393,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_seal_unseal_roundtrip() {
-        let master_key = [0xABu8; 32];
-        let vault_id = Uuid::new_v4();
-        let alice = X25519PrivateKey::generate();
-        let bob = X25519PrivateKey::generate();
-
-        let header = seal_master_key(
-            &master_key,
-            &[alice.public_key(), bob.public_key()],
-            vault_id,
-        )
-        .unwrap();
-
-        assert_eq!(header.slots.len(), 2);
-
-        let recovered_alice = unseal_master_key(&header, &alice, vault_id).unwrap();
-        let recovered_bob = unseal_master_key(&header, &bob, vault_id).unwrap();
-        assert_eq!(master_key, recovered_alice);
-        assert_eq!(master_key, recovered_bob);
-    }
-
-    #[test]
-    fn test_wrong_key_fails() {
-        let master_key = [0xABu8; 32];
-        let vault_id = Uuid::new_v4();
-        let alice = X25519PrivateKey::generate();
-        let eve = X25519PrivateKey::generate();
-
-        let header = seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
-        assert!(unseal_master_key(&header, &eve, vault_id).is_err());
-    }
-
-    #[test]
-    fn test_add_remove_recipient() {
-        let master_key = [0xCDu8; 32];
-        let vault_id = Uuid::new_v4();
-        let alice = X25519PrivateKey::generate();
-        let bob = X25519PrivateKey::generate();
-
-        let mut header = seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
-        assert_eq!(header.slots.len(), 1);
-
-        add_recipient(&mut header, &master_key, &bob.public_key(), vault_id).unwrap();
-        assert_eq!(header.slots.len(), 2);
-
-        let recovered = unseal_master_key(&header, &bob, vault_id).unwrap();
-        assert_eq!(master_key, recovered);
-
-        remove_recipient(&mut header, &bob.public_key().fingerprint());
-        assert_eq!(header.slots.len(), 1);
-        assert!(unseal_master_key(&header, &bob, vault_id).is_err());
-    }
-
-    // --- V2 tests ---
-
-    #[test]
     fn test_v2_seal_unseal_roundtrip() {
         let vault_id = Uuid::new_v4();
         let vault_key = [0xAAu8; 32];
@@ -579,7 +424,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(header.version, 2);
-        assert!(header.slots.is_empty());
         assert_eq!(header.vault_key_slots.len(), 2);
 
         // Alice can unseal everything
@@ -772,19 +616,6 @@ mod tests {
         let (vk, ek) = unseal_header(&header, &alice, vault_id, &["dev".to_string()]).unwrap();
         assert_eq!(vault_key, vk);
         assert_eq!(dev_key, *ek.get("dev").unwrap());
-    }
-
-    #[test]
-    fn test_v1_unseal_header_compat() {
-        let master_key = [0xEEu8; 32];
-        let vault_id = Uuid::new_v4();
-        let alice = X25519PrivateKey::generate();
-
-        let header = seal_master_key(&master_key, &[alice.public_key()], vault_id).unwrap();
-
-        let (vk, ek) = unseal_header(&header, &alice, vault_id, &["dev".to_string()]).unwrap();
-        assert_eq!(master_key, vk);
-        assert!(ek.is_empty()); // v1 returns no env keys
     }
 
     #[test]

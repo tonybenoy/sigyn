@@ -488,8 +488,8 @@ pub fn handle(
                 policy.remove_member(fp);
             }
 
-            // For v2 vaults: rotate vault key + all env keys, rebuild header
-            let master_key_rotated = if ctx.is_v2 {
+            // Rotate vault key + all env keys, rebuild header
+            let master_key_rotated = {
                 use sigyn_engine::crypto::envelope;
                 use sigyn_engine::identity::keygen::IdentityStore;
 
@@ -586,11 +586,6 @@ pub fn handle(
                 crate::config::secure_write(&ctx.paths.members_path(&ctx.vault_name), &signed)?;
 
                 true
-            } else {
-                // V1: just save policy (no key rotation in basic mode)
-                policy
-                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
-                false
             };
 
             // Audit
@@ -640,16 +635,9 @@ pub fn handle(
                         style(delegated_fps.len()).bold()
                     );
                 }
-                if master_key_rotated {
-                    crate::output::print_info(
-                        "Vault key + all env keys rotated, environments re-encrypted",
-                    );
-                } else {
-                    println!(
-                        "  Master key rotation: {}",
-                        style("skipped (basic mode)").dim()
-                    );
-                }
+                crate::output::print_info(
+                    "Vault key + all env keys rotated, environments re-encrypted",
+                );
             }
         }
         RotateCommands::DeadCheck { max_age, env } => {

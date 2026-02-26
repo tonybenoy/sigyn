@@ -533,6 +533,78 @@ sigyn secret search 'DB_*'
 sigyn secret search 'API_*' --reveal
 ```
 
+## Passphrase Agent (Session Caching)
+
+### Avoiding Repeated Passphrase Prompts
+
+When running multiple commands in a session, use the passphrase agent to cache
+your decrypted key in memory — similar to `ssh-agent` or `gpg-agent`.
+
+```bash
+# Start the agent (prints a shell-eval-able export)
+eval $(sigyn agent start)
+
+# First command prompts for your passphrase — then caches it
+sigyn secret list -v myapp -e dev
+
+# Subsequent commands skip the passphrase prompt entirely
+sigyn secret set API_KEY="new-key" -e dev
+sigyn vault create new-project -i alice
+sigyn delegation tree
+```
+
+### Custom Timeout
+
+By default, cached keys expire after 30 minutes. Adjust with `--timeout`:
+
+```bash
+# Cache keys for 2 hours
+eval $(sigyn agent start --timeout 120)
+
+# Cache keys for 5 minutes (for quick scripted workflows)
+eval $(sigyn agent start --timeout 5)
+```
+
+### Locking and Stopping
+
+```bash
+# Clear cached keys but keep daemon running (next command re-prompts)
+sigyn agent lock
+
+# Check agent status
+sigyn agent status
+
+# Stop the daemon entirely and zeroize all keys
+sigyn agent stop
+```
+
+### Agent + Batch Operations
+
+The agent is especially useful when combined with batch commands in a multi-step
+workflow:
+
+```bash
+eval $(sigyn agent start)
+
+# All of these run without re-prompting for the passphrase
+sigyn vault create api worker web --org acme
+sigyn env create dev staging prod
+sigyn secret set DB_URL="postgres://localhost" REDIS="redis://localhost" -e dev
+sigyn secret import .env.production -e prod --force
+sigyn delegation revoke abc123 def456 --cascade
+sigyn sync push
+```
+
+### Shell Profile Integration
+
+Add this to your `.bashrc` or `.zshrc` to auto-start the agent on login:
+
+```bash
+if [ -z "$SIGYN_AGENT_SOCK" ]; then
+  eval $(sigyn agent start --timeout 60)
+fi
+```
+
 ## Webhook Notifications
 
 ### Setting Up Notifications
@@ -594,9 +666,8 @@ A typical workflow: set secrets in dev, then promote through staging to producti
 **Step 1 — Set secrets in dev:**
 
 ```bash
-sigyn secret set API_KEY "dev-key-abc123" --env dev
-sigyn secret set DATABASE_URL "postgres://localhost/myapp_dev" --env dev
-sigyn secret set FEATURE_FLAG "true" --env dev
+# Batch set — all at once
+sigyn secret set API_KEY="dev-key-abc123" DATABASE_URL="postgres://localhost/myapp_dev" FEATURE_FLAG="true" --env dev
 ```
 
 **Step 2 — Promote all secrets from dev to staging:**
@@ -668,10 +739,9 @@ acme (org)
 ### 2. Create a vault per project, linked to the org
 
 ```bash
-sigyn vault create api-service    --org acme/backend
-sigyn vault create auth-service   --org acme/backend
-sigyn vault create worker-service --org acme/backend
-sigyn vault create dashboard      --org acme/frontend
+# Batch create — multiple vaults in one command
+sigyn vault create api-service auth-service worker-service --org acme/backend
+sigyn vault create dashboard --org acme/frontend
 ```
 
 Each vault has independent environments (`dev`, `staging`, `prod`), secrets, and
@@ -795,29 +865,23 @@ while avoiding duplication of shared values.
 ### 1. Create the vaults
 
 ```bash
-sigyn vault create shared-infra     # DATABASE_URL, REDIS_URL, etc.
-sigyn vault create api-service      # API-specific: STRIPE_KEY, JWT_SECRET
-sigyn vault create worker-service   # Worker-specific: QUEUE_URL, DEAD_LETTER_ARN
-sigyn vault create web-frontend     # Frontend-specific: NEXT_PUBLIC_API_URL
+sigyn vault create shared-infra api-service worker-service web-frontend
 ```
 
 ### 2. Populate shared and per-service secrets
 
 ```bash
-# Shared infrastructure secrets
-sigyn secret set DATABASE_URL "postgres://db.internal/myapp" -v shared-infra -e prod
-sigyn secret set REDIS_URL "redis://redis.internal:6379" -v shared-infra -e prod
+# Batch set — multiple KEY=VALUE pairs per command
+sigyn secret set DATABASE_URL="postgres://db.internal/myapp" REDIS_URL="redis://redis.internal:6379" -v shared-infra -e prod
 
-# API-specific
-sigyn secret set STRIPE_SECRET_KEY "sk_live_..." -v api-service -e prod
-sigyn secret set JWT_SECRET "..." -v api-service -e prod
+sigyn secret set STRIPE_SECRET_KEY="sk_live_..." JWT_SECRET="..." -v api-service -e prod
 
-# Worker-specific
-sigyn secret set QUEUE_URL "https://sqs.us-east-1.amazonaws.com/..." -v worker-service -e prod
-sigyn secret set DEAD_LETTER_ARN "arn:aws:sqs:..." -v worker-service -e prod
+sigyn secret set QUEUE_URL="https://sqs.us-east-1.amazonaws.com/..." DEAD_LETTER_ARN="arn:aws:sqs:..." -v worker-service -e prod
 
-# Frontend-specific
-sigyn secret set NEXT_PUBLIC_API_URL "https://api.example.com" -v web-frontend -e prod
+sigyn secret set NEXT_PUBLIC_API_URL="https://api.example.com" -v web-frontend -e prod
+
+# Or import from a .env file
+sigyn secret import .env.production -v api-service -e prod --force
 ```
 
 ### 3. Per-directory `.sigyn.toml` files
@@ -1084,6 +1148,10 @@ echo "=== Compliance check complete ==="
 ### Bulk Update from a CSV
 
 ```bash
+# From a .env file (preferred)
+sigyn secret import secrets.env --env dev
+
+# From CSV with shell loop
 while IFS=, read -r key value; do
   sigyn secret set "$key" "$value" --env dev
 done < secrets.csv

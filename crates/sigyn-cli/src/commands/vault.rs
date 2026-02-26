@@ -14,10 +14,11 @@ use crate::config::sigyn_home;
 
 #[derive(Subcommand)]
 pub enum VaultCommands {
-    /// Create a new vault
+    /// Create a new vault (accepts multiple names for batch creation)
     Create {
-        /// Vault name
-        name: String,
+        /// Vault name(s)
+        #[arg(required = true, num_args = 1..)]
+        names: Vec<String>,
         /// Link vault to an org hierarchy path (e.g. "acme/platform/web")
         #[arg(long)]
         org: Option<String>,
@@ -57,6 +58,105 @@ pub enum VaultCommands {
     Pins,
 }
 
+fn create_single_vault(
+    name: &str,
+    org: &Option<String>,
+    split_audit: bool,
+    loaded: &sigyn_engine::identity::LoadedIdentity,
+    fingerprint: &sigyn_engine::crypto::keys::KeyFingerprint,
+    paths: &VaultPaths,
+    home: &std::path::Path,
+) -> Result<VaultManifest> {
+    let vault_dir = paths.vault_dir(name);
+    if vault_dir.exists() {
+        anyhow::bail!("vault '{}' already exists", name);
+    }
+
+    let mut manifest = VaultManifest::new(name.to_string(), fingerprint.clone());
+    manifest.org_path = org.clone();
+    let vault_id = manifest.vault_id;
+
+    // Generate vault-level key (manifest/policy/audit) and per-env keys
+    let vault_cipher = VaultCipher::generate();
+    let recipients = std::slice::from_ref(&loaded.identity.encryption_pubkey);
+
+    // Build per-env keys: every default env gets its own key, creator gets all slots
+    let mut env_keys = std::collections::BTreeMap::new();
+    let mut env_recipients = std::collections::BTreeMap::new();
+    for env_name in &manifest.environments {
+        let env_key = VaultCipher::generate();
+        env_keys.insert(env_name.clone(), env_key);
+        env_recipients.insert(env_name.clone(), recipients.to_vec());
+    }
+    let env_key_bytes: std::collections::BTreeMap<String, [u8; 32]> = env_keys
+        .iter()
+        .map(|(n, cipher)| (n.clone(), *cipher.key_bytes()))
+        .collect();
+
+    let header = envelope::seal_v2(
+        vault_cipher.key_bytes(),
+        &env_key_bytes,
+        recipients,
+        &env_recipients,
+        vault_id,
+    )?;
+
+    std::fs::create_dir_all(paths.env_dir(name))?;
+
+    let sealed_manifest = manifest
+        .to_sealed_bytes(&vault_cipher)
+        .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+    crate::config::secure_write(&paths.manifest_path(name), &sealed_manifest)?;
+
+    // Write encrypted org_link for org-path scanning
+    if let Some(ref org_path) = org {
+        let device_key = sigyn_engine::device::load_or_create_device_key(home)?;
+        let link_path = paths.vault_dir(name).join(".org_link");
+        sigyn_engine::vault::path::write_org_link(&link_path, org_path, &device_key)?;
+    }
+
+    let signed_header = envelope::sign_header(&header, loaded.signing_key(), vault_id)
+        .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
+    crate::config::secure_write(&paths.members_path(name), &signed_header)?;
+
+    let policy = sigyn_engine::policy::storage::VaultPolicy::new();
+    policy.save_encrypted(&paths.policy_path(name), &vault_cipher)?;
+
+    for env_name in &manifest.environments {
+        let env = sigyn_engine::vault::PlaintextEnv::new();
+        let env_cipher = env_keys.get(env_name).unwrap();
+        let encrypted = sigyn_engine::vault::env_file::encrypt_env(&env, env_cipher, env_name)?;
+        sigyn_engine::vault::env_file::write_encrypted_env(
+            &paths.env_path(name, env_name),
+            &encrypted,
+        )?;
+    }
+
+    // If --split-audit, initialize audit sub-repo before writing audit log
+    if split_audit {
+        sigyn_engine::sync::vault_sync::init_audit_repo(&paths.vault_dir(name))?;
+    }
+
+    // Audit: vault created
+    if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+        vault_cipher.key_bytes(),
+        b"sigyn-audit-v1",
+        &vault_id,
+    ) {
+        if let Ok(mut log) = AuditLog::open(&paths.audit_path(name), audit_cipher) {
+            let _ = log.append(
+                fingerprint,
+                AuditAction::VaultCreated,
+                None,
+                AuditOutcome::Success,
+                loaded.signing_key(),
+            );
+        }
+    }
+
+    Ok(manifest)
+}
+
 pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<()> {
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());
@@ -64,19 +164,15 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
 
     match cmd {
         VaultCommands::Create {
-            name,
+            names,
             org,
             split_audit,
         } => {
             let loaded = load_identity(&store, identity)?;
             let fingerprint = loaded.identity.fingerprint.clone();
+            let is_batch = names.len() > 1;
 
-            let vault_dir = paths.vault_dir(&name);
-            if vault_dir.exists() {
-                anyhow::bail!("vault '{}' already exists", name);
-            }
-
-            // If --org is set, validate the org path exists
+            // If --org is set, validate the org path exists (once, before the loop)
             if let Some(ref org_path_str) = org {
                 let hierarchy_paths =
                     sigyn_engine::hierarchy::path::HierarchyPaths::new(home.clone());
@@ -87,110 +183,93 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 }
             }
 
-            let mut manifest = VaultManifest::new(name.clone(), fingerprint.clone());
-            manifest.org_path = org.clone();
-            let vault_id = manifest.vault_id;
+            let mut created = 0usize;
+            let mut failed = 0usize;
+            let mut json_results: Vec<serde_json::Value> = Vec::new();
 
-            // Generate vault-level key (manifest/policy/audit) and per-env keys
-            let vault_cipher = VaultCipher::generate();
-            let recipients = std::slice::from_ref(&loaded.identity.encryption_pubkey);
+            for name in &names {
+                match create_single_vault(
+                    name,
+                    &org,
+                    split_audit,
+                    &loaded,
+                    &fingerprint,
+                    &paths,
+                    &home,
+                ) {
+                    Ok(manifest) => {
+                        created += 1;
+                        if json {
+                            json_results.push(serde_json::json!({
+                                "name": name,
+                                "vault_id": manifest.vault_id.to_string(),
+                                "status": "created",
+                            }));
+                        } else if is_batch {
+                            crate::output::print_success(&format!("Vault '{}' created", name));
+                        } else {
+                            crate::output::print_success(&format!("Vault '{}' created", name));
+                            println!("  ID:           {}", manifest.vault_id);
+                            println!("  Owner:        {}", style(fingerprint.to_hex()).cyan());
+                            println!("  Environments: {}", manifest.environments.join(", "));
 
-            // Build per-env keys: every default env gets its own key, creator gets all slots
-            let mut env_keys = std::collections::BTreeMap::new();
-            let mut env_recipients = std::collections::BTreeMap::new();
-            for env_name in &manifest.environments {
-                let env_key = VaultCipher::generate();
-                env_keys.insert(env_name.clone(), env_key);
-                env_recipients.insert(env_name.clone(), recipients.to_vec());
-            }
-            let env_key_bytes: std::collections::BTreeMap<String, [u8; 32]> = env_keys
-                .iter()
-                .map(|(name, cipher)| (name.clone(), *cipher.key_bytes()))
-                .collect();
+                            println!();
+                            println!("{}", style("Next steps:").bold());
+                            println!(
+                                "  sigyn secret set DATABASE_URL='postgres://...' -v {} -e dev",
+                                name
+                            );
+                            println!("  sigyn project init --vault {}", name);
+                            println!("  sigyn run -v {} -e dev -- ./your-app", name);
 
-            let header = envelope::seal_v2(
-                vault_cipher.key_bytes(),
-                &env_key_bytes,
-                recipients,
-                &env_recipients,
-                vault_id,
-            )?;
-
-            std::fs::create_dir_all(paths.env_dir(&name))?;
-
-            let sealed_manifest = manifest
-                .to_sealed_bytes(&vault_cipher)
-                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
-            crate::config::secure_write(&paths.manifest_path(&name), &sealed_manifest)?;
-
-            // Write encrypted org_link for org-path scanning
-            if let Some(ref org_path) = org {
-                let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
-                let link_path = paths.vault_dir(&name).join(".org_link");
-                sigyn_engine::vault::path::write_org_link(&link_path, org_path, &device_key)?;
-            }
-
-            let signed_header = envelope::sign_header(&header, loaded.signing_key(), vault_id)
-                .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
-            crate::config::secure_write(&paths.members_path(&name), &signed_header)?;
-
-            let policy = sigyn_engine::policy::storage::VaultPolicy::new();
-            policy.save_encrypted(&paths.policy_path(&name), &vault_cipher)?;
-
-            for env_name in &manifest.environments {
-                let env = sigyn_engine::vault::PlaintextEnv::new();
-                let env_cipher = env_keys.get(env_name).unwrap();
-                let encrypted =
-                    sigyn_engine::vault::env_file::encrypt_env(&env, env_cipher, env_name)?;
-                sigyn_engine::vault::env_file::write_encrypted_env(
-                    &paths.env_path(&name, env_name),
-                    &encrypted,
-                )?;
-            }
-
-            // If --split-audit, initialize audit sub-repo before writing audit log
-            if split_audit {
-                sigyn_engine::sync::vault_sync::init_audit_repo(&paths.vault_dir(&name))?;
-            }
-
-            // Audit: vault created
-            if let Ok(audit_cipher) = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                vault_cipher.key_bytes(),
-                b"sigyn-audit-v1",
-                &vault_id,
-            ) {
-                if let Ok(mut log) = AuditLog::open(&paths.audit_path(&name), audit_cipher) {
-                    let _ = log.append(
-                        &fingerprint,
-                        AuditAction::VaultCreated,
-                        None,
-                        AuditOutcome::Success,
-                        loaded.signing_key(),
-                    );
+                            // Offer to create .sigyn.toml
+                            let identity_name = loaded.identity.profile.name.clone();
+                            let _ = crate::project_config::offer_project_init(
+                                name,
+                                Some(&identity_name),
+                                "dev",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        if json {
+                            json_results.push(serde_json::json!({
+                                "name": name,
+                                "status": "failed",
+                                "error": e.to_string(),
+                            }));
+                        } else {
+                            crate::output::print_error(&format!(
+                                "Failed to create vault '{}': {}",
+                                name, e
+                            ));
+                        }
+                    }
                 }
             }
 
             if json {
-                crate::output::print_json(&manifest)?;
-            } else {
-                crate::output::print_success(&format!("Vault '{}' created", name));
-                println!("  ID:           {}", vault_id);
-                println!("  Owner:        {}", style(fingerprint.to_hex()).cyan());
-                println!("  Environments: {}", manifest.environments.join(", "));
-
+                if is_batch {
+                    crate::output::print_json(&json_results)?;
+                } else if let Some(result) = json_results.into_iter().next() {
+                    crate::output::print_json(&result)?;
+                }
+            } else if is_batch {
                 println!();
-                println!("{}", style("Next steps:").bold());
                 println!(
-                    "  sigyn secret set DATABASE_URL 'postgres://...' -v {} -e dev",
-                    name
+                    "{} created, {} failed",
+                    style(created).green().bold(),
+                    if failed > 0 {
+                        style(failed).red().bold()
+                    } else {
+                        style(failed).dim()
+                    }
                 );
-                println!("  sigyn project init --vault {}", name);
-                println!("  sigyn run -v {} -e dev -- ./your-app", name);
+            }
 
-                // Offer to create .sigyn.toml
-                let identity_name = loaded.identity.profile.name.clone();
-                let _ =
-                    crate::project_config::offer_project_init(&name, Some(&identity_name), "dev");
+            if failed > 0 && !is_batch {
+                anyhow::bail!("vault creation failed");
             }
         }
         VaultCommands::List => {

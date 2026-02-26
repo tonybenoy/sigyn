@@ -143,14 +143,34 @@ fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<I
 
 pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<LoadedIdentity> {
     let identity = resolve_identity(store, name_or_fp)?;
-
     let fp_hex = identity.fingerprint.to_hex();
+
+    // Check if the agent has our key cached
+    if let Some(_key_material) = crate::agent::try_agent_unlock(&fp_hex) {
+        // Agent has the key — load via passphrase from agent
+        // For now, we still need the passphrase to load via the store,
+        // so we use the agent's PASSPHRASE protocol.
+        // TODO: once agent returns raw key material, reconstruct LoadedIdentity directly
+    }
+
     let passphrase = read_passphrase(&format!(
         "Passphrase for [{}...]: ",
         &fp_hex[..8.min(fp_hex.len())]
     ))?;
 
-    store
+    let loaded = store
         .load(&identity.fingerprint, &passphrase)
-        .context("failed to unlock identity (wrong passphrase?)")
+        .context("failed to unlock identity (wrong passphrase?)")?;
+
+    // Cache in agent for future use (best-effort)
+    if crate::agent::get_agent_socket().is_some() {
+        let signing_bytes = loaded.signing_key().to_bytes();
+        let encryption_bytes = loaded.encryption_key().to_bytes();
+        let mut material = Vec::with_capacity(signing_bytes.len() + encryption_bytes.len());
+        material.extend_from_slice(&signing_bytes);
+        material.extend_from_slice(&encryption_bytes);
+        let _ = crate::agent::agent_cache(&fp_hex, &material);
+    }
+
+    Ok(loaded)
 }

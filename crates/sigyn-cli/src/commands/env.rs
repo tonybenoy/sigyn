@@ -14,10 +14,11 @@ use crate::config::sigyn_home;
 pub enum EnvCommands {
     /// List environments in a vault
     List,
-    /// Create a new environment
+    /// Create new environment(s)
     Create {
-        /// Environment name
-        name: String,
+        /// Environment name(s)
+        #[arg(required = true, num_args = 1..)]
+        names: Vec<String>,
     },
     /// Compare secrets between two environments
     Diff {
@@ -82,33 +83,18 @@ pub fn handle(
                 }
             }
         }
-        EnvCommands::Create { name } => {
-            sigyn_engine::secrets::validation::validate_env_name(&name)?;
-
+        EnvCommands::Create { names } => {
             let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::CreateEnv, None)?;
 
             let manifest_path = paths.manifest_path(&vault_name);
             let mut manifest = ctx.manifest.clone();
+            let mut header = ctx.header.clone();
+            let is_batch = names.len() > 1;
 
-            if manifest.environments.contains(&name) {
-                anyhow::bail!("environment '{}' already exists", name);
-            }
-
-            manifest.environments.push(name.clone());
-            let sealed = manifest
-                .to_sealed_bytes(&ctx.vault_cipher)
-                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
-            crate::config::secure_write(&manifest_path, &sealed)?;
-
-            // For v2 vaults, generate a new env key and add slots
-            if ctx.is_v2 {
-                use sigyn_engine::crypto::envelope;
+            // Pre-compute recipients for env key creation
+            let recipients = {
                 use sigyn_engine::identity::keygen::IdentityStore;
-
-                let mut header = ctx.header.clone();
-
-                // Determine who gets access: members with "*" in allowed_envs, plus the creator
                 let home_for_ids = crate::config::sigyn_home();
                 let id_store = IdentityStore::new(home_for_ids);
                 let identities = id_store
@@ -131,16 +117,94 @@ pub fn handle(
                         }
                     }
                 }
+                recipients
+            };
 
-                let new_env_key = envelope::rotate_env_key(
-                    &mut header,
-                    &name,
-                    &recipients,
-                    ctx.manifest.vault_id,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to create env key: {}", e))?;
+            let mut created = 0usize;
+            let mut failed = 0usize;
 
-                // Save updated header
+            for name in &names {
+                if let Err(e) = sigyn_engine::secrets::validation::validate_env_name(name) {
+                    failed += 1;
+                    crate::output::print_error(&format!("'{}': {}", name, e));
+                    continue;
+                }
+
+                if manifest.environments.contains(name) {
+                    failed += 1;
+                    crate::output::print_error(&format!("environment '{}' already exists", name));
+                    continue;
+                }
+
+                manifest.environments.push(name.clone());
+
+                {
+                    use sigyn_engine::crypto::envelope;
+
+                    let new_env_key = match envelope::rotate_env_key(
+                        &mut header,
+                        name,
+                        &recipients,
+                        ctx.manifest.vault_id,
+                    ) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            failed += 1;
+                            crate::output::print_error(&format!(
+                                "'{}': failed to create env key: {}",
+                                name, e
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let empty_env = sigyn_engine::vault::PlaintextEnv::new();
+                    let new_cipher =
+                        sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key);
+                    let encrypted =
+                        sigyn_engine::vault::env_file::encrypt_env(&empty_env, &new_cipher, name)?;
+                    sigyn_engine::vault::env_file::write_encrypted_env(
+                        &paths.env_path(&vault_name, name),
+                        &encrypted,
+                    )?;
+                }
+
+                // Audit log
+                let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+                let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &ctx.manifest.vault_id,
+                );
+                if let Ok(ac) = audit_cipher {
+                    if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                        let _ = log.append(
+                            &ctx.fingerprint,
+                            AuditAction::EnvironmentCreated { name: name.clone() },
+                            None,
+                            AuditOutcome::Success,
+                            ctx.loaded_identity.signing_key(),
+                        );
+                    }
+                }
+
+                created += 1;
+                if !is_batch {
+                    crate::output::print_success(&format!(
+                        "Created environment '{}' in vault '{}'",
+                        name, vault_name
+                    ));
+                }
+            }
+
+            // Save manifest and header once after all envs
+            let sealed = manifest
+                .to_sealed_bytes(&ctx.vault_cipher)
+                .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
+            crate::config::secure_write(&manifest_path, &sealed)?;
+
+            {
+                use sigyn_engine::crypto::envelope;
                 let signed = envelope::sign_header(
                     &header,
                     ctx.loaded_identity.signing_key(),
@@ -148,41 +212,21 @@ pub fn handle(
                 )
                 .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
                 crate::config::secure_write(&paths.members_path(&vault_name), &signed)?;
-
-                // Write empty env file with new key
-                let empty_env = sigyn_engine::vault::PlaintextEnv::new();
-                let new_cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key);
-                let encrypted =
-                    sigyn_engine::vault::env_file::encrypt_env(&empty_env, &new_cipher, &name)?;
-                sigyn_engine::vault::env_file::write_encrypted_env(
-                    &paths.env_path(&vault_name, &name),
-                    &encrypted,
-                )?;
             }
 
-            // Audit log
-            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                ctx.vault_cipher.key_bytes(),
-                b"sigyn-audit-v1",
-                &ctx.manifest.vault_id,
-            );
-            if let Ok(ac) = audit_cipher {
-                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
-                    let _ = log.append(
-                        &ctx.fingerprint,
-                        AuditAction::EnvironmentCreated { name: name.clone() },
-                        None,
-                        AuditOutcome::Success,
-                        ctx.loaded_identity.signing_key(),
-                    );
-                }
+            if is_batch {
+                println!(
+                    "{} created, {} failed",
+                    style(created).green().bold(),
+                    if failed > 0 {
+                        style(failed).red().bold()
+                    } else {
+                        style(failed).dim()
+                    }
+                );
+            } else if failed > 0 {
+                anyhow::bail!("environment creation failed");
             }
-
-            crate::output::print_success(&format!(
-                "Created environment '{}' in vault '{}'",
-                name, vault_name
-            ));
         }
         EnvCommands::Diff { from, to, reveal } => {
             let ctx = unlock_vault(identity, vault, Some(&from))?;
@@ -336,10 +380,8 @@ pub fn handle(
             let source_env = env_file::decrypt_env(&source_encrypted, source_cipher)?;
             let count = source_env.len();
 
-            // For v2, generate a new env key for the target env
-            let target_cipher;
-            let target_cipher_ref;
-            if ctx.is_v2 {
+            // Generate a new env key for the target env
+            let target_cipher = {
                 use sigyn_engine::crypto::envelope;
                 use sigyn_engine::identity::keygen::IdentityStore;
 
@@ -353,7 +395,6 @@ pub fn handle(
                     .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
 
                 let mut recipients = vec![ctx.loaded_identity.identity.encryption_pubkey.clone()];
-                // Find members who have access to source env
                 for mp in ctx.policy.members.values() {
                     let has_source = mp.allowed_envs.iter().any(|e| e == "*" || e == &source);
                     if has_source {
@@ -387,15 +428,9 @@ pub fn handle(
                 .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
                 crate::config::secure_write(&paths.members_path(&vault_name), &signed)?;
 
-                target_cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key);
-                target_cipher_ref = &target_cipher;
-            } else {
-                target_cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(
-                    *source_cipher.key_bytes(),
-                );
-                target_cipher_ref = &target_cipher;
-            }
-            let target_encrypted = env_file::encrypt_env(&source_env, target_cipher_ref, &target)?;
+                sigyn_engine::crypto::vault_cipher::VaultCipher::new(new_env_key)
+            };
+            let target_encrypted = env_file::encrypt_env(&source_env, &target_cipher, &target)?;
             let target_path = paths.env_path(&vault_name, &target);
             env_file::write_encrypted_env(&target_path, &target_encrypted)?;
 

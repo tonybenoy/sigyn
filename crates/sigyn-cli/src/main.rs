@@ -1,3 +1,4 @@
+mod agent;
 mod commands;
 mod config;
 mod doctor;
@@ -185,6 +186,11 @@ enum Commands {
         /// Shell to generate for: bash, zsh, fish, powershell
         shell: String,
     },
+    /// Manage the passphrase agent (caches decrypted keys)
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
     /// Launch interactive TUI dashboard
     Tui,
     /// Get a secret (shortcut for 'secret get')
@@ -228,6 +234,22 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Start the passphrase agent daemon
+    Start {
+        /// Key cache timeout in minutes
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Stop the agent daemon
+    Stop,
+    /// Clear cached keys (keep daemon running)
+    Lock,
+    /// Show agent status
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -341,7 +363,7 @@ fn main() -> Result<()> {
                             .interact_text()?;
                         commands::vault::handle(
                             commands::vault::VaultCommands::Create {
-                                name: name.clone(),
+                                names: vec![name.clone()],
                                 org: None,
                                 split_audit: false,
                             },
@@ -436,6 +458,20 @@ fn main() -> Result<()> {
             })?;
             generate(shell, &mut Cli::command(), "sigyn", &mut std::io::stdout());
         }
+        Commands::Agent { command } => match command {
+            AgentCommands::Start { timeout } => {
+                agent::handle_start(timeout * 60, json)?;
+            }
+            AgentCommands::Stop => {
+                agent::handle_stop()?;
+            }
+            AgentCommands::Lock => {
+                agent::handle_lock()?;
+            }
+            AgentCommands::Status => {
+                agent::handle_status(json)?;
+            }
+        },
         Commands::Tui => {
             let vault_name = cli.vault.as_deref().unwrap_or("default");
             let env_name = cli.env.as_deref().unwrap_or("default");
@@ -455,10 +491,13 @@ fn main() -> Result<()> {
             )?;
         }
         Commands::Set { key, value } => {
+            let args = match value {
+                Some(v) => vec![format!("{}={}", key, v)],
+                None => vec![key],
+            };
             commands::secret::handle(
                 commands::secret::SecretCommands::Set {
-                    key,
-                    value,
+                    args,
                     env: cli.env.clone(),
                 },
                 cli.vault.as_deref(),

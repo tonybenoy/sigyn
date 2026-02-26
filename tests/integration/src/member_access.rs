@@ -1,4 +1,8 @@
-use sigyn_engine::crypto::envelope::{add_recipient, seal_master_key, unseal_master_key};
+use std::collections::BTreeMap;
+
+use sigyn_engine::crypto::envelope::{
+    add_vault_key_recipient, seal_v2, unseal_env_key, unseal_vault_key,
+};
 use sigyn_engine::crypto::keys::{KeyFingerprint, X25519PrivateKey};
 use sigyn_engine::crypto::vault_cipher::VaultCipher;
 use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision, PolicyEngine};
@@ -18,22 +22,36 @@ fn test_multi_member_access() {
     let owner_pub = owner_key.public_key();
     let owner_fp = owner_pub.fingerprint();
 
-    // Generate a master key and seal it for the owner
-    let master_key = [0xABu8; 32];
-    let mut header = seal_master_key(&master_key, &[owner_pub.clone()], vault_id).unwrap();
+    // Generate keys and seal for the owner
+    let vault_key = [0xABu8; 32];
+    let dev_key = [0xBBu8; 32];
+
+    let mut env_keys = BTreeMap::new();
+    env_keys.insert("dev".to_string(), dev_key);
+    let mut env_recipients = BTreeMap::new();
+    env_recipients.insert("dev".to_string(), vec![owner_pub.clone()]);
+
+    let mut header = seal_v2(
+        &vault_key,
+        &env_keys,
+        &[owner_pub.clone()],
+        &env_recipients,
+        vault_id,
+    )
+    .unwrap();
 
     // Owner can unseal
-    let recovered_owner = unseal_master_key(&header, &owner_key, vault_id).unwrap();
-    assert_eq!(master_key, recovered_owner);
+    let recovered_owner = unseal_vault_key(&header, &owner_key, vault_id).unwrap();
+    assert_eq!(vault_key, recovered_owner);
 
     // 2. Create member identity
     let member_key = X25519PrivateKey::generate();
     let member_pub = member_key.public_key();
     let member_fp = member_pub.fingerprint();
 
-    // 3. Add member to envelope header
-    add_recipient(&mut header, &master_key, &member_pub, vault_id).unwrap();
-    assert_eq!(header.slots.len(), 2);
+    // 3. Add member to envelope header (vault key only — they get env access separately)
+    add_vault_key_recipient(&mut header, &vault_key, &member_pub, vault_id).unwrap();
+    assert_eq!(header.vault_key_slots.len(), 2);
 
     // 4. Add member to policy with ReadOnly role
     let mut policy = VaultPolicy::new();
@@ -41,9 +59,9 @@ fn test_multi_member_access() {
 
     let engine = PolicyEngine::new(&policy, &owner_fp);
 
-    // 5. Verify member can unseal master key
-    let recovered_member = unseal_master_key(&header, &member_key, vault_id).unwrap();
-    assert_eq!(master_key, recovered_member);
+    // 5. Verify member can unseal vault key
+    let recovered_member = unseal_vault_key(&header, &member_key, vault_id).unwrap();
+    assert_eq!(vault_key, recovered_member);
 
     // 6. Verify member can read secrets (policy engine returns Allow)
     let read_request = AccessRequest {
@@ -51,7 +69,6 @@ fn test_multi_member_access() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
-
         mfa_verified: false,
     };
     assert_eq!(
@@ -65,7 +82,6 @@ fn test_multi_member_access() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
-
         mfa_verified: false,
     };
     assert!(matches!(
@@ -79,7 +95,6 @@ fn test_multi_member_access() {
         action: AccessAction::Delete,
         env: "dev".into(),
         key: Some("DATABASE_URL".into()),
-
         mfa_verified: false,
     };
     assert!(matches!(
@@ -93,7 +108,6 @@ fn test_multi_member_access() {
         action: AccessAction::ManageMembers,
         env: "dev".into(),
         key: None,
-
         mfa_verified: false,
     };
     assert!(matches!(
@@ -116,7 +130,6 @@ fn test_multi_member_access() {
             action,
             env: "prod".into(),
             key: Some("ANYTHING".into()),
-
             mfa_verified: false,
         };
         assert_eq!(
@@ -142,7 +155,6 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: Some("API_KEY".into()),
-
         mfa_verified: false,
     };
     assert_eq!(engine.evaluate(&read_req).unwrap(), PolicyDecision::Allow);
@@ -153,7 +165,6 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::Write,
         env: "dev".into(),
         key: Some("API_KEY".into()),
-
         mfa_verified: false,
     };
     assert_eq!(engine.evaluate(&write_req).unwrap(), PolicyDecision::Allow);
@@ -164,7 +175,6 @@ fn test_contributor_can_read_and_write() {
         action: AccessAction::ManageMembers,
         env: "dev".into(),
         key: None,
-
         mfa_verified: false,
     };
     assert!(matches!(
@@ -192,7 +202,6 @@ fn test_env_restriction() {
         action: AccessAction::Read,
         env: "dev".into(),
         key: None,
-
         mfa_verified: false,
     };
     assert_eq!(engine.evaluate(&dev_req).unwrap(), PolicyDecision::Allow);
@@ -203,7 +212,6 @@ fn test_env_restriction() {
         action: AccessAction::Read,
         env: "prod".into(),
         key: None,
-
         mfa_verified: false,
     };
     assert!(matches!(
@@ -218,14 +226,28 @@ fn test_member_can_decrypt_actual_secrets() {
     let owner_key = X25519PrivateKey::generate();
     let member_key = X25519PrivateKey::generate();
 
-    let master_key = [0xFFu8; 32];
-    let mut header = seal_master_key(&master_key, &[owner_key.public_key()], vault_id).unwrap();
+    let vault_key = [0xFFu8; 32];
+    let dev_key = [0xEEu8; 32];
 
-    // Add member to envelope
-    add_recipient(&mut header, &master_key, &member_key.public_key(), vault_id).unwrap();
+    let mut env_keys = BTreeMap::new();
+    env_keys.insert("dev".to_string(), dev_key);
+    let mut env_recipients = BTreeMap::new();
+    env_recipients.insert(
+        "dev".to_string(),
+        vec![owner_key.public_key(), member_key.public_key()],
+    );
 
-    // Create and encrypt secrets
-    let cipher = VaultCipher::new(master_key);
+    let header = seal_v2(
+        &vault_key,
+        &env_keys,
+        &[owner_key.public_key(), member_key.public_key()],
+        &env_recipients,
+        vault_id,
+    )
+    .unwrap();
+
+    // Create and encrypt secrets with the env key
+    let cipher = VaultCipher::new(dev_key);
     let fp = owner_key.public_key().fingerprint();
     let mut env = PlaintextEnv::new();
     env.set(
@@ -236,11 +258,11 @@ fn test_member_can_decrypt_actual_secrets() {
 
     let encrypted = encrypt_env(&env, &cipher, "dev").unwrap();
 
-    // Member unseals the master key and creates their own cipher to decrypt
-    let member_mk = unseal_master_key(&header, &member_key, vault_id).unwrap();
-    assert_eq!(member_mk, master_key);
+    // Member unseals the env key and creates their own cipher to decrypt
+    let member_dev = unseal_env_key(&header, "dev", &member_key, vault_id).unwrap();
+    assert_eq!(member_dev, dev_key);
 
-    let member_cipher = VaultCipher::new(member_mk);
+    let member_cipher = VaultCipher::new(member_dev);
     let decrypted = decrypt_env(&encrypted, &member_cipher).unwrap();
     assert_eq!(
         decrypted.get("SECRET_KEY").unwrap().value,
