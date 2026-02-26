@@ -214,9 +214,14 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;
             crate::config::secure_write(&hierarchy_paths.members_path(&org_path), &signed_header)?;
 
-            // Write empty policy
+            // Write empty signed policy
             let policy = VaultPolicy::new();
-            policy.save_encrypted(&hierarchy_paths.policy_path(&org_path), &master_cipher)?;
+            policy.save_signed(
+                &hierarchy_paths.policy_path(&org_path),
+                &master_cipher,
+                loaded.signing_key(),
+                &node_id,
+            )?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -285,7 +290,12 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 )?;
 
                 let policy = VaultPolicy::new();
-                policy.save_encrypted(&hierarchy_paths.policy_path(&child_path), &master_cipher)?;
+                policy.save_signed(
+                    &hierarchy_paths.policy_path(&child_path),
+                    &master_cipher,
+                    loaded.signing_key(),
+                    &node_id,
+                )?;
 
                 // Update parent's children list
                 parent_manifest.children.push(ChildRef {
@@ -454,19 +464,25 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 }
 
                 let loaded = load_identity(&store, identity)?;
-                let content = std::fs::read_to_string(&manifest_path)?;
-                let manifest = NodeManifest::from_toml(&content)?;
+                let manifest = load_org_manifest(&manifest_path)?;
 
-                // Unseal to read policy
+                // Unseal to read policy (verify header signature)
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_engine::crypto::EnvelopeHeader =
-                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
-                        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+                let header = envelope::verify_and_load_header(
+                    &header_bytes,
+                    manifest.node_id,
+                    &loaded.identity.signing_pubkey,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
-                let policy =
-                    VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
+                let policy = VaultPolicy::load_signed(
+                    &hierarchy_paths.policy_path(&org_path),
+                    &cipher,
+                    &loaded.identity.signing_pubkey,
+                    &manifest.node_id,
+                )?;
 
                 if json {
                     let members: Vec<_> = policy
@@ -518,28 +534,39 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 }
 
                 let loaded = load_identity(&store, identity)?;
-                let content = std::fs::read_to_string(&manifest_path)?;
-                let manifest = NodeManifest::from_toml(&content)?;
+                let manifest = load_org_manifest(&manifest_path)?;
 
                 let role = sigyn_engine::policy::Role::from_str_name(&role)
                     .ok_or_else(|| anyhow::anyhow!("unknown role: use readonly, auditor, operator, contributor, manager, admin, owner"))?;
 
                 let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
-                // Unseal to modify policy
+                // Unseal to modify policy (verify header signature)
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_engine::crypto::EnvelopeHeader =
-                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
-                        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+                let header = envelope::verify_and_load_header(
+                    &header_bytes,
+                    manifest.node_id,
+                    &loaded.identity.signing_pubkey,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
-                let mut policy =
-                    VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
+                let mut policy = VaultPolicy::load_signed(
+                    &hierarchy_paths.policy_path(&org_path),
+                    &cipher,
+                    &loaded.identity.signing_pubkey,
+                    &manifest.node_id,
+                )?;
 
                 let member = sigyn_engine::policy::MemberPolicy::new(fp.clone(), role);
                 policy.add_member(member);
-                policy.save_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
+                policy.save_signed(
+                    &hierarchy_paths.policy_path(&org_path),
+                    &cipher,
+                    loaded.signing_key(),
+                    &manifest.node_id,
+                )?;
 
                 if json {
                     crate::output::print_json(&serde_json::json!({
@@ -565,25 +592,36 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 }
 
                 let loaded = load_identity(&store, identity)?;
-                let content = std::fs::read_to_string(&manifest_path)?;
-                let manifest = NodeManifest::from_toml(&content)?;
+                let manifest = load_org_manifest(&manifest_path)?;
 
                 let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
                 let header_bytes = std::fs::read(hierarchy_paths.members_path(&org_path))?;
-                let header: sigyn_engine::crypto::EnvelopeHeader =
-                    sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
-                        .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+                let header = envelope::verify_and_load_header(
+                    &header_bytes,
+                    manifest.node_id,
+                    &loaded.identity.signing_pubkey,
+                )
+                .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                 let master_key =
                     envelope::unseal_vault_key(&header, loaded.encryption_key(), manifest.node_id)?;
                 let cipher = VaultCipher::new(master_key);
-                let mut policy =
-                    VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
+                let mut policy = VaultPolicy::load_signed(
+                    &hierarchy_paths.policy_path(&org_path),
+                    &cipher,
+                    &loaded.identity.signing_pubkey,
+                    &manifest.node_id,
+                )?;
 
                 if policy.remove_member(&fp).is_none() {
                     anyhow::bail!("member {} not found at '{}'", fingerprint, path);
                 }
-                policy.save_encrypted(&hierarchy_paths.policy_path(&org_path), &cipher)?;
+                policy.save_signed(
+                    &hierarchy_paths.policy_path(&org_path),
+                    &cipher,
+                    loaded.signing_key(),
+                    &manifest.node_id,
+                )?;
 
                 if json {
                     crate::output::print_json(&serde_json::json!({
@@ -622,17 +660,24 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     let manifest = load_org_manifest(&mp)?;
 
                     let header_bytes = std::fs::read(hierarchy_paths.members_path(cp))?;
-                    let header: sigyn_engine::crypto::EnvelopeHeader =
-                        sigyn_engine::crypto::envelope::extract_header_unverified(&header_bytes)
-                            .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
+                    let header = envelope::verify_and_load_header(
+                        &header_bytes,
+                        manifest.node_id,
+                        &loaded.identity.signing_pubkey,
+                    )
+                    .map_err(|e| anyhow::anyhow!("failed to verify header: {}", e))?;
                     let master_key = envelope::unseal_vault_key(
                         &header,
                         loaded.encryption_key(),
                         manifest.node_id,
                     )?;
                     let cipher = VaultCipher::new(master_key);
-                    let policy =
-                        VaultPolicy::load_encrypted(&hierarchy_paths.policy_path(cp), &cipher)?;
+                    let policy = VaultPolicy::load_signed(
+                        &hierarchy_paths.policy_path(cp),
+                        &cipher,
+                        &loaded.identity.signing_pubkey,
+                        &manifest.node_id,
+                    )?;
 
                     levels.push((cp.as_str(), manifest.owner.clone(), policy));
                 }

@@ -6,8 +6,23 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{Result, SigynError};
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct KeyFingerprint(pub [u8; 16]);
+
+impl PartialEq for KeyFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl Eq for KeyFingerprint {}
+
+impl std::hash::Hash for KeyFingerprint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 impl KeyFingerprint {
     pub fn from_pubkey(pubkey: &X25519PublicKey) -> Self {
@@ -119,8 +134,12 @@ pub struct SigningKeyPair {
 
 impl Drop for SigningKeyPair {
     fn drop(&mut self) {
-        // Overwrite private key material with zeros on drop
-        self.signing_key = SigningKey::from_bytes(&[0u8; 32]);
+        // ed25519-dalek SigningKey implements ZeroizeOnDrop, so replacement
+        // with a zeroed key ensures the original key material is overwritten
+        // immediately rather than waiting for the inner drop.
+        let zero_key = SigningKey::from_bytes(&[0u8; 32]);
+        // Overwrite in place by swapping
+        let _ = std::mem::replace(&mut self.signing_key, zero_key);
     }
 }
 

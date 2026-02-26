@@ -1,9 +1,51 @@
 use std::path::{Path, PathBuf};
 
 use sigyn_core::crypto::sealed::{derive_file_cipher, is_sealed, sealed_decrypt, sealed_encrypt};
+use sigyn_core::error::SigynError;
 
 const ORG_LINK_HKDF_CONTEXT: &[u8] = b"sigyn-org-link-v1";
 const ORG_LINK_AAD: &[u8] = b".org_link";
+
+/// Validate a vault or environment name.
+///
+/// Rejects: empty, >64 chars, starts with `.`, contains `/` `\` `..` or NUL,
+/// and any character outside `[a-zA-Z0-9\-_]`.
+pub fn validate_name(name: &str, kind: &str) -> crate::Result<()> {
+    if name.is_empty() {
+        return Err(SigynError::InvalidName(format!(
+            "{} name cannot be empty",
+            kind
+        )));
+    }
+    if name.len() > 64 {
+        return Err(SigynError::InvalidName(format!(
+            "{} name exceeds 64 characters",
+            kind
+        )));
+    }
+    if name.starts_with('.') {
+        return Err(SigynError::InvalidName(format!(
+            "{} name cannot start with '.'",
+            kind
+        )));
+    }
+    if name.contains("..") {
+        return Err(SigynError::InvalidName(format!(
+            "{} name cannot contain '..'",
+            kind
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(SigynError::InvalidName(format!(
+            "{} name may only contain [a-zA-Z0-9-_]",
+            kind
+        )));
+    }
+    Ok(())
+}
 
 pub struct VaultPaths {
     base: PathBuf,
@@ -73,6 +115,10 @@ impl VaultPaths {
 
     pub fn lock_path(&self, name: &str) -> PathBuf {
         self.vault_dir(name).join(".lock")
+    }
+
+    pub fn checkpoint_path(&self, name: &str) -> PathBuf {
+        self.vault_dir(name).join("audit.checkpoint")
     }
 
     pub fn list_vaults(&self) -> crate::Result<Vec<String>> {
@@ -238,6 +284,48 @@ mod tests {
             paths.lock_path("v1"),
             PathBuf::from("/base/vaults/v1/.lock")
         );
+    }
+
+    #[test]
+    fn test_validate_name_valid() {
+        assert!(validate_name("my-vault_1", "vault").is_ok());
+        assert!(validate_name("a", "vault").is_ok());
+        assert!(validate_name("A-B_c-123", "env").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_empty() {
+        assert!(validate_name("", "vault").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_too_long() {
+        let long = "a".repeat(65);
+        assert!(validate_name(&long, "vault").is_err());
+        let exact = "a".repeat(64);
+        assert!(validate_name(&exact, "vault").is_ok());
+    }
+
+    #[test]
+    fn test_validate_name_dot_prefix() {
+        assert!(validate_name(".hidden", "vault").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_path_traversal() {
+        assert!(validate_name("../etc", "vault").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_slash() {
+        assert!(validate_name("foo/bar", "vault").is_err());
+        assert!(validate_name("foo\\bar", "vault").is_err());
+    }
+
+    #[test]
+    fn test_validate_name_special_chars() {
+        assert!(validate_name("foo bar", "vault").is_err());
+        assert!(validate_name("foo.bar", "vault").is_err());
     }
 
     #[test]

@@ -574,8 +574,12 @@ pub fn handle(
                     .to_sealed_bytes(&new_vault_cipher)
                     .map_err(|e| anyhow::anyhow!("failed to seal manifest: {}", e))?;
                 crate::config::secure_write(&manifest_path, &sealed)?;
-                policy
-                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &new_vault_cipher)?;
+                policy.save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &new_vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )?;
 
                 // Save header
                 let signed = envelope::sign_header(

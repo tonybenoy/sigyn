@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3171,6 +3171,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "toml",
  "uuid",
@@ -3180,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3194,6 +3195,7 @@ dependencies = [
  "fd-lock",
  "git2",
  "globset",
+ "hex",
  "hkdf",
  "indexmap",
  "openssl-sys",
@@ -3228,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-recovery"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",

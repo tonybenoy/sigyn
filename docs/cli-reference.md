@@ -19,6 +19,7 @@ These flags can be used with any subcommand:
 | `--quiet` | | Suppress non-essential output |
 | `--dry-run` | | Preview changes without applying |
 | `--verbose` | | Show detailed config resolution and debug output |
+| `--no-project-config` | | Skip loading `.sigyn.toml` project config |
 
 **Resolution priority:** CLI flags > `~/.sigyn/context.toml` > `.sigyn.toml` (project dir) > `~/.sigyn/project.toml` > `~/.sigyn/config.toml` > defaults.
 
@@ -76,7 +77,7 @@ sigyn get API_KEY -e prod --json
 
 | Flag | Short | Description |
 |---|---|---|
-| `--copy` | `-c` | Copy value to clipboard instead of printing |
+| `--copy` | `-c` | Copy value to clipboard instead of printing (auto-clears after 30s) |
 
 Uses the global `--env` / `-e` flag for environment selection.
 
@@ -183,6 +184,8 @@ Creates the vault directory with `vault.toml`, `members.cbor`, `policy.cbor`, de
 environments (dev, staging, prod), and an audit log. After creation, Sigyn prints
 suggested next steps and offers to create a `.sigyn.toml` project config in the
 current directory (interactive terminals only, single vault only).
+
+**Naming rules:** Vault and environment names must be 1-64 characters, contain only `[a-zA-Z0-9-_]`, and cannot start with `.` or contain `..`.
 
 ### vault list
 
@@ -1365,6 +1368,10 @@ sigyn notification list --json
 Self-update to the latest release. Downloads the appropriate binary for the current
 platform and verifies the SHA-256 checksum before replacing the running binary.
 The update will abort if the checksum file cannot be downloaded or verification fails.
+
+**Security hardening:** HTTP requests have connect (10s) and total (120s) timeouts.
+Archives exceeding 100 MiB are rejected. Tar entries with path traversal (`..`) are
+blocked. Temp files use random names to prevent symlink attacks.
 
 ```bash
 sigyn update

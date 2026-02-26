@@ -3,6 +3,59 @@ use std::path::PathBuf;
 use super::state::{SyncState, SyncStatus};
 use crate::error::{Result, SigynError};
 
+/// Sidecar commit signature file name.
+const COMMIT_SIG_FILE: &str = ".sigyn-commit-sig";
+
+/// Sign a commit OID with Ed25519 and write the sidecar signature file.
+pub fn sign_commit(
+    vault_path: &std::path::Path,
+    oid: &str,
+    signing_key: &sigyn_core::crypto::keys::SigningKeyPair,
+) -> Result<()> {
+    let hash = blake3::hash(oid.as_bytes());
+    let signature = signing_key.sign(hash.as_bytes());
+    let sig_data = serde_json::json!({
+        "oid": oid,
+        "signature": hex::encode(&signature),
+    });
+    let path = vault_path.join(COMMIT_SIG_FILE);
+    let content = serde_json::to_string_pretty(&sig_data)
+        .map_err(|e| SigynError::Serialization(e.to_string()))?;
+    crate::io::atomic_write(&path, content.as_bytes())
+}
+
+/// Verify a sidecar commit signature. Returns `Ok(())` if valid.
+/// Missing signature file is an error.
+pub fn verify_commit_sig(
+    vault_path: &std::path::Path,
+    oid: &str,
+    verifying_key: &sigyn_core::crypto::keys::VerifyingKeyWrapper,
+) -> Result<()> {
+    let path = vault_path.join(COMMIT_SIG_FILE);
+    if !path.exists() {
+        return Err(SigynError::SignatureVerification);
+    }
+    let data = std::fs::read_to_string(&path)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| SigynError::Deserialization(e.to_string()))?;
+
+    let stored_oid = parsed["oid"]
+        .as_str()
+        .ok_or_else(|| SigynError::Deserialization("missing oid in commit sig".into()))?;
+    if stored_oid != oid {
+        return Err(SigynError::SignatureVerification);
+    }
+
+    let sig_hex = parsed["signature"]
+        .as_str()
+        .ok_or_else(|| SigynError::Deserialization("missing signature in commit sig".into()))?;
+    let sig_bytes = hex::decode(sig_hex)
+        .map_err(|e| SigynError::Deserialization(format!("invalid signature hex: {}", e)))?;
+
+    let hash = blake3::hash(oid.as_bytes());
+    verifying_key.verify(hash.as_bytes(), &sig_bytes)
+}
+
 fn make_callbacks() -> git2::RemoteCallbacks<'static> {
     let mut cb = git2::RemoteCallbacks::new();
     cb.credentials(|_url, username, allowed| {
@@ -440,6 +493,27 @@ mod tests {
 
         assert_ne!(oid1, oid2);
         assert!(!engine.has_changes().unwrap());
+    }
+
+    #[test]
+    fn test_sign_verify_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let kp = sigyn_core::crypto::keys::SigningKeyPair::generate();
+        let vk = kp.verifying_key();
+
+        sign_commit(dir.path(), "abc123", &kp).unwrap();
+        assert!(verify_commit_sig(dir.path(), "abc123", &vk).is_ok());
+        // Wrong OID should fail
+        assert!(verify_commit_sig(dir.path(), "wrong", &vk).is_err());
+    }
+
+    #[test]
+    fn test_verify_missing_sig_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let kp = sigyn_core::crypto::keys::SigningKeyPair::generate();
+        let vk = kp.verifying_key();
+        // Missing signature file should be an error
+        assert!(verify_commit_sig(dir.path(), "abc", &vk).is_err());
     }
 
     #[test]

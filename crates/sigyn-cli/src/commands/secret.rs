@@ -216,7 +216,7 @@ pub fn unlock_vault(
     if vault_name.is_none() {
         if let Some(pv) = project_settings.and_then(|p| p.vault.as_deref()) {
             eprintln!(
-                "{} using vault '{}' from .sigyn.toml",
+                "{} Using vault '{}' from .sigyn.toml (override with --vault or --no-project-config)",
                 style("note:").cyan().bold(),
                 pv
             );
@@ -262,7 +262,7 @@ pub fn unlock_vault(
     if env_name.is_none() {
         if let Some(pe) = project_settings.and_then(|p| p.env.as_deref()) {
             eprintln!(
-                "{} using env '{}' from .sigyn.toml",
+                "{} Using env '{}' from .sigyn.toml (override with --env or --no-project-config)",
                 style("note:").cyan().bold(),
                 pe
             );
@@ -279,7 +279,7 @@ pub fn unlock_vault(
     if identity_name.is_none() {
         if let Some(ref pi) = identity_from_project {
             eprintln!(
-                "{} using identity '{}' from .sigyn.toml",
+                "{} Using identity '{}' from .sigyn.toml (override with --identity or --no-project-config)",
                 style("note:").cyan().bold(),
                 pi
             );
@@ -441,8 +441,13 @@ pub fn unlock_vault(
     let env_name = resolve_env_name(&env_name, &manifest)?;
 
     // Load policy (returns empty policy if file doesn't exist)
-    let policy = VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &vault_cipher)
-        .unwrap_or_default();
+    let policy = VaultPolicy::load_signed(
+        &paths.policy_path(&vault_name),
+        &vault_cipher,
+        &loaded.identity.signing_pubkey,
+        &manifest.vault_id,
+    )
+    .unwrap_or_default();
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();
@@ -511,34 +516,31 @@ pub fn check_access(
                     continue;
                 }
                 if let Ok(manifest) = super::org::load_org_manifest_path(&mp) {
-                    {
-                        let members_p = hierarchy_paths.members_path(cp);
-                        if members_p.exists() {
-                            if let Ok(hdr_bytes) = std::fs::read(&members_p) {
-                                // Use extract_header_unverified for org hierarchy headers
-                                // (the owner's signing key may not be locally available)
-                                if let Ok(header) = envelope::extract_header_unverified(&hdr_bytes)
-                                {
-                                    if let Ok(mk) = envelope::unseal_vault_key(
-                                        &header,
-                                        ctx.loaded_identity.encryption_key(),
-                                        manifest.node_id,
+                    let members_p = hierarchy_paths.members_path(cp);
+                    if members_p.exists() {
+                        if let Ok(hdr_bytes) = std::fs::read(&members_p) {
+                            if let Ok(header) = envelope::verify_and_load_header(
+                                &hdr_bytes,
+                                manifest.node_id,
+                                &ctx.loaded_identity.identity.signing_pubkey,
+                            ) {
+                                if let Ok(mk) = envelope::unseal_vault_key(
+                                    &header,
+                                    ctx.loaded_identity.encryption_key(),
+                                    manifest.node_id,
+                                ) {
+                                    let cipher =
+                                        sigyn_engine::crypto::vault_cipher::VaultCipher::new(mk);
+                                    if let Ok(policy) = VaultPolicy::load_signed(
+                                        &hierarchy_paths.policy_path(cp),
+                                        &cipher,
+                                        &ctx.loaded_identity.identity.signing_pubkey,
+                                        &manifest.node_id,
                                     ) {
-                                        let cipher =
-                                            sigyn_engine::crypto::vault_cipher::VaultCipher::new(
-                                                mk,
-                                            );
-                                        if let Ok(policy) = VaultPolicy::load_encrypted(
-                                            &hierarchy_paths.policy_path(cp),
-                                            &cipher,
-                                        ) {
-                                            chain.push(
-                                                sigyn_engine::hierarchy::engine::PolicyLevel {
-                                                    owner: manifest.owner.clone(),
-                                                    policy,
-                                                },
-                                            );
-                                        }
+                                        chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
+                                            owner: manifest.owner.clone(),
+                                            policy,
+                                        });
                                     }
                                 }
                             }
@@ -837,6 +839,15 @@ pub fn handle(
                 clipboard
                     .set_text(&value)
                     .map_err(|e| anyhow::anyhow!("failed to copy to clipboard: {}", e))?;
+
+                // Spawn background thread to clear clipboard after 30 seconds
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text("");
+                    }
+                });
+
                 if json {
                     crate::output::print_json(&serde_json::json!({
                         "key": key,
@@ -845,7 +856,7 @@ pub fn handle(
                     }))?;
                 } else {
                     eprintln!(
-                        "{} Copied '{}' to clipboard",
+                        "{} Copied '{}' to clipboard (clears in 30s)",
                         style("\u{2713}").green().bold(),
                         key
                     );

@@ -21,6 +21,7 @@ sha2.workspace = true
 argon2.workspace = true
 blake3.workspace = true
 zeroize.workspace = true
+subtle.workspace = true
 secrecy.workspace = true
 rand.workspace = true
 

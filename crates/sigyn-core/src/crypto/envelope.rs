@@ -4,7 +4,7 @@ use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::keys::{KeyFingerprint, X25519PrivateKey, X25519PublicKey};
 use crate::error::{Result, SigynError};
@@ -131,7 +131,7 @@ fn make_slot(
     let ephemeral = X25519PrivateKey::generate();
     let ephemeral_pub = ephemeral.public_key();
     let mut shared = ephemeral.diffie_hellman(pubkey);
-    let slot_key = derive_slot_key(&shared, vault_id)?;
+    let slot_key = Zeroizing::new(derive_slot_key(&shared, vault_id)?);
     shared.zeroize();
     let encrypted = encrypt_slot(key, &slot_key, aad)?;
     Ok(RecipientSlot {
@@ -189,7 +189,7 @@ pub fn unseal_vault_key(
     for slot in &header.vault_key_slots {
         if slot.fingerprint == my_fp {
             let mut shared = private_key.diffie_hellman(&slot.ephemeral_pubkey);
-            let slot_key = derive_slot_key(&shared, &vault_id)?;
+            let slot_key = Zeroizing::new(derive_slot_key(&shared, &vault_id)?);
             shared.zeroize();
             let aad = slot_aad(&slot.fingerprint, &vault_id);
             return decrypt_slot(&slot.encrypted_master_key, &slot_key, &aad);
@@ -213,7 +213,7 @@ pub fn unseal_env_key(
     for slot in slots {
         if slot.fingerprint == my_fp {
             let mut shared = private_key.diffie_hellman(&slot.ephemeral_pubkey);
-            let slot_key = derive_slot_key(&shared, &vault_id)?;
+            let slot_key = Zeroizing::new(derive_slot_key(&shared, &vault_id)?);
             shared.zeroize();
             let aad = env_slot_aad(&slot.fingerprint, &vault_id, env_name);
             return decrypt_slot(&slot.encrypted_master_key, &slot_key, &aad);

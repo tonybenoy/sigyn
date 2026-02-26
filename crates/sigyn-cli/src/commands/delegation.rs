@@ -245,22 +245,14 @@ pub fn handle(
 
             let allowed_envs: Vec<String> = envs.split(',').map(|s| s.trim().to_string()).collect();
 
-            // Enforce delegation depth and delegatee limits
-            if let Some(delegator) = ctx.policy.get_member(&ctx.fingerprint) {
-                if delegator.max_delegation_depth == 0 {
-                    anyhow::bail!("you have reached the maximum delegation depth (0 remaining)");
-                }
-                let current_delegatees = ctx
-                    .policy
-                    .members()
-                    .filter(|m| m.delegated_by.as_ref() == Some(&ctx.fingerprint))
-                    .count();
-                if current_delegatees as u32 >= delegator.max_delegatees {
-                    anyhow::bail!(
-                        "you have reached the maximum number of delegatees ({})",
-                        delegator.max_delegatees
-                    );
-                }
+            // Enforce delegation depth, delegatee limits, and role level (non-owners only)
+            if ctx.fingerprint != ctx.manifest.owner {
+                sigyn_engine::delegation::validate_delegation(
+                    &ctx.policy,
+                    &ctx.fingerprint,
+                    role_enum,
+                )
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             }
 
             // Build the member policy
@@ -332,7 +324,12 @@ pub fn handle(
 
             // Save policy and header
             policy
-                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &ctx.vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             save_header(
                 &header,
@@ -703,7 +700,12 @@ pub fn handle(
 
             // Save policy and header once after all revocations
             policy
-                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &ctx.vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             save_header(
                 &header,
@@ -928,7 +930,12 @@ pub fn handle(
             }
 
             policy
-                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &ctx.vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             save_header(
                 &header,
@@ -950,7 +957,7 @@ pub fn handle(
                 println!(
                     "\n{} granted env '{}', {} failed",
                     style(granted).green().bold(),
-                    env,
+                    &env,
                     if failed > 0 {
                         style(failed).red().bold()
                     } else {
@@ -1071,7 +1078,12 @@ pub fn handle(
             }
 
             policy
-                .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
+                .save_signed(
+                    &ctx.paths.policy_path(&ctx.vault_name),
+                    &ctx.vault_cipher,
+                    ctx.loaded_identity.signing_key(),
+                    &ctx.manifest.vault_id,
+                )
                 .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             save_header(
                 &header,

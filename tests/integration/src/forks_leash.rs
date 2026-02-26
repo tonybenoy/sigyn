@@ -1,5 +1,5 @@
 use sigyn_engine::crypto::envelope;
-use sigyn_engine::crypto::keys::{KeyFingerprint, X25519PrivateKey};
+use sigyn_engine::crypto::keys::{KeyFingerprint, SigningKeyPair, X25519PrivateKey};
 use sigyn_engine::crypto::vault_cipher::VaultCipher;
 use sigyn_engine::forks::leash::{create_leashed_fork, create_unleashed_fork};
 use sigyn_engine::forks::types::{ForkMode, ForkSharingPolicy, ForkStatus};
@@ -16,11 +16,13 @@ fn setup_parent_vault(
     VaultManifest,
     X25519PrivateKey,
     KeyFingerprint,
+    SigningKeyPair,
 ) {
     let paths = VaultPaths::new(dir.to_path_buf());
     let owner_key = X25519PrivateKey::generate();
     let owner_pubkey = owner_key.public_key();
     let fp = owner_pubkey.fingerprint();
+    let signing_key = SigningKeyPair::generate();
 
     let manifest = VaultManifest::new("parent".to_string(), fp.clone());
     let vault_id = manifest.vault_id;
@@ -39,9 +41,8 @@ fn setup_parent_vault(
     std::fs::create_dir_all(paths.env_dir("parent")).unwrap();
     std::fs::write(paths.manifest_path("parent"), manifest.to_toml().unwrap()).unwrap();
 
-    let mut header_bytes = Vec::new();
-    ciborium::into_writer(&header, &mut header_bytes).unwrap();
-    std::fs::write(paths.members_path("parent"), header_bytes).unwrap();
+    let signed_header = envelope::sign_header(&header, &signing_key, vault_id).unwrap();
+    std::fs::write(paths.members_path("parent"), signed_header).unwrap();
 
     // Create env files with a secret
     let mut env = PlaintextEnv::new();
@@ -55,19 +56,24 @@ fn setup_parent_vault(
         env_file::write_encrypted_env(&paths.env_path("parent", env_name), &encrypted).unwrap();
     }
 
-    // Save policy
+    // Save signed policy
     let policy = sigyn_engine::policy::storage::VaultPolicy::new();
     policy
-        .save_encrypted(&paths.policy_path("parent"), &cipher)
+        .save_signed(
+            &paths.policy_path("parent"),
+            &cipher,
+            &signing_key,
+            &vault_id,
+        )
         .unwrap();
 
-    (paths, cipher, manifest, owner_key, fp)
+    (paths, cipher, manifest, owner_key, fp, signing_key)
 }
 
 #[test]
 fn test_create_leashed_fork() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
     let parent_admin = X25519PrivateKey::generate();
@@ -82,6 +88,7 @@ fn test_create_leashed_fork() {
         &fork_owner.public_key(),
         &parent_admin.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
@@ -104,7 +111,7 @@ fn test_create_leashed_fork() {
 #[test]
 fn test_create_unleashed_fork() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
 
@@ -117,6 +124,7 @@ fn test_create_unleashed_fork() {
         &manifest,
         &fork_owner.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
@@ -131,7 +139,7 @@ fn test_create_unleashed_fork() {
 #[test]
 fn test_leashed_fork_preserves_secrets() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
     let parent_admin = X25519PrivateKey::generate();
@@ -146,6 +154,7 @@ fn test_leashed_fork_preserves_secrets() {
         &fork_owner.public_key(),
         &parent_admin.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
@@ -164,12 +173,12 @@ fn test_leashed_fork_preserves_secrets() {
 #[test]
 fn test_leashed_fork_has_two_slots() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
     let parent_admin = X25519PrivateKey::generate();
 
-    let _fork = create_leashed_fork(
+    let fork = create_leashed_fork(
         &paths,
         "parent",
         "dual-access-fork",
@@ -179,13 +188,18 @@ fn test_leashed_fork_has_two_slots() {
         &fork_owner.public_key(),
         &parent_admin.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
-    // Read the fork's envelope header
+    // Read the fork's signed envelope header
     let header_bytes = std::fs::read(paths.members_path("dual-access-fork")).unwrap();
-    let header: sigyn_engine::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice()).unwrap();
+    let header = envelope::verify_and_load_header(
+        &header_bytes,
+        fork.fork_vault_id,
+        &signing_key.verifying_key(),
+    )
+    .unwrap();
 
     // Leashed fork should have 2 vault_key_slots (fork owner + parent admin)
     assert_eq!(header.vault_key_slots.len(), 2);
@@ -205,11 +219,11 @@ fn test_leashed_fork_has_two_slots() {
 #[test]
 fn test_unleashed_fork_has_single_slot() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
 
-    let _fork = create_unleashed_fork(
+    let fork = create_unleashed_fork(
         &paths,
         "parent",
         "solo-fork",
@@ -218,12 +232,17 @@ fn test_unleashed_fork_has_single_slot() {
         &manifest,
         &fork_owner.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
     let header_bytes = std::fs::read(paths.members_path("solo-fork")).unwrap();
-    let header: sigyn_engine::crypto::EnvelopeHeader =
-        ciborium::from_reader(header_bytes.as_slice()).unwrap();
+    let header = envelope::verify_and_load_header(
+        &header_bytes,
+        fork.fork_vault_id,
+        &signing_key.verifying_key(),
+    )
+    .unwrap();
 
     // Unleashed fork should have only 1 vault_key_slot (fork owner only)
     assert_eq!(header.vault_key_slots.len(), 1);
@@ -236,7 +255,7 @@ fn test_unleashed_fork_has_single_slot() {
 #[test]
 fn test_fork_duplicate_name_fails() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
 
@@ -249,6 +268,7 @@ fn test_fork_duplicate_name_fails() {
         &manifest,
         &fork_owner.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 
@@ -262,6 +282,7 @@ fn test_fork_duplicate_name_fails() {
         &manifest,
         &fork_owner.public_key(),
         &fp,
+        &signing_key,
     );
     assert!(result.is_err());
 }
@@ -269,7 +290,7 @@ fn test_fork_duplicate_name_fails() {
 #[test]
 fn test_fork_ids_differ() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, cipher, manifest, _owner_key, fp) = setup_parent_vault(dir.path());
+    let (paths, cipher, manifest, _owner_key, fp, signing_key) = setup_parent_vault(dir.path());
 
     let fork_owner = X25519PrivateKey::generate();
 
@@ -282,6 +303,7 @@ fn test_fork_ids_differ() {
         &manifest,
         &fork_owner.public_key(),
         &fp,
+        &signing_key,
     )
     .unwrap();
 

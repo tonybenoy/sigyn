@@ -64,6 +64,10 @@ struct Cli {
     /// Show detailed config resolution and debug output
     #[arg(long, global = true)]
     verbose: bool,
+
+    /// Skip loading project config (.sigyn.toml)
+    #[arg(long, global = true)]
+    no_project_config: bool,
 }
 
 #[derive(Subcommand)]
@@ -258,6 +262,9 @@ fn main() -> Result<()> {
 
     if cli.verbose {
         std::env::set_var("SIGYN_VERBOSE", "1");
+    }
+    if cli.no_project_config {
+        std::env::set_var("SIGYN_NO_PROJECT_CONFIG", "1");
     }
 
     match cli.command {

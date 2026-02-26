@@ -120,7 +120,12 @@ fn create_single_vault(
     crate::config::secure_write(&paths.members_path(name), &signed_header)?;
 
     let policy = sigyn_engine::policy::storage::VaultPolicy::new();
-    policy.save_encrypted(&paths.policy_path(name), &vault_cipher)?;
+    policy.save_signed(
+        &paths.policy_path(name),
+        &vault_cipher,
+        loaded.signing_key(),
+        &vault_id,
+    )?;
 
     for env_name in &manifest.environments {
         let env = sigyn_engine::vault::PlaintextEnv::new();
@@ -188,6 +193,11 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             let mut json_results: Vec<serde_json::Value> = Vec::new();
 
             for name in &names {
+                if let Err(e) = sigyn_engine::vault::validate_name(name, "vault") {
+                    failed += 1;
+                    crate::output::print_error(&format!("{}", e));
+                    continue;
+                }
                 match create_single_vault(
                     name,
                     &org,

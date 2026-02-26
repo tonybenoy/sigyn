@@ -255,7 +255,12 @@ pub fn handle(
 
             let mut policy = ctx.policy.clone();
             policy.add_member(member);
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+            policy.save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )?;
 
             audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
 
@@ -285,7 +290,12 @@ pub fn handle(
                 anyhow::bail!("member {} not found in policy", fingerprint);
             }
 
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+            policy.save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )?;
 
             audit(
                 &ctx,
@@ -374,7 +384,12 @@ pub fn handle(
                 }
             });
             global.mfa_actions = mfa_actions.clone();
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+            policy.save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )?;
 
             audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
 
@@ -415,7 +430,12 @@ pub fn handle(
                 }
             });
             constraints.mfa_actions = mfa_actions.clone();
-            policy.save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)?;
+            policy.save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )?;
 
             audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
 

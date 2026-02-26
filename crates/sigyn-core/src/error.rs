@@ -39,6 +39,8 @@ pub enum SigynError {
     ValidationFailed(String),
     #[error("invalid secret key name: {0}")]
     InvalidKeyName(String),
+    #[error("invalid name: {0}")]
+    InvalidName(String),
 
     // Identity errors
     #[error("identity not found: {0}")]

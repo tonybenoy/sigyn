@@ -5,6 +5,9 @@ use console::style;
 const REPO: &str = "tonybenoy/sigyn";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Maximum archive size: 100 MiB. Reject anything larger before extraction.
+const MAX_ARCHIVE_SIZE: usize = 100 * 1024 * 1024;
+
 #[derive(Args)]
 pub struct UpdateArgs {
     /// Only check for updates, don't install
@@ -70,12 +73,21 @@ fn is_newer(current: &str, latest: &str) -> bool {
     }
 }
 
+/// Build a hardened HTTP client with timeouts.
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent(format!("sigyn/{}", CURRENT_VERSION))
+        .build()
+        .context("failed to build HTTP client")
+}
+
 /// Fetch the latest release tag from GitHub.
 async fn fetch_latest_version(client: &reqwest::Client) -> Result<String> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
     let resp = client
         .get(&url)
-        .header("User-Agent", format!("sigyn/{}", CURRENT_VERSION))
         .header("Accept", "application/vnd.github.v3+json")
         .send()
         .await
@@ -98,12 +110,7 @@ async fn fetch_latest_version(client: &reqwest::Client) -> Result<String> {
 
 /// Download a file and return the bytes.
 async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    let resp = client
-        .get(url)
-        .header("User-Agent", format!("sigyn/{}", CURRENT_VERSION))
-        .send()
-        .await
-        .context("download failed")?;
+    let resp = client.get(url).send().await.context("download failed")?;
 
     if !resp.status().is_success() {
         anyhow::bail!("download returned HTTP {}", resp.status());
@@ -150,6 +157,15 @@ fn extract_binary_from_tar_gz(archive_bytes: &[u8]) -> Result<Vec<u8>> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
+
+        // Reject path traversal: entries must not contain ".." components
+        if path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!("archive contains path traversal entry: {}", path.display());
+        }
+
         if path.file_name().and_then(|n| n.to_str()) == Some(binary_name) {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
@@ -170,7 +186,9 @@ fn replace_current_exe(new_bytes: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("cannot determine parent directory of executable"))?;
 
-    let new_path = parent.join(".sigyn-update-tmp");
+    // Use a random temp file name to avoid predictable paths
+    let random_suffix: u64 = rand::random();
+    let new_path = parent.join(format!(".sigyn-update-{:016x}", random_suffix));
 
     // Write new binary to temp file
     std::fs::write(&new_path, new_bytes).context("failed to write new binary")?;
@@ -204,7 +222,7 @@ fn replace_current_exe(new_bytes: &[u8]) -> Result<()> {
 pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let client = reqwest::Client::new();
+        let client = build_client()?;
 
         eprintln!("{}", style("Checking for updates...").dim());
 
@@ -264,6 +282,15 @@ pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
         eprint!("  {} downloading {}...", style("->").cyan(), archive_name);
         let archive_bytes = download_bytes(&client, &archive_url).await?;
         eprintln!(" {}", style("done").green());
+
+        // Enforce archive size limit
+        if archive_bytes.len() > MAX_ARCHIVE_SIZE {
+            anyhow::bail!(
+                "archive size ({} bytes) exceeds maximum allowed ({} bytes)",
+                archive_bytes.len(),
+                MAX_ARCHIVE_SIZE
+            );
+        }
 
         // Verify checksum
         eprint!("  {} verifying checksum...", style("->").cyan());

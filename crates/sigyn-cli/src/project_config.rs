@@ -36,7 +36,12 @@ pub fn find_project_config(start_dir: &Path) -> Option<(ProjectConfig, PathBuf)>
 
 /// Load project config from CWD or parent directories,
 /// falling back to `~/.sigyn/project.toml`.
+///
+/// Returns `None` when the `--no-project-config` flag is active.
 pub fn load_project_config() -> Option<ProjectConfig> {
+    if std::env::var("SIGYN_NO_PROJECT_CONFIG").is_ok() {
+        return None;
+    }
     let cwd = std::env::current_dir().ok()?;
     if let Some((cfg, _)) = find_project_config(&cwd) {
         return Some(cfg);

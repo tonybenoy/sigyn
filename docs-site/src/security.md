@@ -150,6 +150,10 @@ Owner per vault.
 
 ## Policy Engine
 
+Policy files (`policy.cbor`) are encrypted with the vault cipher and Ed25519-signed
+(SGSN format). The signature binds the policy to the vault UUID, preventing tampering
+and cross-vault replay. All policy files must be signed; unsigned files are rejected.
+
 Every secret access goes through `PolicyEngine::evaluate()`. There is no code path
 that reads or writes secrets without a policy check. The engine evaluates the following
 in order:
@@ -321,13 +325,19 @@ Vaults can be forked in two modes:
 | **Unleashed** | Fork is fully independent. A new master key is generated. No connection to the parent vault remains. | Fully severed |
 
 Fork policies control sharing mode, max drift (days without syncing), revocation
-inheritance, and whether the fork can add members independently.
+inheritance, and whether the fork can add members independently. Fork envelope
+headers are SGSN-signed and fork policy files are signed, both bound to the fork's
+vault UUID.
 
 ## Memory Safety
 
 - All private key material is wrapped in `secrecy::Secret<T>` which zeroes memory on drop via the `zeroize` crate.
+- Ephemeral slot keys (HKDF-derived) are wrapped in `Zeroizing<>` and zeroed immediately after use.
+- Ed25519 signing keys use `ZeroizeOnDrop` from `ed25519-dalek`.
+- Key fingerprint comparisons use constant-time equality (`subtle::ConstantTimeEq`) to prevent timing side-channels.
 - Decrypted secret values are never written to disk in plaintext.
 - The CLI never logs or prints private keys.
+- Clipboard copies are automatically cleared after 30 seconds.
 
 ## Atomic File Writes
 
@@ -342,6 +352,11 @@ the start (via `OpenOptions::mode()`), writes content, calls `sync_all()` for
 durability, and atomically renames to the target path. This eliminates the TOCTOU
 window where a file could be briefly readable with default permissions between
 creation and `chmod`.
+
+**Symlink protection:** Before writing, `atomic_write()` canonicalizes the target path
+and verifies it stays within the expected parent directory. Symlinks that escape the
+vault directory (e.g. pointing to `/etc/`) are rejected to prevent symlink-based
+directory traversal attacks.
 
 ## Filesystem Permissions
 
@@ -393,7 +408,8 @@ ambiguity attacks where crafted values in one field could be interpreted as part
 another.
 
 Hierarchy node `members.cbor` files also use the SGSN signed format with Ed25519
-signatures, verified on read when the signer's verifying key is available.
+signatures, always verified on read. Hierarchy policy files (`policy.cbor`) at every
+org node level are signed and bound to the node UUID, identical to vault-level policies.
 
 ### Tier C: Vault Key and Per-Environment Keys
 
@@ -459,11 +475,21 @@ an SSH-style warning banner:
 
 The user must explicitly pass `--force` to accept the new remote state.
 
-### Audit Continuity
+### Audit Checkpoints
 
-After a pull, the audit chain can be verified against a stored checkpoint (last known
-sequence number and entry hash). If the entry at the expected sequence no longer has
-the expected hash, the audit log has been tampered with or rolled back.
+Sigyn writes signed audit checkpoints (`audit.checkpoint`) after policy changes and
+key rotations. A checkpoint records the current audit log sequence number and entry
+hash, CBOR-serialized and Ed25519-signed (SGSN format bound to the vault UUID).
+
+After a pull, the audit chain is verified against the stored checkpoint. If the entry
+at the expected sequence no longer has the expected hash, the audit log has been
+tampered with or rolled back.
+
+### Git Commit Signing
+
+Each sync commit is accompanied by a sidecar signature file (`.sigyn-commit-sig`)
+containing the commit OID signed with the user's Ed25519 key. On pull, the signature
+is verified against the committer's public key. Missing signature files are rejected.
 
 ## Vault Origin Pinning (TOFU)
 
@@ -527,8 +553,7 @@ encrypted with a cipher derived from the device key (HKDF context
 
 The `.org_link` metadata file (which records a vault's org hierarchy membership) is
 encrypted with a device-key-derived cipher (HKDF context `b"sigyn-org-link-v1"`)
-using the sealed file format. Legacy plaintext `.org_link` files are still readable
-for backward compatibility.
+using the sealed file format.
 
 ## Threat Model Summary
 
@@ -547,8 +572,9 @@ for backward compatibility.
 | Brute-force passphrase | Argon2id with tuned memory/time cost |
 | Stolen credentials (passphrase only) | Optional TOTP-based MFA as second factor; session grace period limits exposure window |
 | Replay of old ciphertext | Unique nonces per encryption; vault UUID bound into HKDF salt |
-| Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop |
+| Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop; constant-time fingerprint comparison |
 | Partial file writes | Atomic writes via `tempfile::persist()` |
+| Symlink traversal | Path canonicalization; writes rejected if target escapes parent directory |
 | Local filesystem snooping | `~/.sigyn/` directory `0o700`; all files `0o600`; all contents encrypted |
 | Device key compromise | Limits exposure to Tier A files only; vault secrets require identity key |
 | Rollback attack (force-push) | Commit OID checkpoints; descendant verification on pull |
@@ -559,6 +585,7 @@ for backward compatibility.
 | Invitation replay/theft | 7-day expiry; Ed25519 signature with length-prefixed payload |
 | Signing payload field confusion | Length-prefixed v2 format prevents boundary ambiguity |
 | Hierarchy node header forgery | SGSN signed format with Ed25519 verification |
+| Forged org/fork policy file | All policy files signed and bound to vault/node UUID; unsigned rejected |
 | Crash during audit append | Trailing corrupt line tolerated; mid-file tampering detected |
 | File permission TOCTOU | Atomic temp+rename with `0o600` mode set at creation |
 

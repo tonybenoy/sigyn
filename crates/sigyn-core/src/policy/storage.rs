@@ -52,6 +52,34 @@ impl VaultPolicy {
         ciborium::from_reader(decrypted.as_slice())
             .map_err(|e| SigynError::CborDecode(e.to_string()))
     }
+
+    /// Encrypt then sign the policy. The signature covers
+    /// `blake3(ciphertext || vault_id_bytes)`.
+    pub fn to_signed_encrypted_bytes(
+        &self,
+        cipher: &crate::crypto::VaultCipher,
+        signing_key: &crate::crypto::keys::SigningKeyPair,
+        vault_id: &uuid::Uuid,
+    ) -> Result<Vec<u8>> {
+        let encrypted = self.to_encrypted_bytes(cipher)?;
+        Ok(crate::crypto::sealed::signed_wrap(
+            &encrypted,
+            signing_key,
+            vault_id.as_bytes(),
+        ))
+    }
+
+    /// Verify signature then decrypt the policy.
+    pub fn from_signed_encrypted_bytes(
+        data: &[u8],
+        cipher: &crate::crypto::VaultCipher,
+        verifying_key: &crate::crypto::keys::VerifyingKeyWrapper,
+        vault_id: &uuid::Uuid,
+    ) -> Result<Self> {
+        let encrypted =
+            crate::crypto::sealed::signed_unwrap(data, verifying_key, vault_id.as_bytes())?;
+        Self::from_encrypted_bytes(&encrypted, cipher)
+    }
 }
 
 #[cfg(test)]

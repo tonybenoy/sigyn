@@ -114,6 +114,7 @@ pub fn handle(
                         &ctx.loaded_identity.identity.encryption_pubkey,
                         &ctx.loaded_identity.identity.encryption_pubkey,
                         &ctx.fingerprint,
+                        ctx.loaded_identity.signing_key(),
                     )?
                 }
                 sigyn_engine::forks::ForkMode::Unleashed => {
@@ -126,6 +127,7 @@ pub fn handle(
                         &ctx.manifest,
                         &ctx.loaded_identity.identity.encryption_pubkey,
                         &ctx.fingerprint,
+                        ctx.loaded_identity.signing_key(),
                     )?
                 }
             };
