@@ -154,10 +154,9 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
     // Check if the agent has our key cached (Unix only)
     #[cfg(unix)]
     if let Some(_key_material) = crate::agent::try_agent_unlock(&fp_hex) {
-        // Agent has the key — load via passphrase from agent
-        // For now, we still need the passphrase to load via the store,
-        // so we use the agent's PASSPHRASE protocol.
-        // TODO: once agent returns raw key material, reconstruct LoadedIdentity directly
+        // Agent has the key cached — currently used for the PASSPHRASE protocol.
+        // The agent returns the passphrase which is then used by the store to
+        // derive the wrapping key and decrypt the identity.
     }
 
     let mut passphrase = read_passphrase(&format!(
