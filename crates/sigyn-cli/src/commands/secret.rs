@@ -16,6 +16,35 @@ use sigyn_engine::vault::{env_file, VaultManifest, VaultPaths};
 use crate::commands::identity::load_identity;
 use crate::config::sigyn_home;
 
+/// Simple glob matching supporting * and ? wildcards.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star_pi, mut star_ti) = (usize::MAX, 0);
+
+    while ti < txt.len() {
+        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == txt[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pat.len() && pat[pi] == '*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
 #[derive(Subcommand)]
 pub enum SecretCommands {
     /// Set a secret value
@@ -53,6 +82,20 @@ pub enum SecretCommands {
         /// Environment
         #[arg(long, short)]
         env: Option<String>,
+    },
+    /// Edit secrets in $EDITOR (batch editing)
+    Edit {
+        /// Environment
+        #[arg(long, short)]
+        env: Option<String>,
+    },
+    /// Search for secrets across all environments
+    Search {
+        /// Key pattern (glob: * and ? wildcards)
+        pattern: String,
+        /// Show actual values
+        #[arg(long, short)]
+        reveal: bool,
     },
     /// Generate a random secret
     Generate {
@@ -103,11 +146,40 @@ pub fn unlock_vault(
             );
         }
     }
+
+    // Verbose config resolution logging
+    if std::env::var("SIGYN_VERBOSE").is_ok() {
+        eprintln!(
+            "[verbose] vault: flag={:?} project={:?} global={:?}",
+            vault_name,
+            project_settings.and_then(|p| p.vault.as_deref()),
+            config.default_vault.as_deref()
+        );
+    }
     let vault_name = vault_name
         .map(String::from)
         .or_else(|| project_settings.and_then(|p| p.vault.clone()))
         .or(config.default_vault)
-        .ok_or_else(|| anyhow::anyhow!("no vault specified; use --vault or set default"))?;
+        .ok_or_else(|| {
+            let available = paths.list_vaults().unwrap_or_default();
+            if available.is_empty() {
+                anyhow::anyhow!(
+                    "no vault specified and no vaults found\n\n  \
+                     Get started:\n    \
+                     sigyn identity create -n alice\n    \
+                     sigyn vault create myapp\n    \
+                     sigyn project init"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "no vault specified\n\n  \
+                     Available vaults: {}\n  \
+                     Use --vault <name>, or set up a project config:\n    \
+                     sigyn project init",
+                    available.join(", ")
+                )
+            }
+        })?;
 
     if env_name.is_none() {
         if let Some(pe) = project_settings.and_then(|p| p.env.as_deref()) {
@@ -149,8 +221,14 @@ pub fn unlock_vault(
             .map_err(|e| anyhow::anyhow!("failed to decode header: {}", e))?;
 
     let master_key =
-        envelope::unseal_master_key(&header, loaded.encryption_key(), manifest.vault_id)
-            .context("failed to unseal vault (not a member or wrong key)")?;
+        envelope::unseal_master_key(&header, loaded.encryption_key(), manifest.vault_id).context(
+            format!(
+                "failed to unseal vault '{}' (not a member or wrong key)\n\n  \
+                 Check your membership: sigyn delegation tree -v {}\n  \
+                 Or ask the vault owner to re-invite you.",
+                vault_name, vault_name
+            ),
+        )?;
 
     let cipher = VaultCipher::new(master_key);
 
@@ -311,6 +389,20 @@ pub fn check_access(
     }
 }
 
+/// Trigger auto-sync if enabled in config (best-effort).
+fn maybe_auto_sync(vault_name: &str) {
+    if crate::config::load_config().auto_sync {
+        eprintln!("{} auto-syncing...", console::style("note:").cyan().bold());
+        if let Err(e) = crate::commands::sync::auto_push(vault_name) {
+            eprintln!(
+                "{} auto-sync failed: {}",
+                console::style("warning:").yellow().bold(),
+                e
+            );
+        }
+    }
+}
+
 /// Append an audit entry (best-effort — warn on stderr but don't fail the operation)
 fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
@@ -426,6 +518,8 @@ pub fn handle(
                     action, key, ctx.env_name
                 ));
             }
+
+            maybe_auto_sync(&ctx.vault_name);
         }
         SecretCommands::Get { key, env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
@@ -556,6 +650,225 @@ pub fn handle(
             );
 
             crate::output::print_success(&format!("Removed '{}' from env '{}'", key, ctx.env_name));
+
+            maybe_auto_sync(&ctx.vault_name);
+        }
+        SecretCommands::Edit { env } => {
+            let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            check_access(&ctx, AccessAction::Write, None)?;
+
+            let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
+            let original = if env_path.exists() {
+                let encrypted = env_file::read_encrypted_env(&env_path)?;
+                env_file::decrypt_env(&encrypted, &ctx.cipher)?
+            } else {
+                sigyn_engine::vault::PlaintextEnv::new()
+            };
+
+            // Write KEY=VALUE pairs to a temp file
+            let tmp_dir = std::env::temp_dir();
+            let tmp_path = tmp_dir.join(format!("sigyn-edit-{}.env", std::process::id()));
+
+            let mut content = String::new();
+            content.push_str(&format!(
+                "# Editing env '{}' — save and close to apply changes\n",
+                ctx.env_name
+            ));
+            content.push_str(
+                "# Lines starting with # are ignored. Delete a line to remove the secret.\n\n",
+            );
+            for (key, entry) in &original.entries {
+                let val = entry.value.display_value(true);
+                // Escape newlines for safe editing
+                let escaped = val.replace('\\', "\\\\").replace('\n', "\\n");
+                content.push_str(&format!("{}={}\n", key, escaped));
+            }
+            std::fs::write(&tmp_path, &content)?;
+
+            // Open editor
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".into());
+
+            let status = std::process::Command::new(&editor)
+                .arg(&tmp_path)
+                .status()
+                .with_context(|| format!("failed to launch editor '{}'", editor))?;
+
+            if !status.success() {
+                // Clean up temp file
+                let _ = std::fs::remove_file(&tmp_path);
+                anyhow::bail!("editor exited with non-zero status");
+            }
+
+            // Parse edited file
+            let edited_content = std::fs::read_to_string(&tmp_path)?;
+            // Securely overwrite temp file
+            let zeros = vec![0u8; edited_content.len()];
+            let _ = std::fs::write(&tmp_path, &zeros);
+            let _ = std::fs::remove_file(&tmp_path);
+
+            let mut new_entries: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+            for line in edited_content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    let key = k.trim().to_string();
+                    let val = v.replace("\\n", "\n").replace("\\\\", "\\");
+                    new_entries.insert(key, val);
+                }
+            }
+
+            // Diff: find added, modified, removed
+            let original_keys: std::collections::HashSet<String> =
+                original.entries.keys().cloned().collect();
+            let new_keys: std::collections::HashSet<String> = new_entries.keys().cloned().collect();
+
+            let added: Vec<String> = new_keys.difference(&original_keys).cloned().collect();
+            let removed: Vec<String> = original_keys.difference(&new_keys).cloned().collect();
+            let mut modified = Vec::new();
+            for key in original_keys.intersection(&new_keys) {
+                let old_val = original.get(key).unwrap().value.display_value(true);
+                if new_entries[key.as_str()] != old_val {
+                    modified.push(key.clone());
+                }
+            }
+
+            if added.is_empty() && removed.is_empty() && modified.is_empty() {
+                println!("No changes detected.");
+                return Ok(());
+            }
+
+            // Show changes and confirm
+            println!("{}", style("Changes detected:").bold());
+            for k in &added {
+                println!("  {} {}", style("+").green(), style(k).green());
+            }
+            for k in &modified {
+                println!("  {} {}", style("~").yellow(), style(k).yellow());
+            }
+            for k in &removed {
+                println!("  {} {}", style("-").red(), style(k).red());
+            }
+
+            if crate::config::is_interactive() {
+                let confirm = dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "Apply {} change(s)?",
+                        added.len() + modified.len() + removed.len()
+                    ))
+                    .default(true)
+                    .interact()?;
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            // Apply changes
+            let mut plaintext = original;
+            for key in &removed {
+                plaintext.remove(key);
+            }
+            for key in added.iter().chain(modified.iter()) {
+                plaintext.set(
+                    key.clone(),
+                    SecretValue::String(new_entries[key.as_str()].clone()),
+                    &ctx.fingerprint,
+                );
+            }
+
+            let encrypted = env_file::encrypt_env(&plaintext, &ctx.cipher, &ctx.env_name)?;
+            env_file::write_encrypted_env(&env_path, &encrypted)?;
+
+            audit(
+                &ctx,
+                AuditAction::SecretWritten {
+                    key: format!(
+                        "batch: +{} ~{} -{}",
+                        added.len(),
+                        modified.len(),
+                        removed.len()
+                    ),
+                },
+                AuditOutcome::Success,
+            );
+
+            crate::output::print_success(&format!(
+                "Applied {} change(s) to env '{}' ({} added, {} modified, {} removed)",
+                added.len() + modified.len() + removed.len(),
+                ctx.env_name,
+                added.len(),
+                modified.len(),
+                removed.len()
+            ));
+
+            maybe_auto_sync(&ctx.vault_name);
+        }
+        SecretCommands::Search { pattern, reveal } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::Read, None)?;
+
+            let manifest_content =
+                std::fs::read_to_string(ctx.paths.manifest_path(&ctx.vault_name))?;
+            let manifest = sigyn_engine::vault::VaultManifest::from_toml(&manifest_content)?;
+
+            let mut results: Vec<serde_json::Value> = Vec::new();
+            let mut found_any = false;
+
+            if !json {
+                println!(
+                    "{} for '{}' in vault '{}'",
+                    style("Search").bold(),
+                    style(&pattern).cyan(),
+                    ctx.vault_name
+                );
+                println!("{}", style("─".repeat(60)).dim());
+            }
+
+            for env_name in &manifest.environments {
+                let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
+                if !env_path.exists() {
+                    continue;
+                }
+
+                let encrypted = env_file::read_encrypted_env(&env_path)?;
+                let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
+
+                for (key, entry) in &plaintext.entries {
+                    if glob_match(&pattern, key) {
+                        found_any = true;
+                        let val = entry.value.display_value(reveal);
+                        if json {
+                            results.push(serde_json::json!({
+                                "env": env_name,
+                                "key": key,
+                                "value": val,
+                                "type": entry.value.type_name(),
+                            }));
+                        } else {
+                            println!(
+                                "  {} {} = {}",
+                                style(format!("[{}]", env_name)).dim(),
+                                style(key).bold(),
+                                if reveal {
+                                    val
+                                } else {
+                                    style("••••••••").dim().to_string()
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+
+            if json {
+                crate::output::print_json(&results)?;
+            } else if !found_any {
+                println!("  No secrets matching '{}' found.", pattern);
+            }
         }
         SecretCommands::Generate {
             key,
@@ -631,6 +944,8 @@ pub fn handle(
                 ));
                 println!("  Value: {}", generated);
             }
+
+            maybe_auto_sync(&ctx.vault_name);
         }
     }
     Ok(())

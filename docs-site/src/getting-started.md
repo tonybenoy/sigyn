@@ -56,6 +56,20 @@ curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.sh |
 irm https://raw.githubusercontent.com/tonybenoy/sigyn/main/uninstall.ps1 | iex
 ```
 
+## Quick Setup (Guided Wizard)
+
+The fastest way to get started is the onboard wizard, which walks you through
+everything below in one interactive flow:
+
+```bash
+sigyn onboard
+```
+
+Or use `sigyn init` for a lighter-weight setup that offers to create an identity
+and vault if none exist.
+
+If you prefer to do each step manually, read on.
+
 ## Create an Identity
 
 An identity is your cryptographic keypair (X25519 for encryption, Ed25519 for signing).

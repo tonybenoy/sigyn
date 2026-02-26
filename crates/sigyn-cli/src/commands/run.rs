@@ -98,18 +98,118 @@ fn resolve_named_command(args: &[String]) -> Option<Vec<String>> {
     Some(parts)
 }
 
+/// Check whether vault resolution would succeed, and offer interactive setup if not.
+///
+/// Returns the vault name to use (from the freshly-created config), or None if the
+/// user declined or we're non-interactive.
+fn maybe_offer_setup(vault: Option<&str>) -> Result<Option<String>> {
+    // If the caller already passed --vault, skip the check
+    if vault.is_some() {
+        return Ok(None);
+    }
+
+    // Check if project config or global config has a vault
+    let project = load_project_config();
+    let project_vault = project
+        .as_ref()
+        .and_then(|p| p.project.as_ref())
+        .and_then(|p| p.vault.clone());
+    if project_vault.is_some() {
+        return Ok(None);
+    }
+
+    let config = crate::config::load_config();
+    if config.default_vault.is_some() {
+        return Ok(None);
+    }
+
+    // No vault can be resolved — offer setup or bail
+    if crate::config::is_interactive() {
+        let detection = crate::project_detect::detect_project();
+        eprintln!(
+            "{} No vault configured for this project.",
+            style("note:").cyan().bold()
+        );
+        eprintln!(
+            "  Detected project: {} (from {})",
+            style(&detection.suggested_vault_name).bold(),
+            detection.source
+        );
+        eprintln!();
+
+        let setup = dialoguer::Confirm::new()
+            .with_prompt("Set up .sigyn.toml now? (or use --vault to specify)")
+            .default(true)
+            .interact()?;
+
+        if setup {
+            // Run the interactive project init flow
+            crate::commands::project::handle(
+                crate::commands::project::ProjectCommands::Init {
+                    global: false,
+                    vault: None,
+                    env: None,
+                    identity: None,
+                },
+                false,
+            )?;
+            // Re-load the project config to get the vault name
+            let new_project = load_project_config();
+            let new_vault = new_project
+                .as_ref()
+                .and_then(|p| p.project.as_ref())
+                .and_then(|p| p.vault.clone());
+            return Ok(new_vault);
+        }
+
+        anyhow::bail!("no vault specified. Run 'sigyn project init' or use --vault <name>");
+    }
+
+    anyhow::bail!(
+        "no vault specified; use --vault, create .sigyn.toml (sigyn project init), or set a default (sigyn init --vault <name>)"
+    );
+}
+
 fn exec_with_secrets(
     exec: &ExecArgs,
     vault: Option<&str>,
     identity: Option<&str>,
     command: &[String],
+    dry_run: bool,
 ) -> Result<()> {
     if command.is_empty() {
-        anyhow::bail!("no command specified. Usage: sigyn run -- <command>");
+        let mut msg = String::from("no command specified\n\n");
+        msg.push_str("Usage: sigyn run [--env <env>] -- <command>\n");
+        msg.push_str("       sigyn run export [--format dotenv|json|shell|docker|k8s]\n");
+        #[cfg(unix)]
+        msg.push_str("       sigyn run serve [--socket <path>]\n");
+        msg.push('\n');
+
+        // Show named commands from .sigyn.toml if available
+        if let Some(project) = load_project_config() {
+            if !project.commands.is_empty() {
+                msg.push_str("Named commands (from .sigyn.toml):\n");
+                for (name, cmd_str) in &project.commands {
+                    msg.push_str(&format!("  {:<8} → {}\n", name, cmd_str));
+                }
+                msg.push('\n');
+            }
+        }
+
+        msg.push_str("Run 'sigyn run --help' for full usage.");
+        anyhow::bail!(msg);
     }
 
+    // Offer interactive setup if no vault is configured
+    let setup_vault = maybe_offer_setup(vault)?;
+    let effective_vault = vault.map(String::from).or(setup_vault);
+
     let env = resolve_env(exec);
-    let ctx = unlock_vault(identity, vault, env.as_deref())?;
+    let ctx = unlock_vault(
+        identity,
+        effective_vault.as_deref().or(vault),
+        env.as_deref(),
+    )?;
     check_access(&ctx, AccessAction::Read, None)?;
 
     let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
@@ -120,6 +220,25 @@ fn exec_with_secrets(
     let encrypted = env_file::read_encrypted_env(&env_path)?;
     let plaintext = env_file::decrypt_env(&encrypted, &ctx.cipher)?;
 
+    if dry_run {
+        println!(
+            "[dry-run] Vault: '{}', env: '{}', secrets: {}",
+            ctx.vault_name,
+            ctx.env_name,
+            plaintext.len()
+        );
+        println!("[dry-run] Command: {}", command.join(" "));
+        println!(
+            "[dry-run] Clean env: {}",
+            if exec.clean {
+                "yes"
+            } else {
+                "no (inheriting parent)"
+            }
+        );
+        return Ok(());
+    }
+
     let exit_code = crate::inject::run_with_secrets(&plaintext, command, !exec.clean)?;
     std::process::exit(exit_code);
 }
@@ -129,14 +248,21 @@ pub fn handle(
     vault: Option<&str>,
     identity: Option<&str>,
     _json: bool,
+    dry_run: bool,
 ) -> Result<()> {
     match args.command {
         Some(RunCommands::Exec(exec)) => {
             let command = exec.command.clone();
-            exec_with_secrets(&exec, vault, identity, &command)
+            exec_with_secrets(&exec, vault, identity, &command, dry_run)
         }
         Some(RunCommands::Export { env, format, name }) => {
-            let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            let setup_vault = maybe_offer_setup(vault)?;
+            let effective_vault = vault.map(String::from).or(setup_vault);
+            let ctx = unlock_vault(
+                identity,
+                effective_vault.as_deref().or(vault),
+                env.as_deref(),
+            )?;
             check_access(&ctx, AccessAction::Read, None)?;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
@@ -181,7 +307,7 @@ pub fn handle(
             if let Some(resolved) = resolve_named_command(&command) {
                 command = resolved;
             }
-            exec_with_secrets(&args.exec, vault, identity, &command)
+            exec_with_secrets(&args.exec, vault, identity, &command, dry_run)
         }
     }
 }

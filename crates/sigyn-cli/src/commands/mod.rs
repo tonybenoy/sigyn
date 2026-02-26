@@ -5,6 +5,8 @@ pub mod fork;
 pub mod identity;
 pub mod import;
 pub mod mfa;
+pub mod notifications;
+pub mod onboard;
 pub mod org;
 pub mod policy;
 pub mod project;

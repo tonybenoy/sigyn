@@ -122,6 +122,20 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 println!("  ID:           {}", vault_id);
                 println!("  Owner:        {}", style(fingerprint.to_hex()).cyan());
                 println!("  Environments: {}", manifest.environments.join(", "));
+
+                println!();
+                println!("{}", style("Next steps:").bold());
+                println!(
+                    "  sigyn secret set DATABASE_URL 'postgres://...' -v {} -e dev",
+                    name
+                );
+                println!("  sigyn project init --vault {}", name);
+                println!("  sigyn run -v {} -e dev -- ./your-app", name);
+
+                // Offer to create .sigyn.toml
+                let identity_name = loaded.identity.profile.name.clone();
+                let _ =
+                    crate::project_config::offer_project_init(&name, Some(&identity_name), "dev");
             }
         }
         VaultCommands::List => {

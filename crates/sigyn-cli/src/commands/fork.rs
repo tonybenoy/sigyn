@@ -124,6 +124,39 @@ pub fn handle(
                 if expires_days > 0 {
                     println!("  Expires in: {} days", expires_days);
                 }
+                println!();
+
+                match mode.as_str() {
+                    "leashed" => {
+                        println!("  Mode: {}", style("leashed").bold());
+                        println!(
+                            "  Leashed forks stay connected to the parent vault. Changes in the"
+                        );
+                        println!(
+                            "  parent can be pulled with 'sigyn fork sync'. Use leashed mode for"
+                        );
+                        println!("  feature branches and temporary workstreams.");
+                    }
+                    "unleashed" => {
+                        println!("  Mode: {}", style("unleashed").bold());
+                        println!(
+                            "  Unleashed forks are fully independent copies. Use unleashed mode"
+                        );
+                        println!(
+                            "  for permanent splits or long-running experiments. Unleashed forks"
+                        );
+                        println!("  cannot sync with the parent.");
+                    }
+                    _ => {}
+                }
+
+                println!();
+                println!("{}", style("Next steps:").bold());
+                println!("  sigyn secret set MY_KEY \"value\" -v {} -e dev", name);
+                if mode == "leashed" {
+                    println!("  sigyn fork sync {}       # pull parent changes", name);
+                }
+                println!("  sigyn fork status {}     # check fork state", name);
             }
         }
         ForkCommands::List => {

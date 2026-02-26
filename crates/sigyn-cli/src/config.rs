@@ -48,3 +48,14 @@ pub fn save_config(config: &CliConfig) -> anyhow::Result<()> {
     std::fs::write(home.join("config.toml"), content)?;
     Ok(())
 }
+
+/// Returns true if the terminal is interactive (safe to show prompts).
+///
+/// Returns false when stderr is not a terminal, or when running in CI
+/// or with `SIGYN_NON_INTERACTIVE` set.
+pub fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+        && std::env::var("CI").is_err()
+        && std::env::var("SIGYN_NON_INTERACTIVE").is_err()
+}

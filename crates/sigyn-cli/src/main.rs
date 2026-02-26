@@ -6,6 +6,7 @@ mod inject;
 mod notifications;
 mod output;
 mod project_config;
+mod project_detect;
 #[allow(dead_code)]
 mod tui;
 
@@ -58,6 +59,10 @@ struct Cli {
     /// Preview changes without applying
     #[arg(long, global = true)]
     dry_run: bool,
+
+    /// Show detailed config resolution and debug output
+    #[arg(long, global = true)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -149,6 +154,13 @@ enum Commands {
         #[command(subcommand)]
         command: commands::import::ImportCommands,
     },
+    /// Guided first-run setup wizard
+    Onboard,
+    /// Manage notification webhooks
+    Notification {
+        #[command(subcommand)]
+        command: commands::notifications::NotificationCommands,
+    },
     /// Update sigyn to the latest release
     Update(commands::update::UpdateArgs),
     /// Generate shell completions
@@ -163,6 +175,10 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
+
+    if cli.verbose {
+        std::env::set_var("SIGYN_VERBOSE", "1");
+    }
 
     match cli.command {
         Commands::Identity { command } => {
@@ -199,19 +215,106 @@ fn main() -> Result<()> {
             doctor::run_doctor()?;
         }
         Commands::Init { identity, vault } => {
+            let home = config::sigyn_home();
             let mut cfg = config::load_config();
-            if let Some(id) = identity {
+
+            // If no identity provided and none exist, offer to create one
+            let effective_identity = if let Some(id) = identity {
+                Some(id)
+            } else if cfg.default_identity.is_none() && config::is_interactive() {
+                let store = sigyn_engine::identity::keygen::IdentityStore::new(home.clone());
+                let identities = store.list().unwrap_or_default();
+                if identities.is_empty() {
+                    let create = dialoguer::Confirm::new()
+                        .with_prompt("No identities found. Create one now?")
+                        .default(true)
+                        .interact()?;
+                    if create {
+                        let default_name = std::env::var("USER")
+                            .or_else(|_| std::env::var("USERNAME"))
+                            .unwrap_or_else(|_| "default".into());
+                        let name: String = dialoguer::Input::new()
+                            .with_prompt("Identity name")
+                            .default(default_name)
+                            .interact_text()?;
+                        commands::identity::handle(
+                            commands::identity::IdentityCommands::Create {
+                                name: name.clone(),
+                                email: None,
+                            },
+                            false,
+                        )?;
+                        Some(name)
+                    } else {
+                        None
+                    }
+                } else if identities.len() == 1 {
+                    Some(identities[0].profile.name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(id) = effective_identity {
                 cfg.default_identity = Some(id);
             }
-            if let Some(v) = vault {
+
+            // If no vault provided and none exist, offer to create one
+            let effective_vault = if let Some(v) = vault {
+                Some(v)
+            } else if cfg.default_vault.is_none() && config::is_interactive() {
+                let paths = sigyn_engine::vault::VaultPaths::new(home.clone());
+                let vaults = paths.list_vaults().unwrap_or_default();
+                if vaults.is_empty() {
+                    let create = dialoguer::Confirm::new()
+                        .with_prompt("No vaults found. Create one now?")
+                        .default(true)
+                        .interact()?;
+                    if create {
+                        let detection = project_detect::detect_project();
+                        let name: String = dialoguer::Input::new()
+                            .with_prompt("Vault name")
+                            .default(detection.suggested_vault_name)
+                            .interact_text()?;
+                        commands::vault::handle(
+                            commands::vault::VaultCommands::Create {
+                                name: name.clone(),
+                                org: None,
+                            },
+                            cfg.default_identity.as_deref(),
+                            false,
+                        )?;
+                        Some(name)
+                    } else {
+                        None
+                    }
+                } else if vaults.len() == 1 {
+                    Some(vaults[0].clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(v) = effective_vault {
                 cfg.default_vault = Some(v);
             }
+
             config::save_config(&cfg)?;
             output::print_success("Configuration initialized");
             println!(
                 "  Config: {}",
                 config::sigyn_home().join("config.toml").display()
             );
+
+            // Run doctor checks as a post-init summary
+            if !cli.quiet {
+                println!();
+                doctor::run_doctor()?;
+            }
         }
         Commands::Sync { command } => {
             commands::sync::handle(command, cli.vault.as_deref(), json)?;
@@ -223,7 +326,13 @@ fn main() -> Result<()> {
             commands::fork::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Run(args) => {
-            commands::run::handle(args, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+            commands::run::handle(
+                args,
+                cli.vault.as_deref(),
+                cli.identity.as_deref(),
+                json,
+                cli.dry_run,
+            )?;
         }
         Commands::Rotate { command } => {
             commands::rotate::handle(
@@ -247,6 +356,12 @@ fn main() -> Result<()> {
         }
         Commands::Import { command } => {
             commands::import::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+        }
+        Commands::Onboard => {
+            commands::onboard::handle(json)?;
+        }
+        Commands::Notification { command } => {
+            commands::notifications::handle(command, json)?;
         }
         Commands::Update(args) => {
             commands::update::handle(args, json)?;

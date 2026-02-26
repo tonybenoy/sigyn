@@ -45,6 +45,12 @@ what Sigyn is about.
 - **Unix socket server** -- programmatic access for scripts and CI pipelines.
 - **Interactive TUI** -- ratatui-powered dashboard for browsing and managing secrets.
 - **Hierarchical organizations** -- nested org/division/team hierarchy with inherited RBAC (highest role wins), per-level encryption, cascading member management, and configurable git remotes at any level.
+- **Guided onboarding** -- `sigyn onboard` walks through identity, vault, import, and project setup.
+- **Batch editing** -- `sigyn secret edit` opens secrets in `$EDITOR` for bulk changes.
+- **Cross-env search** -- `sigyn secret search 'DB_*'` finds secrets across all environments.
+- **Env diff & clone** -- compare or duplicate environments in one command.
+- **Auto-sync** -- automatically push changes after writes when `auto_sync` is enabled.
+- **Webhook notifications** -- get notified on secret changes, rotations, and revocations.
 - **Self-update** -- `sigyn update` downloads and installs the latest release with checksum verification.
 - **Shell completions** -- bash, zsh, fish, and PowerShell.
 
@@ -181,11 +187,13 @@ sigyn <command>
 | `run` | Inject secrets into processes, export, or serve via socket |
 | `rotate` | Rotate secrets, schedule rotation, breach mode |
 | `import` | Import from Doppler, AWS, GCP, 1Password, dotenv, JSON |
+| `notification` | Configure and test webhook notifications |
+| `onboard` | Guided first-run setup wizard |
 | `tui` | Launch the interactive TUI dashboard |
 | `update` | Self-update to the latest release |
 | `doctor` | Run health checks |
-| `status` | Show current vault and environment info |
-| `init` | Initialize default configuration |
+| `status` | Show current vault, identity, environments, sync, and rotation info |
+| `init` | Initialize default configuration (interactive: offers identity/vault creation) |
 | `completions` | Generate shell completions (bash, zsh, fish, powershell) |
 
 Run `sigyn <command> --help` for detailed usage of any command.

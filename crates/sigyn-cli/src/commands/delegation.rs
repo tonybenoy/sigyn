@@ -391,6 +391,36 @@ pub fn handle(
                 } else {
                     println!("  Signature:     not verified (inviter not in local store)");
                 }
+
+                eprintln!();
+                eprintln!(
+                    "{} The vault owner must sync for your access to take effect.",
+                    style("note:").cyan().bold()
+                );
+                println!();
+                println!("{}", style("Next steps:").bold());
+                println!("  sigyn sync pull -v {}", invite_file.vault_name);
+                println!(
+                    "  sigyn secret list -v {} -e {}",
+                    invite_file.vault_name,
+                    invite_file
+                        .allowed_envs
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("dev")
+                );
+
+                // Offer to create .sigyn.toml pointing at the accepted vault
+                let first_env = invite_file
+                    .allowed_envs
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("dev");
+                let _ = crate::project_config::offer_project_init(
+                    &invite_file.vault_name,
+                    None,
+                    first_env,
+                );
             }
         }
         DelegationCommands::Revoke {
@@ -548,6 +578,18 @@ pub fn handle(
                 }
                 if result.master_key_rotated {
                     crate::output::print_info("Master key rotated and environments re-encrypted");
+                }
+            }
+
+            // Auto-sync after revoke
+            if crate::config::load_config().auto_sync {
+                eprintln!("{} auto-syncing...", style("note:").cyan().bold());
+                if let Err(e) = crate::commands::sync::auto_push(vault_name) {
+                    eprintln!(
+                        "{} auto-sync failed: {}",
+                        style("warning:").yellow().bold(),
+                        e
+                    );
                 }
             }
         }

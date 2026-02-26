@@ -13,7 +13,7 @@ fast-kdf = ["sigyn-engine/fast-kdf"]
 vendored-openssl = ["sigyn-engine/vendored-openssl"]
 
 [dependencies]
-sigyn-engine = { path = "../sigyn-engine", version = "0.3.0" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.4.0" }
 
 # CLI
 clap.workspace = true
@@ -53,6 +53,7 @@ sha2.workspace = true
 flate2.workspace = true
 tar.workspace = true
 hex.workspace = true
+indexmap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

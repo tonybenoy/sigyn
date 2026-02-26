@@ -63,7 +63,10 @@ fn init_project(
         );
     }
 
-    // Resolve vault: use arg, or prompt from available vaults
+    // Detect project type for smart defaults
+    let detection = crate::project_detect::detect_project();
+
+    // Resolve vault: use arg, or prompt from available vaults with smart default
     let vault = if let Some(v) = vault_arg {
         Some(v)
     } else {
@@ -73,12 +76,26 @@ fn init_project(
                 "{}",
                 style("No vaults found. Create one first: sigyn vault create <name>").dim()
             );
+            eprintln!(
+                "  Suggested name based on {}: {}",
+                detection.source,
+                style(&detection.suggested_vault_name).cyan()
+            );
             None
         } else {
+            // Pre-select the vault matching the detected project name, if any
+            let default_idx = vaults
+                .iter()
+                .position(|v| v == &detection.suggested_vault_name)
+                .unwrap_or(0);
+
             let selection = dialoguer::Select::new()
-                .with_prompt("Select vault for this project")
+                .with_prompt(format!(
+                    "Select vault for this project (detected: {})",
+                    &detection.suggested_vault_name
+                ))
                 .items(&vaults)
-                .default(0)
+                .default(default_idx)
                 .interact()?;
             Some(vaults[selection].clone())
         }
@@ -114,28 +131,15 @@ fn init_project(
     // Resolve env: use arg, or default to "dev"
     let env = env_arg.or_else(|| Some("dev".into()));
 
-    // Build the TOML content
-    let mut lines = Vec::new();
-    lines.push("[project]".to_string());
-    if let Some(ref v) = vault {
-        lines.push(format!("vault = \"{}\"", v));
-    }
-    if let Some(ref e) = env {
-        lines.push(format!("env = \"{}\"", e));
-    }
-    if let Some(ref i) = identity {
-        lines.push(format!("identity = \"{}\"", i));
-    }
+    // Write the project config file using the shared helper
+    crate::project_config::write_project_config(
+        &target_path,
+        vault.as_deref(),
+        identity.as_deref(),
+        env.as_deref().unwrap_or("dev"),
+    )?;
 
-    lines.push(String::new());
-    lines.push("# Named commands — run with: sigyn run <name>".to_string());
-    lines.push("[commands]".to_string());
-    lines.push("# dev = \"npm run dev\"".to_string());
-    lines.push("# app = \"./start-server\"".to_string());
-
-    let content = lines.join("\n") + "\n";
-
-    std::fs::write(&target_path, &content)?;
+    let content = std::fs::read_to_string(&target_path)?;
 
     if json {
         let config: ProjectConfig = toml::from_str(&content)?;

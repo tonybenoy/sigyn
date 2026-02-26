@@ -18,8 +18,17 @@ These flags can be used with any subcommand:
 | `--json` | | Output as JSON |
 | `--quiet` | | Suppress non-essential output |
 | `--dry-run` | | Preview changes without applying |
+| `--verbose` | | Show detailed config resolution and debug output |
 
 **Resolution priority:** CLI flags > `.sigyn.toml` (project dir) > `~/.sigyn/project.toml` > `~/.sigyn/config.toml` > defaults.
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `SIGYN_HOME` | Override the Sigyn home directory (default: `~/.sigyn`) |
+| `SIGYN_NON_INTERACTIVE` | Disable all interactive prompts (equivalent to piping to a non-TTY) |
+| `CI` | When set, disables interactive prompts (auto-detected in most CI systems) |
 
 ## identity (alias: id)
 
@@ -90,7 +99,9 @@ sigyn vault create myapp
 ```
 
 Creates the vault directory with `vault.toml`, `members.cbor`, `policy.cbor`, default
-environments (dev, staging, prod), and an audit log.
+environments (dev, staging, prod), and an audit log. After creation, Sigyn prints
+suggested next steps and offers to create a `.sigyn.toml` project config in the
+current directory (interactive terminals only).
 
 ### vault list
 
@@ -193,6 +204,36 @@ sigyn secret generate SESSION_ID --env dev --type uuid
 | `--type` | `-t` | Generation type: `password`, `uuid`, `hex`, `base64`, `alphanumeric` (default: password) |
 | `--env` | `-e` | Target environment (default: dev) |
 
+### secret edit
+
+Open all secrets in an environment in `$EDITOR` for batch editing. On save, shows
+a diff of changes (added, modified, removed keys) and asks for confirmation.
+
+```bash
+sigyn secret edit --env dev
+EDITOR=nano sigyn secret edit --env staging
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--env` | `-e` | Target environment (default: dev) |
+
+### secret search
+
+Search for secrets matching a glob pattern across all environments in a vault.
+
+```bash
+sigyn secret search 'DB_*'
+sigyn secret search 'API_*' --reveal
+sigyn secret search '*_URL' --json
+```
+
+| Flag | Short | Description |
+|---|---|---|
+| `--reveal` | `-r` | Show decrypted values (default: masked) |
+
+Supports `*` (match any) and `?` (match single character) wildcards.
+
 ### secret history
 
 Show the change history of a secret.
@@ -221,6 +262,29 @@ Create a new environment.
 ```bash
 sigyn env create qa
 sigyn env create canary --vault myapp
+```
+
+### env diff
+
+Compare secrets between two environments. Shows added, removed, and changed keys.
+
+```bash
+sigyn env diff dev staging
+sigyn env diff dev prod --reveal
+sigyn env diff staging prod --json
+```
+
+| Flag | Description |
+|---|---|
+| `--reveal` | Show actual values in the diff (default: masked markers) |
+
+### env clone
+
+Clone all secrets from one environment to a new environment.
+
+```bash
+sigyn env clone dev qa
+sigyn env clone staging canary
 ```
 
 ### env promote
@@ -373,7 +437,8 @@ sigyn delegation invite create --role readonly --envs '*' --expires 7d
 ### delegation invite accept
 
 Accept an invitation file and join a vault. Verifies the Ed25519 signature before
-accepting.
+accepting. After acceptance, Sigyn prints next steps (sync pull, test access) and
+offers to create a `.sigyn.toml` for the vault.
 
 ```bash
 sigyn delegation invite accept ./invitation-abc123.json
@@ -595,10 +660,12 @@ Manage project-level configuration.
 ### project init
 
 Generate a `.sigyn.toml` in the current directory. Interactively prompts to select
-a vault and identity from those available on the machine.
+a vault and identity from those available on the machine. Sigyn auto-detects the
+project type from `package.json`, `Cargo.toml`, `pyproject.toml`, or `go.mod` and
+pre-selects a matching vault if one exists.
 
 ```bash
-sigyn project init                          # interactive
+sigyn project init                          # interactive (with auto-detection)
 sigyn project init -v myapp -i alice        # non-interactive
 sigyn project init --global                 # write to ~/.sigyn/project.toml instead
 ```
@@ -620,6 +687,19 @@ The `exec` subcommand is the default -- you can omit it:
 # These are equivalent:
 sigyn run -- ./my-app
 sigyn run exec -- ./my-app
+```
+
+If no vault is configured (no `--vault`, no `.sigyn.toml`, no default), Sigyn will
+detect the project type and offer to create a `.sigyn.toml` interactively. In
+non-interactive environments (CI, piped output), it prints an actionable error instead.
+
+Use `--dry-run` to preview what would happen without executing:
+
+```bash
+sigyn run --dry-run -e prod -- ./my-app
+# [dry-run] Vault: 'myapp', env: 'prod', secrets: 12
+# [dry-run] Command: ./my-app
+# [dry-run] Clean env: no (inheriting parent)
 ```
 
 ### run (exec)
@@ -819,6 +899,114 @@ sigyn import 1password --vault "Dev Secrets" --item "API Keys" --env dev
 sigyn import op --vault Production --item "Database Creds" --env prod
 ```
 
+## org
+
+Manage hierarchical organizations. See [Organizations](organizations.md) for the full
+design document.
+
+### org create
+
+Create a root organization. The caller becomes the owner.
+
+```bash
+sigyn org create acme
+```
+
+Creates `~/.sigyn/orgs/acme/` with `node.toml`, `members.cbor`, and `policy.cbor`.
+
+### org node create
+
+Add a child node to an existing org path.
+
+```bash
+sigyn org node create platform --parent acme --type division
+sigyn org node create web --parent acme/platform --type team
+```
+
+| Flag | Description |
+|---|---|
+| `--parent <PATH>` | Parent org path (e.g., `acme` or `acme/platform`) |
+| `--type <TYPE>` | Node type string (default: `team`) |
+
+### org node remove
+
+Remove an empty node (no children, no linked vaults).
+
+```bash
+sigyn org node remove acme/platform/web
+```
+
+### org tree
+
+Display the hierarchy tree.
+
+```bash
+sigyn org tree
+sigyn org tree --org acme
+```
+
+### org info
+
+Show node metadata (UUID, type, owner, children, linked vaults, git remote).
+
+```bash
+sigyn org info acme/platform/web
+```
+
+### org policy show
+
+Display the RBAC policy at a hierarchy node.
+
+```bash
+sigyn org policy show --path acme
+```
+
+### org policy member-add
+
+Add a member at a hierarchy level. Permissions cascade to child nodes via inheritance.
+
+```bash
+sigyn org policy member-add <fingerprint> --role admin --path acme
+```
+
+| Flag | Description |
+|---|---|
+| `--role <ROLE>` | Role to assign: `readonly`, `auditor`, `operator`, `contributor`, `manager`, `admin`, `owner` |
+| `--path <PATH>` | Org path where the membership applies |
+
+### org policy member-remove
+
+Remove a member from a hierarchy level.
+
+```bash
+sigyn org policy member-remove <fingerprint> --path acme
+```
+
+### org policy effective
+
+Show the merged effective permissions for a member by walking the chain from the
+target node to the root org.
+
+```bash
+sigyn org policy effective <fingerprint> --path acme/platform/web
+```
+
+### org sync configure
+
+Set the git remote for a hierarchy node. Child nodes without an explicit remote
+inherit from the nearest ancestor.
+
+```bash
+sigyn org sync configure --path acme --remote-url git@github.com:acme/secrets.git
+sigyn org sync configure --path acme/platform/web --remote-url git@github.com:acme/web.git --branch develop
+```
+
+| Flag | Description |
+|---|---|
+| `--path <PATH>` | Org path to configure |
+| `--remote-url <URL>` | Git remote URL |
+| `--branch <NAME>` | Branch name (default: `main`) |
+
 ## recovery
 
 Disaster recovery via the standalone `sigyn-recovery` binary.
@@ -870,15 +1058,30 @@ sigyn tui --vault myapp --env dev
 
 ### doctor
 
-Run health checks on the Sigyn installation.
+Run health checks on the Sigyn installation. Checks include: home directory,
+identities, vaults, config file, `.sigyn.toml` in the current directory tree,
+default vault accessibility, git availability, pending invitations, and project
+type detection.
 
 ```bash
 sigyn doctor
 ```
 
+### onboard
+
+Guided first-run setup wizard. Walks through identity creation, vault creation,
+`.env` file import, and `.sigyn.toml` setup. In non-interactive mode, prints a
+checklist of what's missing.
+
+```bash
+sigyn onboard
+sigyn onboard --json   # report setup status as JSON
+```
+
 ### status
 
-Show current configuration status (default identity, vault, environment).
+Show current configuration status including identity, vault, environments,
+sync status, rotation schedules, and pending invitations.
 
 ```bash
 sigyn status
@@ -887,11 +1090,47 @@ sigyn status --json
 
 ### init
 
-Initialize the default configuration file at `~/.sigyn/config.toml`.
+Initialize the default configuration file at `~/.sigyn/config.toml`. In interactive
+mode, offers to create an identity and vault if none exist, then runs `doctor` checks.
 
 ```bash
 sigyn init
 sigyn init --identity alice --vault myapp
+```
+
+### notification configure
+
+Interactively configure a webhook for receiving notifications about vault events.
+
+```bash
+sigyn notification configure
+```
+
+### notification test
+
+Send a test notification to all configured webhooks.
+
+```bash
+sigyn notification test
+sigyn notification test --json
+```
+
+### notification list
+
+List all configured webhook endpoints and their event filters.
+
+```bash
+sigyn notification list
+sigyn notification list --json
+```
+
+### update
+
+Self-update to the latest release. Downloads the appropriate binary for the current
+platform and verifies the checksum before replacing the running binary.
+
+```bash
+sigyn update
 ```
 
 ### completions
@@ -912,5 +1151,6 @@ Supported shells: `bash`, `zsh`, `fish`, `powershell`.
 - [Getting Started](getting-started.md) -- step-by-step tutorial
 - [Architecture](architecture.md) -- project structure and design decisions
 - [Security Model](security.md) -- cryptographic primitives and threat model
+- [Organizations](organizations.md) -- hierarchical org structure and inherited RBAC
 - [Delegation](delegation.md) -- invitation and revocation system
 - [Sync](sync.md) -- synchronization and conflict resolution

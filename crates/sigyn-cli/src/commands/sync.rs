@@ -42,6 +42,27 @@ pub enum SyncCommands {
     },
 }
 
+/// Auto-push vault changes (quiet mode for auto-sync hooks).
+pub fn auto_push(vault_name: &str) -> Result<()> {
+    let home = crate::config::sigyn_home();
+    let vault_dir = home.join("vaults").join(vault_name);
+
+    if !vault_dir.exists() {
+        return Ok(());
+    }
+
+    let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+    if !engine.is_repo() {
+        return Ok(());
+    }
+    if !engine.has_changes()? {
+        return Ok(());
+    }
+
+    engine.push("origin", "main")?;
+    Ok(())
+}
+
 pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> {
     match cmd {
         SyncCommands::Push { remote, branch } => {

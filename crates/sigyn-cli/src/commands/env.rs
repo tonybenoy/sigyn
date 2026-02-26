@@ -19,6 +19,23 @@ pub enum EnvCommands {
         /// Environment name
         name: String,
     },
+    /// Compare secrets between two environments
+    Diff {
+        /// Source environment
+        from: String,
+        /// Target environment
+        to: String,
+        /// Show actual values (default: masked)
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// Clone an environment (copy all secrets)
+    Clone {
+        /// Source environment name
+        source: String,
+        /// New environment name
+        target: String,
+    },
     /// Promote secrets from one environment to another
     Promote {
         /// Source environment name
@@ -98,6 +115,185 @@ pub fn handle(
                 name, vault_name
             ));
         }
+        EnvCommands::Diff { from, to, reveal } => {
+            let ctx = unlock_vault(identity, vault, Some(&from))?;
+            check_access(&ctx, AccessAction::Read, None)?;
+
+            let from_path = paths.env_path(&vault_name, &from);
+            let to_path = paths.env_path(&vault_name, &to);
+
+            let from_env = if from_path.exists() {
+                let enc = env_file::read_encrypted_env(&from_path)?;
+                env_file::decrypt_env(&enc, &ctx.cipher)?
+            } else {
+                PlaintextEnv::new()
+            };
+            let to_env = if to_path.exists() {
+                let enc = env_file::read_encrypted_env(&to_path)?;
+                env_file::decrypt_env(&enc, &ctx.cipher)?
+            } else {
+                PlaintextEnv::new()
+            };
+
+            let from_keys: std::collections::HashSet<&str> =
+                from_env.entries.keys().map(|k| k.as_str()).collect();
+            let to_keys: std::collections::HashSet<&str> =
+                to_env.entries.keys().map(|k| k.as_str()).collect();
+
+            let only_from: Vec<&str> = from_keys.difference(&to_keys).copied().collect();
+            let only_to: Vec<&str> = to_keys.difference(&from_keys).copied().collect();
+            let both: Vec<&str> = from_keys.intersection(&to_keys).copied().collect();
+
+            let mut changed = Vec::new();
+            for key in &both {
+                let fv = from_env.get(key).unwrap().value.display_value(true);
+                let tv = to_env.get(key).unwrap().value.display_value(true);
+                if fv != tv {
+                    changed.push(*key);
+                }
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "only_in_from": only_from,
+                    "only_in_to": only_to,
+                    "changed": changed,
+                }))?;
+            } else {
+                println!(
+                    "{} {} vs {}",
+                    style("Env diff").bold(),
+                    style(&from).cyan(),
+                    style(&to).cyan()
+                );
+                println!("{}", style("─".repeat(60)).dim());
+
+                if only_from.is_empty() && only_to.is_empty() && changed.is_empty() {
+                    println!("  Environments are identical.");
+                }
+
+                for key in &only_from {
+                    let val = if reveal {
+                        from_env.get(key).unwrap().value.display_value(true)
+                    } else {
+                        "(removed)".into()
+                    };
+                    println!(
+                        "  {} {} {}",
+                        style("-").red(),
+                        style(key).red(),
+                        style(val).dim()
+                    );
+                }
+                for key in &only_to {
+                    let val = if reveal {
+                        to_env.get(key).unwrap().value.display_value(true)
+                    } else {
+                        "(added)".into()
+                    };
+                    println!(
+                        "  {} {} {}",
+                        style("+").green(),
+                        style(key).green(),
+                        style(val).dim()
+                    );
+                }
+                for key in &changed {
+                    if reveal {
+                        let fv = from_env.get(key).unwrap().value.display_value(true);
+                        let tv = to_env.get(key).unwrap().value.display_value(true);
+                        println!(
+                            "  {} {} {} → {}",
+                            style("~").yellow(),
+                            style(key).yellow(),
+                            style(fv).dim(),
+                            style(tv).dim()
+                        );
+                    } else {
+                        println!(
+                            "  {} {} {}",
+                            style("~").yellow(),
+                            style(key).yellow(),
+                            style("(changed)").dim()
+                        );
+                    }
+                }
+
+                println!();
+                let total = only_from.len() + only_to.len() + changed.len();
+                println!(
+                    "  {} difference(s): {} added, {} removed, {} changed",
+                    total,
+                    only_to.len(),
+                    only_from.len(),
+                    changed.len()
+                );
+            }
+        }
+        EnvCommands::Clone { source, target } => {
+            sigyn_engine::secrets::validation::validate_env_name(&target)?;
+
+            let ctx = unlock_vault(identity, vault, Some(&source))?;
+            check_access(&ctx, AccessAction::CreateEnv, None)?;
+
+            // Verify source exists
+            let source_path = paths.env_path(&vault_name, &source);
+            if !source_path.exists() {
+                anyhow::bail!("source environment '{}' has no secrets", source);
+            }
+
+            // Verify target does not exist
+            let manifest_path = paths.manifest_path(&vault_name);
+            let content = std::fs::read_to_string(&manifest_path)?;
+            let mut manifest = VaultManifest::from_toml(&content)?;
+
+            if manifest.environments.contains(&target) {
+                anyhow::bail!("target environment '{}' already exists", target);
+            }
+
+            // Decrypt source and re-encrypt as target
+            let source_encrypted = env_file::read_encrypted_env(&source_path)?;
+            let source_env = env_file::decrypt_env(&source_encrypted, &ctx.cipher)?;
+            let count = source_env.len();
+
+            let target_encrypted = env_file::encrypt_env(&source_env, &ctx.cipher, &target)?;
+            let target_path = paths.env_path(&vault_name, &target);
+            env_file::write_encrypted_env(&target_path, &target_encrypted)?;
+
+            // Add target env to manifest
+            manifest.environments.push(target.clone());
+            std::fs::write(&manifest_path, manifest.to_toml()?)?;
+
+            // Audit
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if let Ok(mut log) = AuditLog::open(&audit_path) {
+                let _ = log.append(
+                    &ctx.fingerprint,
+                    AuditAction::EnvironmentCreated {
+                        name: target.clone(),
+                    },
+                    None,
+                    AuditOutcome::Success,
+                    ctx.loaded_identity.signing_key(),
+                );
+            }
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "cloned",
+                    "source": source,
+                    "target": target,
+                    "secrets_count": count,
+                }))?;
+            } else {
+                crate::output::print_success(&format!(
+                    "Cloned '{}' → '{}' ({} secrets)",
+                    source, target, count
+                ));
+            }
+        }
         EnvCommands::Promote { from, to, keys } => {
             // Unlock the vault (use source env for policy context)
             let ctx = unlock_vault(identity, vault, Some(&from))?;
@@ -170,6 +366,18 @@ pub fn handle(
                         "  {} skipped (not in source): {}",
                         style("Keys").dim(),
                         result.skipped_keys.join(", ")
+                    );
+                }
+            }
+
+            // Auto-sync after promote
+            if crate::config::load_config().auto_sync {
+                eprintln!("{} auto-syncing...", style("note:").cyan().bold());
+                if let Err(e) = crate::commands::sync::auto_push(&vault_name) {
+                    eprintln!(
+                        "{} auto-sync failed: {}",
+                        style("warning:").yellow().bold(),
+                        e
                     );
                 }
             }
