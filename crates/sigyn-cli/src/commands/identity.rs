@@ -3,6 +3,7 @@ use clap::Subcommand;
 use console::style;
 use sigyn_engine::identity::keygen::IdentityStore;
 use sigyn_engine::identity::{Identity, IdentityProfile, LoadedIdentity};
+use zeroize::Zeroize;
 
 use crate::config::sigyn_home;
 
@@ -44,13 +45,17 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                 anyhow::bail!("identity with name '{}' already exists", name);
             }
 
-            let passphrase = read_passphrase("Enter passphrase: ")?;
-            let confirm = read_passphrase("Confirm passphrase: ")?;
+            let mut passphrase = read_passphrase("Enter passphrase: ")?;
+            let mut confirm = read_passphrase("Confirm passphrase: ")?;
             if passphrase != confirm {
+                passphrase.zeroize();
+                confirm.zeroize();
                 anyhow::bail!("passphrases do not match");
             }
+            confirm.zeroize();
 
             if passphrase.len() < 8 {
+                passphrase.zeroize();
                 anyhow::bail!("passphrase must be at least 8 characters");
             }
 
@@ -58,6 +63,7 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
             let identity = store
                 .generate(profile, &passphrase)
                 .context("failed to generate identity")?;
+            passphrase.zeroize();
 
             if json {
                 crate::output::print_json(&identity)?;
@@ -153,14 +159,16 @@ pub fn load_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<
         // TODO: once agent returns raw key material, reconstruct LoadedIdentity directly
     }
 
-    let passphrase = read_passphrase(&format!(
+    let mut passphrase = read_passphrase(&format!(
         "Passphrase for [{}...]: ",
         &fp_hex[..8.min(fp_hex.len())]
     ))?;
 
     let loaded = store
         .load(&identity.fingerprint, &passphrase)
-        .context("failed to unlock identity (wrong passphrase?)")?;
+        .context("failed to unlock identity (wrong passphrase?)");
+    passphrase.zeroize();
+    let loaded = loaded?;
 
     // Cache in agent for future use (best-effort)
     if crate::agent::get_agent_socket().is_some() {

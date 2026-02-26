@@ -164,6 +164,9 @@ pub enum SecretCommands {
         /// Environment
         #[arg(long, short)]
         env: Option<String>,
+        /// Print the generated value to stdout
+        #[arg(long)]
+        reveal: bool,
     },
 }
 
@@ -840,11 +843,17 @@ pub fn handle(
                     .set_text(&value)
                     .map_err(|e| anyhow::anyhow!("failed to copy to clipboard: {}", e))?;
 
-                // Spawn background thread to clear clipboard after 30 seconds
-                std::thread::spawn(|| {
+                // Clear clipboard after 30 seconds. An AtomicBool ensures
+                // the clear happens at most once even if the timer and
+                // process exit race.
+                let cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = cleared.clone();
+                std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(30));
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        let _ = cb.set_text("");
+                    if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            let _ = cb.set_text("");
+                        }
                     }
                 });
 
@@ -1024,9 +1033,18 @@ pub fn handle(
                 sigyn_engine::vault::PlaintextEnv::new()
             };
 
-            // Write KEY=VALUE pairs to a temp file
-            let tmp_dir = std::env::temp_dir();
-            let tmp_path = tmp_dir.join(format!("sigyn-edit-{}.env", std::process::id()));
+            // Write KEY=VALUE pairs to a secure temp file (cryptographically random name)
+            let tmp_path = {
+                let tf = tempfile::Builder::new()
+                    .prefix("sigyn-edit-")
+                    .suffix(".env")
+                    .tempfile()
+                    .context("failed to create secure temp file")?;
+                let (_, path) = tf
+                    .keep()
+                    .map_err(|e| anyhow::anyhow!("failed to persist temp file: {}", e))?;
+                path
+            };
 
             let mut content = String::new();
             content.push_str(&format!(
@@ -1044,10 +1062,24 @@ pub fn handle(
             }
             std::fs::write(&tmp_path, &content)?;
 
-            // Open editor
+            // Open editor — warn if EDITOR/VISUAL points to a non-standard path
             let editor = std::env::var("VISUAL")
                 .or_else(|_| std::env::var("EDITOR"))
                 .unwrap_or_else(|_| "vi".into());
+
+            let editor_path = std::path::Path::new(&editor);
+            if editor_path.is_absolute() {
+                let is_standard = ["/usr/bin", "/usr/local/bin", "/bin", "/snap/bin"]
+                    .iter()
+                    .any(|prefix| editor_path.starts_with(prefix));
+                if !is_standard {
+                    eprintln!(
+                        "{} editor '{}' is not in a standard system path",
+                        console::style("warning:").yellow().bold(),
+                        editor
+                    );
+                }
+            }
 
             let status = std::process::Command::new(&editor)
                 .arg(&tmp_path)
@@ -1233,6 +1265,7 @@ pub fn handle(
             length,
             r#type,
             env,
+            reveal,
         } => {
             sigyn_engine::secrets::validate_key_name(&key)?;
 
@@ -1291,17 +1324,24 @@ pub fn handle(
             );
 
             if json {
-                crate::output::print_json(&serde_json::json!({
+                let mut obj = serde_json::json!({
                     "key": key,
-                    "value": generated,
                     "env": ctx.env_name,
-                }))?;
+                });
+                if reveal {
+                    obj["value"] = serde_json::Value::String(generated);
+                }
+                crate::output::print_json(&obj)?;
             } else {
                 crate::output::print_success(&format!(
                     "Generated '{}' in env '{}'",
                     key, ctx.env_name
                 ));
-                println!("  Value: {}", generated);
+                if reveal {
+                    println!("  Value: {}", generated);
+                } else {
+                    println!("  Use 'sigyn secret get {}' to retrieve the value", key);
+                }
             }
 
             maybe_auto_sync(&ctx.vault_name);

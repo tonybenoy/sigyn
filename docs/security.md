@@ -337,7 +337,9 @@ vault UUID.
 - Key fingerprint comparisons use constant-time equality (`subtle::ConstantTimeEq`) to prevent timing side-channels.
 - Decrypted secret values are never written to disk in plaintext.
 - The CLI never logs or prints private keys.
-- Clipboard copies are automatically cleared after 30 seconds.
+- Clipboard copies are automatically cleared after 30 seconds via a background thread
+  guarded by an `AtomicBool` to prevent double-clear races.
+- Passphrase strings are explicitly zeroized at CLI call sites after use.
 
 ## Atomic File Writes
 
@@ -353,10 +355,10 @@ durability, and atomically renames to the target path. This eliminates the TOCTO
 window where a file could be briefly readable with default permissions between
 creation and `chmod`.
 
-**Symlink protection:** Before writing, `atomic_write()` canonicalizes the target path
-and verifies it stays within the expected parent directory. Symlinks that escape the
-vault directory (e.g. pointing to `/etc/`) are rejected to prevent symlink-based
-directory traversal attacks.
+**Symlink protection:** Before writing, `atomic_write()` walks every component of the
+target path and rejects the operation if any component is a symlink. This prevents both
+direct symlink files and symlinked parent directories from redirecting writes outside the
+vault. The check applies to both new and existing files.
 
 ## Filesystem Permissions
 
@@ -366,6 +368,9 @@ Sigyn enforces restrictive Unix permissions on all files it manages:
   users from reading vault metadata, config, or manifests.
 - **Encrypted files** (policy, secrets, identities): written via `atomic_write()` with
   `0o600` permissions (owner read/write only).
+- **Audit log files**: `0o600` permissions enforced on creation via `OpenOptions`.
+- **Witness log files**: `0o600` permissions enforced after atomic persist.
+- **Lock files**: `0o600` permissions enforced (errors propagated, not silently dropped).
 - **All other files** (manifests, config, context, notifications): also encrypted and
   written via `secure_write()` with `0o600` permissions.
 
@@ -574,7 +579,7 @@ using the sealed file format.
 | Replay of old ciphertext | Unique nonces per encryption; vault UUID bound into HKDF salt |
 | Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop; constant-time fingerprint comparison |
 | Partial file writes | Atomic writes via `tempfile::persist()` |
-| Symlink traversal | Path canonicalization; writes rejected if target escapes parent directory |
+| Symlink traversal | Per-component symlink check rejects any symlink in path (parent dirs included) |
 | Local filesystem snooping | `~/.sigyn/` directory `0o700`; all files `0o600`; all contents encrypted |
 | Device key compromise | Limits exposure to Tier A files only; vault secrets require identity key |
 | Rollback attack (force-push) | Commit OID checkpoints; descendant verification on pull |
@@ -588,6 +593,13 @@ using the sealed file format.
 | Forged org/fork policy file | All policy files signed and bound to vault/node UUID; unsigned rejected |
 | Crash during audit append | Trailing corrupt line tolerated; mid-file tampering detected |
 | File permission TOCTOU | Atomic temp+rename with `0o600` mode set at creation |
+| Predictable temp file attack | Editor temp files use cryptographically random names via `tempfile` crate |
+| Secret leaking via process list | Inline `{{KEY}}` substitution requires explicit `--allow-inline-secrets` flag |
+| Malicious EDITOR env var | Warning emitted when `$EDITOR`/`$VISUAL` points outside standard system paths |
+| Rollback via malformed checkpoint | Invalid checkpoint OIDs produce an error instead of silently skipping validation |
+| Cloud import argument injection | Cloud resource names validated: no leading dashes, control chars, or shell metacharacters |
+| Generated secret leaking to stdout | `secret generate` hides value by default; requires `--reveal` flag |
+| Passphrase lingering in memory | Passphrase strings zeroized at CLI call sites after use |
 
 ## Related Documentation
 

@@ -17,6 +17,12 @@ fn argon2_instance() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
+/// Wrap a private key with a passphrase-derived key.
+///
+/// # Security
+/// The caller is responsible for zeroizing the passphrase `String` after this
+/// call returns (e.g. by using `zeroize::Zeroize` on the owned `String`).
+/// This function cannot zeroize the borrowed `&str`.
 pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Result<Vec<u8>> {
     use chacha20poly1305::aead::Payload;
     use chacha20poly1305::{aead::Aead, AeadCore, ChaCha20Poly1305, KeyInit};
@@ -48,6 +54,11 @@ pub fn wrap_private_key(key: &[u8; 32], passphrase: &str, salt: &[u8; 32]) -> Re
     Ok(result)
 }
 
+/// Unwrap a private key using a passphrase-derived key.
+///
+/// # Security
+/// The caller is responsible for zeroizing the passphrase `String` after this
+/// call returns (e.g. by using `zeroize::Zeroize` on the owned `String`).
 pub fn unwrap_private_key(wrapped: &[u8], passphrase: &str, salt: &[u8; 32]) -> Result<[u8; 32]> {
     use chacha20poly1305::aead::generic_array::GenericArray;
     use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};

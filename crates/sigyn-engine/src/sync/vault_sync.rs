@@ -110,18 +110,22 @@ pub fn init_audit_repo(vault_dir: &std::path::Path) -> Result<()> {
 
     // Add audit/ to the vault's .gitignore so it's not tracked by the vault repo
     let gitignore_path = vault_dir.join(".gitignore");
-    let mut content = if gitignore_path.exists() {
-        std::fs::read_to_string(&gitignore_path).unwrap_or_default()
-    } else {
-        String::new()
+    let mut content = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(SigynError::GitError(format!(
+                "failed to read .gitignore: {}",
+                e
+            )))
+        }
     };
     if !content.contains("audit/") {
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
         content.push_str("audit/\n");
-        std::fs::write(&gitignore_path, content)
-            .map_err(|e| SigynError::GitError(format!("failed to write .gitignore: {}", e)))?;
+        crate::io::atomic_write(&gitignore_path, content.as_bytes())?;
     }
 
     Ok(())

@@ -4,6 +4,28 @@ use std::process::Command;
 /// Maximum allowed output size from external CLI commands (10 MB).
 const MAX_CLI_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 
+/// Validate a cloud resource name (project, config, secret ID, vault, etc.).
+/// Rejects names that could confuse CLI argument parsing or contain shell metacharacters.
+fn validate_cloud_arg(name: &str, kind: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("{} name must not be empty", kind);
+    }
+    if name.starts_with('-') {
+        anyhow::bail!("{} name must not start with '-': {}", kind, name);
+    }
+    if name.len() > 256 {
+        anyhow::bail!("{} name exceeds 256 character limit: {}", kind, name);
+    }
+    // Reject shell metacharacters and control characters
+    if name
+        .chars()
+        .any(|c| c.is_control() || "`$;|&><".contains(c))
+    {
+        anyhow::bail!("{} name contains invalid characters: {}", kind, name);
+    }
+    Ok(())
+}
+
 /// Run an external CLI command and return its stdout as a string.
 fn run_cli_command(cmd: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(cmd)
@@ -54,6 +76,8 @@ pub fn parse_json_kv(json_str: &str) -> Option<Vec<(String, String)>> {
 /// Shells out to the `doppler` CLI, parses the resulting JSON, and filters
 /// out Doppler metadata keys (those starting with `DOPPLER_`).
 pub fn import_doppler(project: &str, config: &str) -> Result<Vec<(String, String)>> {
+    validate_cloud_arg(project, "Doppler project")?;
+    validate_cloud_arg(config, "Doppler config")?;
     let output = run_cli_command(
         "doppler",
         &[
@@ -103,6 +127,10 @@ pub fn parse_doppler_json(json_str: &str) -> Result<Vec<(String, String)>> {
 /// field, and attempts to parse it as JSON key-value pairs. If the secret is
 /// not JSON, it is returned as a single entry keyed by `secret_id`.
 pub fn import_aws_secret(secret_id: &str, region: Option<&str>) -> Result<Vec<(String, String)>> {
+    validate_cloud_arg(secret_id, "AWS secret ID")?;
+    if let Some(r) = region {
+        validate_cloud_arg(r, "AWS region")?;
+    }
     let mut args = vec![
         "secretsmanager",
         "get-secret-value",
@@ -157,6 +185,11 @@ pub fn import_gcp_secret(
     secret_name: &str,
     version: Option<&str>,
 ) -> Result<Vec<(String, String)>> {
+    validate_cloud_arg(project, "GCP project")?;
+    validate_cloud_arg(secret_name, "GCP secret name")?;
+    if let Some(v) = version {
+        validate_cloud_arg(v, "GCP version")?;
+    }
     let ver = version.unwrap_or("latest");
     let secret_arg = format!("--secret={}", secret_name);
     let project_arg = format!("--project={}", project);
@@ -191,6 +224,8 @@ pub fn parse_gcp_output(output: &str, secret_name: &str) -> Vec<(String, String)
 /// fields that have a value (filtering for `CONCEALED` type fields and any
 /// field with a non-empty value).
 pub fn import_1password(vault: &str, item: &str) -> Result<Vec<(String, String)>> {
+    validate_cloud_arg(vault, "1Password vault")?;
+    validate_cloud_arg(item, "1Password item")?;
     let output = run_cli_command(
         "op",
         &["item", "get", item, "--vault", vault, "--format", "json"],
@@ -234,6 +269,33 @@ pub fn parse_1password_json(json_str: &str) -> Result<Vec<(String, String)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- validate_cloud_arg ----
+
+    #[test]
+    fn test_validate_cloud_arg_valid() {
+        assert!(validate_cloud_arg("my-project", "test").is_ok());
+        assert!(validate_cloud_arg("my/project/path", "test").is_ok());
+        assert!(validate_cloud_arg("PROJECT_123", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_cloud_arg_rejects_empty() {
+        assert!(validate_cloud_arg("", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_cloud_arg_rejects_leading_dash() {
+        assert!(validate_cloud_arg("--malicious", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_cloud_arg_rejects_shell_chars() {
+        assert!(validate_cloud_arg("foo;rm -rf /", "test").is_err());
+        assert!(validate_cloud_arg("foo|bar", "test").is_err());
+        assert!(validate_cloud_arg("$HOME", "test").is_err());
+        assert!(validate_cloud_arg("foo`cmd`", "test").is_err());
+    }
 
     // ---- parse_json_kv ----
 

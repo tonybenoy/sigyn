@@ -164,6 +164,11 @@ impl AuditLog {
             .create(true)
             .append(true)
             .open(&self.path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(line.as_bytes())?;
         file.sync_all()?;
 

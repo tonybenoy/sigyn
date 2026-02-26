@@ -228,17 +228,17 @@ impl GitSyncEngine {
 
         // Rollback check: verify fetch_commit descends from our checkpoint
         if let Some(cp_hex) = checkpoint_oid {
-            if let Ok(cp_oid) = git2::Oid::from_str(cp_hex) {
-                let descends = repo
-                    .graph_descendant_of(fetch_commit.id(), cp_oid)
-                    .unwrap_or(false);
-                let is_same = fetch_commit.id() == cp_oid;
-                if !descends && !is_same {
-                    return Err(SigynError::RollbackDetected {
-                        remote: fetch_commit.id().to_string(),
-                        local: cp_hex.to_string(),
-                    });
-                }
+            let cp_oid = git2::Oid::from_str(cp_hex)
+                .map_err(|_| SigynError::GitError(format!("invalid checkpoint OID: {}", cp_hex)))?;
+            let descends = repo
+                .graph_descendant_of(fetch_commit.id(), cp_oid)
+                .unwrap_or(false);
+            let is_same = fetch_commit.id() == cp_oid;
+            if !descends && !is_same {
+                return Err(SigynError::RollbackDetected {
+                    remote: fetch_commit.id().to_string(),
+                    local: cp_hex.to_string(),
+                });
             }
         }
 

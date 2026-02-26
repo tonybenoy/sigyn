@@ -27,7 +27,10 @@ impl VaultLock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| {
+                    SigynError::LockFailed(format!("failed to set lock file permissions: {}", e))
+                })?;
         }
 
         let mut lock = RwLock::new(file);

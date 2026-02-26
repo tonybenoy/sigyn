@@ -74,8 +74,15 @@ impl WitnessLog {
         let dir = self.path.parent().unwrap_or(std::path::Path::new("."));
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         tmp.write_all(&encrypted)?;
-        tmp.persist(&self.path)
+        let file = tmp
+            .persist(&self.path)
             .map_err(|e| SigynError::Io(e.error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        let _ = file;
         Ok(())
     }
 }

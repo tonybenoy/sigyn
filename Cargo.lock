@@ -3110,7 +3110,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3147,11 +3147,12 @@ dependencies = [
  "toml",
  "totp-rs",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "sigyn-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3181,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-engine"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "argon2",
  "base64",
@@ -3230,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-recovery"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",

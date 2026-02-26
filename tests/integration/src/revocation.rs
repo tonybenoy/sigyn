@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use sigyn_engine::crypto::envelope::{seal_v2, unseal_env_key, unseal_vault_key};
+use sigyn_engine::crypto::envelope::{seal_v2, unseal_vault_key};
 use sigyn_engine::crypto::keys::{KeyFingerprint, X25519PrivateKey};
 use sigyn_engine::crypto::vault_cipher::VaultCipher;
 use sigyn_engine::delegation::revoke::revoke_member;

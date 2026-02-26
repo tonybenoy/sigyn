@@ -40,6 +40,10 @@ pub struct ExecArgs {
     #[arg(long)]
     pub staging: bool,
 
+    /// Allow {{KEY}} substitution in command args (values visible in process list)
+    #[arg(long)]
+    pub allow_inline_secrets: bool,
+
     /// Command and arguments
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -245,16 +249,25 @@ fn exec_with_secrets(
         return Ok(());
     }
 
-    // Substitute inline secret refs (e.g. {{KEY}}) in command args.
-    // Note: substituted values will be visible in the process argv (e.g. via `ps`).
-    // For sensitive values, prefer env var injection over inline refs.
-    let substituted = crate::inject::process::substitute_secret_refs(command, &plaintext);
-    if substituted != command {
+    // Substitute inline secret refs (e.g. {{KEY}}) in command args only if opted in.
+    // Substituted values are visible in the process argv (e.g. via `ps`).
+    let has_refs = command.iter().any(|arg| arg.contains("{{"));
+    let substituted = if has_refs && exec.allow_inline_secrets {
+        let sub = crate::inject::process::substitute_secret_refs(command, &plaintext);
         eprintln!(
             "{} inline secret refs substituted into command args (values visible in process list)",
             style("warning:").yellow().bold()
         );
-    }
+        sub
+    } else if has_refs {
+        eprintln!(
+            "{} command contains {{{{KEY}}}} refs but --allow-inline-secrets was not set; refs will not be substituted",
+            style("warning:").yellow().bold()
+        );
+        command.to_vec()
+    } else {
+        command.to_vec()
+    };
 
     let exit_code = crate::inject::run_with_secrets(&plaintext, &substituted, !exec.clean)?;
     std::process::exit(exit_code);
