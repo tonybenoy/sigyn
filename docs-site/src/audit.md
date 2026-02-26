@@ -23,6 +23,10 @@ Each log entry contains:
 
 - `VaultCreated`, `VaultDeleted`
 - `SecretRead`, `SecretWritten`, `SecretDeleted`
+- `SecretsExported` — `sigyn run export` (records env and format)
+- `SecretsInjected` — `sigyn run exec` (records env and command)
+- `SecretsServed` — `sigyn run serve` (records env)
+- `SecretsListed` — `sigyn secret list` (records env)
 - `MemberInvited`, `MemberRevoked`
 - `PolicyChanged`
 - `MasterKeyRotated`
@@ -58,7 +62,8 @@ The audit chain is tamper-evident by construction:
 
 1. Each entry's `prev_hash` must match the `entry_hash` of the preceding entry.
 2. Each entry's `entry_hash` must be a valid blake3 hash of the entry content.
-3. Each entry's `signature` must be a valid Ed25519 signature from the claimed `actor`.
+3. Each entry's `signature` must be a valid Ed25519 signature from the claimed `actor`. Entries by actors not present in the vault policy are rejected (prevents forged entries by outsiders).
+4. All sequence numbers from 0 to N must be present with no gaps, detecting selective deletion of individual entries.
 
 If any check fails, `sigyn audit verify` reports the broken link with the sequence number and reason.
 
@@ -72,6 +77,8 @@ sigyn audit witness
 
 This is useful for compliance workflows where multiple parties must acknowledge sensitive operations.
 
+The witness log itself is encrypted and optionally signed. When signed, the format is `SGNW || sig_len(4 LE) || Ed25519_signature || ciphertext`. The signature is verified on load when the owner's verifying key is available, preventing tampering with witness records.
+
 ## Storage
 
-The audit log is stored as JSON Lines in `audit.log.json` within the vault directory. This format is streamable, grep-friendly, and compatible with external log analysis tools.
+The audit log is stored as JSON Lines in `audit.log.json` within the vault directory. Each line is individually encrypted with a vault-derived cipher (HKDF from the vault key with context `sigyn-audit-v1`) and base64-encoded. This format is streamable and compatible with external log analysis tools after decryption.

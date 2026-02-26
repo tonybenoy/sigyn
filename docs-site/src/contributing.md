@@ -84,7 +84,7 @@ cargo fmt --all
 
 ## Documentation
 
-The documentation is located in the `docs/` directory and is served via mdBook from `docs-site/`.
+The documentation lives in `docs-site/src/` and is served via mdBook.
 
 To build the docs site locally:
 

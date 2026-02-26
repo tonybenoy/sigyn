@@ -138,7 +138,7 @@ sigyn secret list      # uses vault/env/identity from .sigyn.toml
 
 ### Organizations
 
-Group vaults into a hierarchical org structure with inherited RBAC. See [Organizations](docs/organizations.md) for details.
+Group vaults into a hierarchical org structure with inherited RBAC. See [Organizations](docs-site/src/organizations.md) for details.
 
 ### Sync via Git
 
@@ -208,7 +208,7 @@ Run `sigyn <command> --help` for detailed usage of any command.
 - **Access control**: a seven-level RBAC hierarchy combined with per-key ACL constraints (time windows, expiry, MFA) governs who can read, write, or administer secrets.
 - **Recovery**: the master key can be split into Shamir shards (K-of-N) and distributed to trusted parties for disaster recovery.
 
-For a full threat model and cryptographic details, see [`docs/security.md`](docs/security.md).
+For a full threat model and cryptographic details, see [`docs-site/src/security.md`](docs-site/src/security.md).
 
 ---
 
@@ -253,14 +253,14 @@ pull request. The CI pipeline enforces both.
 
 ## Documentation
 
-- [**Getting Started**](docs/getting-started.md) — install and use Sigyn
-- [**CLI Reference**](docs/cli-reference.md) — complete command documentation
-- [**Examples**](docs/examples.md) — real-world recipes and workflows
-- [**FAQ**](docs/FAQ.md) — frequently asked questions
-- [**Architecture**](docs/architecture.md) — deep dive into how it works
-- [**Security Model**](docs/security.md) — crypto primitives and threat model
-- [**Development Guide**](docs/DEVELOPMENT.md) — hacking on Sigyn
-- [**Organizations**](docs/organizations.md) — hierarchical org structure and inherited RBAC
+- [**Getting Started**](docs-site/src/getting-started.md) — install and use Sigyn
+- [**CLI Reference**](docs-site/src/cli-reference.md) — complete command documentation
+- [**Examples**](docs-site/src/examples.md) — real-world recipes and workflows
+- [**FAQ**](docs-site/src/FAQ.md) — frequently asked questions
+- [**Architecture**](docs-site/src/architecture.md) — deep dive into how it works
+- [**Security Model**](docs-site/src/security.md) — crypto primitives and threat model
+- [**Development Guide**](docs-site/src/DEVELOPMENT.md) — hacking on Sigyn
+- [**Organizations**](docs-site/src/organizations.md) — hierarchical org structure and inherited RBAC
 - [**Contributing**](CONTRIBUTING.md) — how to contribute
 
 ---

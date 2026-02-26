@@ -4,9 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docs/**'
-      - 'README.md'
       - 'docs-site/**'
+      - 'CONTRIBUTING.md'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -30,7 +29,7 @@ jobs:
         with:
           mdbook-version: 'latest'
 
-      - name: Copy docs into mdBook source
+      - name: Pre-build (copy CONTRIBUTING.md)
         run: bash docs-site/copy-docs.sh
 
       - name: Build docs site

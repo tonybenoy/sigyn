@@ -364,16 +364,27 @@ sigyn mfa backup -i alice
 
 ## Rotation Schedules with Hooks
 
+Rotation hooks are executed directly (no shell) after Sigyn rotates a secret.
+The **new secret value is passed via stdin**, not as an environment variable. This
+prevents the secret from being visible in `/proc/<pid>/environ`. The environment
+name is available as `$SIGYN_ENV`.
+
+Hook commands are validated when saved to policy: shell metacharacters
+(`;`, `|`, `&`, `$`, `` ` ``, `\`, `>`, `<`, `(`, `)`) are rejected, and the
+command name must not contain path traversal (`..`). Maximum command length is
+512 characters.
+
 ### Automated Database Password Rotation
 
-Create a hook script that updates AWS RDS after Sigyn rotates the secret:
+Create a hook script that reads the new secret from stdin and updates AWS RDS:
 
 ```bash
 #!/usr/bin/env bash
 # hooks/rotate-db.sh — called after sigyn rotates DB_PASSWORD
+# The new secret value is passed via stdin.
 set -euo pipefail
 
-NEW_PASS=$(sigyn secret get DB_PASSWORD --env prod)
+NEW_PASS=$(cat)   # read new secret from stdin
 aws rds modify-db-instance \
   --db-instance-identifier mydb \
   --master-user-password "$NEW_PASS"
@@ -410,9 +421,10 @@ sigyn rotate key DB_PASSWORD --env prod
 ```bash
 #!/usr/bin/env bash
 # hooks/rotate-redis.sh
+# The new secret value is passed via stdin.
 set -euo pipefail
 
-NEW_TOKEN=$(sigyn secret get REDIS_AUTH_TOKEN --env prod)
+NEW_TOKEN=$(cat)   # read new secret from stdin
 redis-cli -h redis.internal CONFIG SET requirepass "$NEW_TOKEN"
 echo "Redis auth token updated"
 ```

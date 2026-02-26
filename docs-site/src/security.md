@@ -240,7 +240,8 @@ See [Delegation](delegation.md) for a full deep dive. Key security properties:
 - Members can only delegate roles **strictly below** their own level (e.g., a Manager can invite Contributors but not Managers). The Owner can invite any role except Owner.
 - Each delegation records `delegated_by`, forming a tree rooted at the Owner.
 - **Cascade revocation**: revoking a member revokes everyone they invited, transitively (BFS traversal of the delegation tree).
-- **Per-environment key rotation on revoke**: when a member is revoked, only the environment keys they had access to are rotated. Each affected environment gets a new random key, re-sealed to the remaining authorized members. Unaffected environments are untouched. The revoked member (and their cascade subtree) immediately lose decryption access.
+- **Vault key rotation on revoke**: the vault-level encryption key is rotated immediately upon revocation. A new random key is generated and re-sealed to the remaining authorized members only. The revoked member's cached vault key can no longer decrypt policy, manifest, or audit data written after revocation.
+- **Per-environment key rotation on revoke**: in addition to the vault key, only the environment keys the revoked member had access to are rotated. Each affected environment gets a new random key, re-sealed to the remaining authorized members. Unaffected environments are untouched. The revoked member (and their cascade subtree) immediately lose decryption access.
 - **Invitation expiry**: invitations are created with a 7-day expiry (`expires_at`). Attempting to accept an expired invitation is rejected with a clear error message. This limits the window for invitation file theft or replay.
 
 ## Audit Trail
@@ -257,7 +258,7 @@ Each `AuditEntry` contains:
 - `sequence`: monotonically increasing counter.
 - `timestamp`: UTC timestamp.
 - `actor`: BLAKE3 key fingerprint of the actor.
-- `action`: what was done (`SecretRead`, `SecretWritten`, `SecretDeleted`, `VaultCreated`, `MemberRevoked`, `PolicyChanged`, `MasterKeyRotated`, `EnvironmentCreated`, `EnvironmentPromoted`, etc.).
+- `action`: what was done (`SecretRead`, `SecretWritten`, `SecretDeleted`, `VaultCreated`, `MemberRevoked`, `PolicyChanged`, `MasterKeyRotated`, `EnvironmentCreated`, `EnvironmentPromoted`, `SecretsExported`, `SecretsInjected`, `SecretsServed`, `SecretsListed`, etc.).
 - `env`: which environment was affected (optional).
 - `outcome`: `Success` or `Failure(reason)`.
 - `nonce`: 16-byte random nonce (prevents rainbow table attacks on the hash chain).
@@ -286,9 +287,14 @@ Each `AuditEntry` contains:
 sigyn audit verify
 ```
 
-This walks the entire log, verifying that each entry's `prev_hash` matches the
-preceding entry's `entry_hash`. Any break in the chain is reported with the
-sequence number of the first invalid entry (`SigynError::AuditChainBroken(seq)`).
+This walks the entire log and verifies:
+
+1. **Hash linkage**: each entry's `prev_hash` matches the preceding entry's `entry_hash`.
+2. **Hash integrity**: each entry's `entry_hash` is recomputed and compared.
+3. **Ed25519 signatures**: each entry's signature is verified against the actor's public key from the vault policy. Entries by unknown actors (not in policy) are rejected.
+4. **Sequence continuity**: all sequence numbers from 0 to N must be present with no gaps, detecting selective deletion of entries.
+
+Any break is reported with the sequence number of the first invalid entry (`SigynError::AuditChainBroken(seq)`).
 
 ## Shamir Secret Sharing (Recovery)
 
@@ -383,7 +389,10 @@ available at read time:
 ### Tier A: Device Key
 
 A 32-byte random key stored at `~/.sigyn/.device_key` (mode `0o400`). Generated on
-first use. Protects files that must be readable **before** any identity is loaded:
+first use. The file is 64 bytes: the key followed by a BLAKE3 integrity hash
+(`BLAKE3(key || "sigyn-device-key-v1")`). The hash is verified on every load;
+tampered files are rejected. Protects files that must be readable **before** any
+identity is loaded:
 
 | File | HKDF Context |
 |---|---|
@@ -502,6 +511,9 @@ Sigyn uses Trust-On-First-Use to prevent a vault copy-and-rehost attack:
 
 1. **First access**: When a vault is unlocked for the first time on a device, the
    vault ID and owner fingerprint are recorded in the device-local `pinned_vaults.cbor`.
+   A prominent warning banner is displayed urging the user to verify the owner
+   fingerprint out-of-band. For automated workflows, set `SIGYN_VERIFY_OWNER=<fingerprint>`
+   to require a match before the pin is saved — a mismatch aborts the unlock.
 2. **Subsequent accesses**: The vault ID and owner fingerprint are verified against
    the pin. If either has changed, the unlock is aborted with an SSH-style warning:
 
@@ -560,6 +572,22 @@ The `.org_link` metadata file (which records a vault's org hierarchy membership)
 encrypted with a device-key-derived cipher (HKDF context `b"sigyn-org-link-v1"`)
 using the sealed file format.
 
+## Project Config Trust
+
+The `.sigyn.toml` file provides per-project defaults (vault name, environment,
+identity). Because it is typically committed to a git repository, it can be
+modified by anyone with push access. Sigyn applies the following safeguards:
+
+- **Git-tracked warning**: when `.sigyn.toml` is loaded from a directory that
+  contains a `.git` directory (or any parent does), a warning is printed:
+  `warning: using .sigyn.toml from git-tracked directory — verify this file was not modified by an untrusted party`.
+- **Identity override protection**: if `.sigyn.toml` sets the `identity` field
+  (which controls which identity is used for all operations), Sigyn prints an
+  additional warning and requires the `SIGYN_TRUST_PROJECT_CONFIG` environment
+  variable to be set. Without it, the identity override is ignored with a warning.
+  This prevents an attacker from silently redirecting vault operations to a
+  compromised identity by modifying a committed config file.
+
 ## Threat Model Summary
 
 | Threat | Mitigation |
@@ -595,6 +623,19 @@ using the sealed file format.
 | File permission TOCTOU | Atomic temp+rename with `0o600` mode set at creation |
 | Predictable temp file attack | Editor temp files use cryptographically random names via `tempfile` crate |
 | Secret leaking via process list | Inline `{{KEY}}` substitution requires explicit `--allow-inline-secrets` flag |
+| Secret leaking via rotation hooks | Hook secrets passed via stdin, not environment variables; avoids `/proc/<pid>/environ` visibility |
+| Hook command injection | Hooks executed directly (no shell); shell metacharacters and path traversal rejected at save time |
+| Unaudited secret access | `sigyn run exec/export/serve` and `sigyn secret list` generate audit entries |
+| Malicious project config | Warning when `.sigyn.toml` is in a git-tracked directory; identity override requires `SIGYN_TRUST_PROJECT_CONFIG` |
+| Vault key retained after revocation | Vault key rotated on member revocation; new key re-sealed to remaining members only |
+| Agent socket hijacking | Session token required for CACHE command; socket ownership verified before connecting |
+| Device key tampering | Stored with BLAKE3 integrity hash; tampered files rejected on load |
+| Identity file tampering | BLAKE3 keyed MAC (using device key) appended and verified on every load |
+| Weak KDF parameters | Argon2id parameters validated against minimums (m\_cost >= 64 MiB, t\_cost >= 3, p\_cost >= 1) |
+| Audit log gap injection | Sequence continuity verified — gaps in sequence numbers detected and rejected |
+| Unsigned witness log | Witness log optionally signed with Ed25519; signature verified on load when verifying key available |
+| Force-push on sync push | Push verifies local HEAD descends from remote HEAD; non-fast-forward rejected unless `--force` |
+| TOFU pin poisoning on first access | Prominent warning banner on first vault access; `SIGYN_VERIFY_OWNER` env var for automated verification |
 | Malicious EDITOR env var | Warning emitted when `$EDITOR`/`$VISUAL` points outside standard system paths |
 | Rollback via malformed checkpoint | Invalid checkpoint OIDs produce an error instead of silently skipping validation |
 | Cloud import argument injection | Cloud resource names validated: no leading dashes, control chars, or shell metacharacters |
