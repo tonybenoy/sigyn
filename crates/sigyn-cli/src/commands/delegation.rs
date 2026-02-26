@@ -330,7 +330,7 @@ pub fn handle(
                 // V1: single master key slot
                 envelope::add_recipient(
                     &mut header,
-                    ctx.cipher.key_bytes(),
+                    ctx.vault_cipher.key_bytes(),
                     &invitee_identity.encryption_pubkey,
                     ctx.manifest.vault_id,
                 )
@@ -726,8 +726,8 @@ pub fn handle(
                         let encrypted = env_file::read_encrypted_env(&env_path).map_err(|e| {
                             anyhow::anyhow!("failed to read env '{}': {}", env_name, e)
                         })?;
-                        let plaintext =
-                            env_file::decrypt_env(&encrypted, &ctx.cipher).map_err(|e| {
+                        let plaintext = env_file::decrypt_env(&encrypted, &ctx.vault_cipher)
+                            .map_err(|e| {
                                 anyhow::anyhow!("failed to decrypt env '{}': {}", env_name, e)
                             })?;
                         let re_encrypted = env_file::encrypt_env(&plaintext, new_cipher, env_name)
@@ -747,7 +747,7 @@ pub fn handle(
             } else {
                 // Save policy with old cipher (shouldn't happen since we always rotate, but handle it)
                 policy
-                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.cipher)
+                    .save_encrypted(&ctx.paths.policy_path(&ctx.vault_name), &ctx.vault_cipher)
                     .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
             }
 

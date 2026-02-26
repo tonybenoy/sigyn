@@ -156,13 +156,11 @@ pub enum SecretCommands {
 }
 
 pub struct UnlockedVaultContext {
-    /// V1: the single master key cipher. V2: vault-level cipher (manifest/policy/audit).
-    pub cipher: VaultCipher,
-    /// V2: vault-level cipher (manifest/policy/audit). Same as `cipher` for v1.
+    /// Vault-level cipher (manifest/policy/audit).
     pub vault_cipher: VaultCipher,
-    /// V2: current env's cipher (None = no access). For v1, always Some(master_key).
+    /// Current env's cipher (None = no access to current env).
     pub env_cipher: Option<VaultCipher>,
-    /// V2: all accessible env ciphers. Empty for v1.
+    /// All accessible env ciphers keyed by env name.
     pub env_ciphers: std::collections::BTreeMap<String, VaultCipher>,
     /// True if the vault header is v2 (per-env isolation).
     pub is_v2: bool,
@@ -178,17 +176,21 @@ pub struct UnlockedVaultContext {
 }
 
 impl UnlockedVaultContext {
-    /// Get the cipher for the current environment. Falls back to the vault cipher for v1.
+    /// Get the cipher for the current environment.
+    /// For v2 vaults, returns the per-env cipher if available, otherwise the vault cipher.
+    /// For v1 vaults, returns the vault cipher (which is the master key).
     pub fn current_env_cipher(&self) -> &VaultCipher {
-        self.env_cipher.as_ref().unwrap_or(&self.cipher)
+        self.env_cipher.as_ref().unwrap_or(&self.vault_cipher)
     }
 
-    /// Get the cipher for a specific environment. Falls back to the vault cipher for v1.
+    /// Get the cipher for a specific environment by name.
+    /// For v2 vaults, returns the per-env cipher (None if no access).
+    /// For v1 vaults, returns the vault cipher (master key).
     pub fn cipher_for_env(&self, env_name: &str) -> Option<&VaultCipher> {
         if self.is_v2 {
             self.env_ciphers.get(env_name)
         } else {
-            Some(&self.cipher)
+            Some(&self.vault_cipher)
         }
     }
 }
@@ -318,10 +320,10 @@ pub fn unlock_vault(
         vault_name, vault_name
     ))?;
 
-    let cipher = VaultCipher::new(vault_key_bytes);
+    let vault_cipher = VaultCipher::new(vault_key_bytes);
 
     // Decrypt manifest (rejects plaintext — must be sealed)
-    let manifest = VaultManifest::from_sealed_bytes(&cipher, &manifest_data, vault_id)?;
+    let manifest = VaultManifest::from_sealed_bytes(&vault_cipher, &manifest_data, vault_id)?;
 
     // Now verify the header signature using the owner's signing key from the manifest.
     // This prevents an attacker from replacing members.cbor with a crafted header.
@@ -438,8 +440,8 @@ pub fn unlock_vault(
     let env_name = resolve_env_name(&env_name, &manifest)?;
 
     // Load policy (returns empty policy if file doesn't exist)
-    let policy =
-        VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &cipher).unwrap_or_default();
+    let policy = VaultPolicy::load_encrypted(&paths.policy_path(&vault_name), &vault_cipher)
+        .unwrap_or_default();
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();
@@ -455,10 +457,8 @@ pub fn unlock_vault(
     } else {
         Some(VaultCipher::new(vault_key_bytes))
     };
-    let vault_cipher = VaultCipher::new(vault_key_bytes);
 
     Ok(UnlockedVaultContext {
-        cipher,
         vault_cipher,
         env_cipher,
         env_ciphers,

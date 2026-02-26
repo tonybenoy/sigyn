@@ -185,13 +185,17 @@ fn test_leashed_fork_has_two_slots() {
     let header: sigyn_engine::crypto::EnvelopeHeader =
         ciborium::from_reader(header_bytes.as_slice()).unwrap();
 
-    // Leashed fork should have 2 recipient slots (fork owner + parent admin)
-    assert_eq!(header.slots.len(), 2);
+    // Leashed fork should have 2 vault_key_slots (fork owner + parent admin)
+    assert_eq!(header.vault_key_slots.len(), 2);
 
     // Verify the fingerprints match the expected recipients
     let fork_fp = fork_owner.public_key().fingerprint();
     let admin_fp = parent_admin.public_key().fingerprint();
-    let slot_fps: Vec<_> = header.slots.iter().map(|s| &s.fingerprint).collect();
+    let slot_fps: Vec<_> = header
+        .vault_key_slots
+        .iter()
+        .map(|s| &s.fingerprint)
+        .collect();
     assert!(slot_fps.contains(&&fork_fp));
     assert!(slot_fps.contains(&&admin_fp));
 }
@@ -219,10 +223,10 @@ fn test_unleashed_fork_has_single_slot() {
     let header: sigyn_engine::crypto::EnvelopeHeader =
         ciborium::from_reader(header_bytes.as_slice()).unwrap();
 
-    // Unleashed fork should have only 1 slot (fork owner only)
-    assert_eq!(header.slots.len(), 1);
+    // Unleashed fork should have only 1 vault_key_slot (fork owner only)
+    assert_eq!(header.vault_key_slots.len(), 1);
     assert_eq!(
-        header.slots[0].fingerprint,
+        header.vault_key_slots[0].fingerprint,
         fork_owner.public_key().fingerprint()
     );
 }

@@ -28,38 +28,54 @@ pub fn create_leashed_fork(
     }
     std::fs::create_dir_all(fork_paths.env_dir(fork_name))?;
 
-    // Generate new master key for the fork
-    let fork_cipher = VaultCipher::generate();
+    // Generate independent vault key and per-env keys for the fork
+    let fork_vault_cipher = VaultCipher::generate();
+    let fork_recipients = &[fork_owner_pubkey.clone(), parent_admin_pubkey.clone()];
 
-    // Seal for both fork owner AND parent admin (leash)
-    let header = envelope::seal_master_key(
-        fork_cipher.key_bytes(),
-        &[fork_owner_pubkey.clone(), parent_admin_pubkey.clone()],
-        uuid::Uuid::new_v4(),
+    let mut fork_env_keys = BTreeMap::new();
+    let mut fork_env_recipients = BTreeMap::new();
+    for env_name in &parent_manifest.environments {
+        let env_cipher = VaultCipher::generate();
+        fork_env_keys.insert(env_name.clone(), *env_cipher.key_bytes());
+        fork_env_recipients.insert(env_name.clone(), fork_recipients.to_vec());
+    }
+
+    let fork_vault_id = uuid::Uuid::new_v4();
+    let header = envelope::seal_v2(
+        fork_vault_cipher.key_bytes(),
+        &fork_env_keys,
+        fork_recipients,
+        &fork_env_recipients,
+        fork_vault_id,
     )?;
 
     // Create fork manifest
     let mut fork_manifest = VaultManifest::new(fork_name.into(), creator.clone());
     fork_manifest.environments = parent_manifest.environments.clone();
 
-    // Write manifest and header
-    std::fs::write(
-        fork_paths.manifest_path(fork_name),
-        fork_manifest.to_toml()?,
-    )?;
+    // Write sealed manifest and signed header
+    let sealed_manifest = fork_manifest
+        .to_sealed_bytes(&fork_vault_cipher)
+        .map_err(|e| SigynError::Serialization(e.to_string()))?;
+    std::fs::write(fork_paths.manifest_path(fork_name), sealed_manifest)?;
     let mut header_bytes = Vec::new();
     ciborium::into_writer(&header, &mut header_bytes)
         .map_err(|e| SigynError::CborEncode(e.to_string()))?;
     std::fs::write(fork_paths.members_path(fork_name), header_bytes)?;
 
-    // Copy encrypted envs, re-encrypting with fork key
+    // Copy encrypted envs, re-encrypting with fork's per-env keys
     for env_name in &parent_manifest.environments {
         let parent_env_path = parent_paths.env_path(parent_name, env_name);
         if parent_env_path.exists() {
-            let env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
+            let parent_env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
             let encrypted = env_file::read_encrypted_env(&parent_env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
-            let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_cipher, env_name)?;
+            let plaintext = env_file::decrypt_env(&encrypted, parent_env_cipher)?;
+            let fork_env_cipher = VaultCipher::new(
+                *fork_env_keys
+                    .get(env_name)
+                    .unwrap_or(fork_vault_cipher.key_bytes()),
+            );
+            let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_env_cipher, env_name)?;
             env_file::write_encrypted_env(
                 &fork_paths.env_path(fork_name, env_name),
                 &fork_encrypted,
@@ -69,7 +85,7 @@ pub fn create_leashed_fork(
 
     // Initialize empty policy for fork
     let policy = VaultPolicy::new();
-    policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_cipher)?;
+    policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_vault_cipher)?;
 
     let fork = Fork {
         id: uuid::Uuid::new_v4(),
@@ -109,21 +125,34 @@ pub fn create_unleashed_fork(
     }
     std::fs::create_dir_all(fork_paths.env_dir(fork_name))?;
 
-    // Completely independent master key — no parent access
-    let fork_cipher = VaultCipher::generate();
-    let header = envelope::seal_master_key(
-        fork_cipher.key_bytes(),
-        std::slice::from_ref(fork_owner_pubkey),
-        uuid::Uuid::new_v4(),
+    // Completely independent vault key + per-env keys — no parent access
+    let fork_vault_cipher = VaultCipher::generate();
+    let fork_recipients = std::slice::from_ref(fork_owner_pubkey);
+
+    let mut fork_env_keys = BTreeMap::new();
+    let mut fork_env_recipients = BTreeMap::new();
+    for env_name in &parent_manifest.environments {
+        let env_cipher = VaultCipher::generate();
+        fork_env_keys.insert(env_name.clone(), *env_cipher.key_bytes());
+        fork_env_recipients.insert(env_name.clone(), fork_recipients.to_vec());
+    }
+
+    let fork_vault_id = uuid::Uuid::new_v4();
+    let header = envelope::seal_v2(
+        fork_vault_cipher.key_bytes(),
+        &fork_env_keys,
+        fork_recipients,
+        &fork_env_recipients,
+        fork_vault_id,
     )?;
 
     let mut fork_manifest = VaultManifest::new(fork_name.into(), creator.clone());
     fork_manifest.environments = parent_manifest.environments.clone();
 
-    std::fs::write(
-        fork_paths.manifest_path(fork_name),
-        fork_manifest.to_toml()?,
-    )?;
+    let sealed_manifest = fork_manifest
+        .to_sealed_bytes(&fork_vault_cipher)
+        .map_err(|e| SigynError::Serialization(e.to_string()))?;
+    std::fs::write(fork_paths.manifest_path(fork_name), sealed_manifest)?;
     let mut header_bytes = Vec::new();
     ciborium::into_writer(&header, &mut header_bytes)
         .map_err(|e| SigynError::CborEncode(e.to_string()))?;
@@ -132,10 +161,15 @@ pub fn create_unleashed_fork(
     for env_name in &parent_manifest.environments {
         let parent_env_path = parent_paths.env_path(parent_name, env_name);
         if parent_env_path.exists() {
-            let env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
+            let parent_env_cipher = parent_env_ciphers.get(env_name).unwrap_or(parent_cipher);
             let encrypted = env_file::read_encrypted_env(&parent_env_path)?;
-            let plaintext = env_file::decrypt_env(&encrypted, env_cipher)?;
-            let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_cipher, env_name)?;
+            let plaintext = env_file::decrypt_env(&encrypted, parent_env_cipher)?;
+            let fork_env_cipher = VaultCipher::new(
+                *fork_env_keys
+                    .get(env_name)
+                    .unwrap_or(fork_vault_cipher.key_bytes()),
+            );
+            let fork_encrypted = env_file::encrypt_env(&plaintext, &fork_env_cipher, env_name)?;
             env_file::write_encrypted_env(
                 &fork_paths.env_path(fork_name, env_name),
                 &fork_encrypted,
@@ -144,7 +178,7 @@ pub fn create_unleashed_fork(
     }
 
     let policy = VaultPolicy::new();
-    policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_cipher)?;
+    policy.save_encrypted(&fork_paths.policy_path(fork_name), &fork_vault_cipher)?;
 
     let fork = Fork {
         id: uuid::Uuid::new_v4(),
