@@ -1,0 +1,175 @@
+# Sigyn Secrets — GitLab CI/CD Template
+#
+# Decrypt and inject secrets from a Sigyn vault into your GitLab CI/CD pipeline.
+#
+# Usage:
+#   include:
+#     - remote: 'https://raw.githubusercontent.com/tonybenoy/sigyn/main/action/gitlab-ci-template.yml'
+#
+#   deploy:
+#     extends: .sigyn-secrets
+#     variables:
+#       SIGYN_VAULT: myapp
+#       SIGYN_ENVIRONMENT: prod
+#       SIGYN_VAULT_REPO: git@github.com:myorg/sigyn-vaults.git
+#       SIGYN_EXPORT_MODE: dotenv   # env, dotenv, json
+#       SIGYN_DOTENV_PATH: .env
+#       SIGYN_KEYS: ""              # comma-separated filter, empty = all
+#       SIGYN_VERSION: latest
+#     script:
+#       - ./deploy.sh
+#
+# Required CI/CD Variables (Settings > CI/CD > Variables, masked + protected):
+#   SIGYN_CI_BUNDLE   — output of `sigyn ci setup`
+#   SIGYN_PASSPHRASE  — CI identity passphrase
+#   VAULT_SSH_KEY     — SSH private key for cloning the vault repo
+
+.sigyn-secrets:
+  before_script:
+    - |
+      set -euo pipefail
+
+      # ── Defaults ──────────────────────────────────────────────────────
+      SIGYN_EXPORT_MODE="${SIGYN_EXPORT_MODE:-dotenv}"
+      SIGYN_DOTENV_PATH="${SIGYN_DOTENV_PATH:-.env}"
+      SIGYN_KEYS="${SIGYN_KEYS:-}"
+      SIGYN_VERSION="${SIGYN_VERSION:-latest}"
+      SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
+
+      # ── Validate inputs ──────────────────────────────────────────────
+      if [ -z "${SIGYN_CI_BUNDLE:-}" ]; then
+        echo "ERROR: SIGYN_CI_BUNDLE variable is not set" >&2; exit 1
+      fi
+      if [ -z "${SIGYN_PASSPHRASE:-}" ]; then
+        echo "ERROR: SIGYN_PASSPHRASE variable is not set" >&2; exit 1
+      fi
+      if [ -z "${VAULT_SSH_KEY:-}" ]; then
+        echo "ERROR: VAULT_SSH_KEY variable is not set" >&2; exit 1
+      fi
+      if [ -z "${SIGYN_VAULT:-}" ]; then
+        echo "ERROR: SIGYN_VAULT variable is not set" >&2; exit 1
+      fi
+      if [ -z "${SIGYN_ENVIRONMENT:-}" ]; then
+        echo "ERROR: SIGYN_ENVIRONMENT variable is not set" >&2; exit 1
+      fi
+      if [ -z "${SIGYN_VAULT_REPO:-}" ]; then
+        echo "ERROR: SIGYN_VAULT_REPO variable is not set" >&2; exit 1
+      fi
+
+      # Validate vault name (alphanumeric, hyphens, underscores only)
+      if ! echo "$SIGYN_VAULT" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._-]*$'; then
+        echo "ERROR: Invalid vault name: must be alphanumeric with hyphens/underscores only" >&2; exit 1
+      fi
+
+      # Validate dotenv-path is relative
+      case "$SIGYN_DOTENV_PATH" in
+        /*) echo "ERROR: SIGYN_DOTENV_PATH must be a relative path" >&2; exit 1 ;;
+        *../*) echo "ERROR: SIGYN_DOTENV_PATH must not contain '..'" >&2; exit 1 ;;
+      esac
+
+      # ── Install Sigyn ────────────────────────────────────────────────
+      echo "Installing Sigyn ${SIGYN_VERSION}..."
+      export SIGYN_VERSION
+      INSTALL_URL="${SIGYN_INSTALL_URL:-https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh}"
+      curl -fsSL "$INSTALL_URL" | sh
+      export PATH="$HOME/.sigyn/bin:$PATH"
+
+      # ── Restore identity from bundle ─────────────────────────────────
+      echo "Restoring CI identity..."
+      BUNDLE_JSON=$(echo "$SIGYN_CI_BUNDLE" | base64 -d)
+      FINGERPRINT=$(echo "$BUNDLE_JSON" | jq -r '.fingerprint')
+      IDENTITY_B64=$(echo "$BUNDLE_JSON" | jq -r '.identity')
+      DEVICE_KEY_B64=$(echo "$BUNDLE_JSON" | jq -r '.device_key')
+
+      # Validate fingerprint format
+      if ! echo "$FINGERPRINT" | grep -qE '^[a-f0-9]{16,64}$'; then
+        echo "ERROR: Invalid fingerprint format in CI bundle" >&2; exit 1
+      fi
+
+      mkdir -p "$SIGYN_HOME/identities"
+      echo "$IDENTITY_B64" | base64 -d > "$SIGYN_HOME/identities/${FINGERPRINT}.identity"
+      chmod 600 "$SIGYN_HOME/identities/${FINGERPRINT}.identity"
+      echo "$DEVICE_KEY_B64" | base64 -d > "$SIGYN_HOME/.device_key"
+      chmod 400 "$SIGYN_HOME/.device_key"
+
+      # ── Clone vault ──────────────────────────────────────────────────
+      echo "Cloning vault repository..."
+      mkdir -p ~/.ssh
+      echo "$VAULT_SSH_KEY" > ~/.ssh/sigyn_vault_key
+      chmod 600 ~/.ssh/sigyn_vault_key
+      export GIT_SSH_COMMAND="ssh -i ~/.ssh/sigyn_vault_key -o StrictHostKeyChecking=yes"
+
+      # Pre-fetch host keys
+      if echo "$SIGYN_VAULT_REPO" | grep -q "github.com"; then
+        ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+      elif echo "$SIGYN_VAULT_REPO" | grep -q "gitlab.com"; then
+        ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+      elif echo "$SIGYN_VAULT_REPO" | grep -q "bitbucket.org"; then
+        ssh-keyscan -t ed25519,rsa bitbucket.org >> ~/.ssh/known_hosts 2>/dev/null
+      fi
+
+      VAULT_DIR="$SIGYN_HOME/vaults/$SIGYN_VAULT"
+      if [ -d "$VAULT_DIR/.git" ]; then
+        git -C "$VAULT_DIR" pull --ff-only
+      else
+        mkdir -p "$SIGYN_HOME/vaults"
+        git clone "$SIGYN_VAULT_REPO" "$VAULT_DIR"
+      fi
+
+      rm -f ~/.ssh/sigyn_vault_key
+
+      # ── Export secrets ───────────────────────────────────────────────
+      echo "Exporting secrets..."
+      export SIGYN_PASSPHRASE
+      RAW_JSON=$("$HOME/.sigyn/bin/sigyn" run export \
+        --vault "$SIGYN_VAULT" \
+        --env "$SIGYN_ENVIRONMENT" \
+        --identity "$FINGERPRINT" \
+        --format json 2>/dev/null)
+
+      # Filter to specific keys if requested
+      if [ -n "$SIGYN_KEYS" ]; then
+        FILTER=$(echo "$SIGYN_KEYS" | tr ',' '\n' | jq -R . | jq -s '.')
+        RAW_JSON=$(echo "$RAW_JSON" | jq --argjson keys "$FILTER" \
+          'to_entries | map(select(.key as $k | $keys | index($k))) | from_entries')
+      fi
+
+      COUNT=$(echo "$RAW_JSON" | jq 'length')
+      echo "Exporting $COUNT secrets (mode: $SIGYN_EXPORT_MODE)"
+
+      case "$SIGYN_EXPORT_MODE" in
+        env)
+          # Write to a dotenv file that GitLab picks up as job artifacts
+          echo "$RAW_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > sigyn.env
+          # Also export into current shell so script: commands can use them
+          set -a
+          . ./sigyn.env
+          set +a
+          ;;
+        dotenv)
+          echo "$RAW_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > "$SIGYN_DOTENV_PATH"
+          echo "Secrets written to $SIGYN_DOTENV_PATH"
+          ;;
+        json)
+          echo "$RAW_JSON" > "$SIGYN_DOTENV_PATH"
+          echo "Secrets written as JSON to $SIGYN_DOTENV_PATH"
+          ;;
+        *)
+          echo "ERROR: Unknown export mode: $SIGYN_EXPORT_MODE (use: env, dotenv, json)" >&2; exit 1
+          ;;
+      esac
+
+  after_script:
+    - |
+      # Cleanup sensitive files (runs even on failure)
+      SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
+      rm -rf "$SIGYN_HOME/identities" "$SIGYN_HOME/.device_key" "$SIGYN_HOME/vaults" ~/.ssh/sigyn_vault_key sigyn.env 2>/dev/null || true
+      echo "Sigyn cleanup complete"
+
+  # When using env mode, expose sigyn.env as a dotenv artifact so downstream
+  # jobs can consume the variables via `needs:` / `dependencies:`.
+  artifacts:
+    reports:
+      dotenv: sigyn.env
+    when: always
+    expire_in: 1 hour

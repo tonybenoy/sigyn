@@ -132,11 +132,13 @@ runs:
         chmod 600 ~/.ssh/sigyn_vault_key
         export GIT_SSH_COMMAND="ssh -i ~/.ssh/sigyn_vault_key -o StrictHostKeyChecking=yes"
 
-        # Pre-fetch GitHub host keys for verification
+        # Pre-fetch host keys for verification
         if echo "$VAULT_REPO" | grep -q "github.com"; then
           ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
         elif echo "$VAULT_REPO" | grep -q "gitlab.com"; then
           ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+        elif echo "$VAULT_REPO" | grep -q "bitbucket.org"; then
+          ssh-keyscan -t ed25519,rsa bitbucket.org >> ~/.ssh/known_hosts 2>/dev/null
         fi
 
         if [ -d "$VAULT_DIR/.git" ]; then

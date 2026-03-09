@@ -1,0 +1,64 @@
+name: Sigyn Secrets
+description: Decrypt and inject secrets from a Sigyn vault into your Bitbucket Pipeline
+repository: tonybenoy/sigyn-pipe
+vendor: tonybenoy
+maintainer: tonybenoy
+
+variables:
+  - name: SIGYN_CI_BUNDLE
+    description: "CI bundle from `sigyn ci setup` (base64-encoded JSON containing identity + device key + fingerprint)"
+    required: true
+    secured: true
+
+  - name: SIGYN_PASSPHRASE
+    description: "Identity passphrase"
+    required: true
+    secured: true
+
+  - name: VAULT_SSH_KEY
+    description: "SSH private key for cloning the vault repo"
+    required: true
+    secured: true
+
+  - name: VAULT_REPO
+    description: "Git URL for vault repository (e.g. git@bitbucket.org:myorg/sigyn-vaults.git)"
+    required: true
+
+  - name: VAULT
+    description: "Vault name"
+    required: true
+
+  - name: ENVIRONMENT
+    description: "Environment name (e.g. dev, staging, prod)"
+    required: true
+
+  - name: EXPORT_MODE
+    description: "Export mode: env, dotenv, json"
+    required: false
+    default: "dotenv"
+
+  - name: DOTENV_PATH
+    description: "Output path for dotenv/json export"
+    required: false
+    default: ".env"
+
+  - name: KEYS
+    description: "Comma-separated list of specific secret keys to export (default: all)"
+    required: false
+    default: ""
+
+  - name: VERSION
+    description: "Sigyn version to install"
+    required: false
+    default: "latest"
+
+  - name: SIGYN_INSTALL_URL
+    description: "Override URL for install.sh (default: fetched from GitHub)"
+    required: false
+    default: ""
+
+tags:
+  - secrets
+  - security
+  - encryption
+  - vault
