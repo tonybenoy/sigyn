@@ -66,6 +66,7 @@ runs:
         echo "$HOME/.sigyn/bin" >> "$GITHUB_PATH"
 
     - name: Setup Identity from Bundle
+      id: identity
       shell: bash
       env:
         SIGYN_BUNDLE: ${{ inputs.bundle }}
@@ -89,6 +90,7 @@ runs:
         echo "$DEVICE_KEY_B64" | base64 -d > "$SIGYN_HOME/.device_key"
         chmod 400 "$SIGYN_HOME/.device_key"
 
+        echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
         echo "::debug::Identity restored for fingerprint ${FINGERPRINT:0:16}..."
 
     - name: Clone Vault
@@ -130,6 +132,7 @@ runs:
         SIGYN_DOTENV_PATH: ${{ inputs.dotenv-path }}
         SIGYN_KEYS: ${{ inputs.keys }}
         SIGYN_MASK: ${{ inputs.mask }}
+        SIGYN_IDENTITY: ${{ steps.identity.outputs.fingerprint }}
       run: |
         set -euo pipefail
 
@@ -137,6 +140,7 @@ runs:
         RAW_JSON=$("$HOME/.sigyn/bin/sigyn" run export \
           --vault "$SIGYN_VAULT" \
           --env "$SIGYN_ENV" \
+          --identity "$SIGYN_IDENTITY" \
           --format json)
 
         # Filter to specific keys if requested
