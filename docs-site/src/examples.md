@@ -90,29 +90,9 @@ server restarts with the new values automatically.
 
 ## CI/CD Integration
 
-### GitHub Actions (Official Action)
+For full CI/CD documentation including the GitHub Action reference, all export modes, security best practices, and troubleshooting, see the dedicated [CI/CD Integration](ci-cd.md) page.
 
-Sigyn provides an official GitHub Action that handles identity setup, vault sync, and
-secret injection automatically.
-
-**Step 1 — Create a CI identity and add it to your vault:**
-
-```bash
-sigyn identity create --name ci-bot
-sigyn delegation invite create --role reader --envs staging,prod
-# Accept the invite on the CI identity, then:
-sigyn ci setup ci-bot
-```
-
-**Step 2 — Add 3 secrets** to your repository (Settings > Secrets and variables > Actions):
-
-| Secret | Source |
-|--------|--------|
-| `SIGYN_CI_BUNDLE` | Output of `sigyn ci setup` (single base64 string with identity + device key + fingerprint) |
-| `SIGYN_PASSPHRASE` | Your CI identity's passphrase |
-| `VAULT_SSH_KEY` | SSH deploy key with read access to your vault repo |
-
-**Step 3 — Use the action in your workflow:**
+**Quick example:**
 
 ```yaml
 jobs:
@@ -131,66 +111,8 @@ jobs:
           vault: myapp
           environment: prod
 
-      # All secrets are now available as environment variables
       - name: Deploy
-        run: |
-          echo "Deploying with database at $DATABASE_URL"
-          ./deploy.sh
-```
-
-**Export modes:**
-
-| Mode | Description |
-|------|-------------|
-| `env` (default) | Writes secrets to `$GITHUB_ENV` — available in all subsequent steps |
-| `dotenv` | Writes a `.env` file (path configurable via `dotenv-path`) |
-| `json` | Writes a JSON file (path configurable via `dotenv-path`) |
-| `mask-only` | Masks values in logs but doesn't export them |
-
-**Filtering specific keys:**
-
-```yaml
-- uses: tonybenoy/sigyn/action@main
-  with:
-    bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
-    passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
-    vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
-    vault-repo: git@github.com:myorg/sigyn-vaults.git
-    vault: myapp
-    environment: prod
-    keys: "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION"
-```
-
-**ECR login example:**
-
-```yaml
-- name: Load AWS credentials
-  uses: tonybenoy/sigyn/action@main
-  with:
-    bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
-    passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
-    vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
-    vault-repo: git@github.com:myorg/sigyn-vaults.git
-    vault: infra
-    environment: prod
-    keys: "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION"
-
-- name: Login to ECR
-  run: aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
-```
-
-### GitLab CI
-
-```yaml
-test:
-  image: rust:latest
-  variables:
-    SIGYN_PASSPHRASE: $SIGYN_PASSPHRASE
-  before_script:
-    - curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh | sh
-    - export PATH="$HOME/.sigyn/bin:$PATH"
-  script:
-    - sigyn run -e dev -- npm test
+        run: ./deploy.sh
 ```
 
 ## Advanced Process Injection

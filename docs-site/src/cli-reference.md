@@ -1678,7 +1678,7 @@ The command outputs a single `SIGYN_CI_BUNDLE` value (base64-encoded JSON contai
 identity file, device key, and fingerprint). You also need `SIGYN_PASSPHRASE` and
 `VAULT_SSH_KEY` as separate GitHub secrets — 3 secrets total.
 
-See [Examples > CI/CD Integration](examples.md#cicd-integration) for full workflow examples.
+See the [CI/CD Integration](ci-cd.md) page for full workflow examples, the GitHub Action reference, and troubleshooting.
 
 ## Related Documentation
 

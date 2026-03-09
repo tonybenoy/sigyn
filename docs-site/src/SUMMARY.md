@@ -12,6 +12,7 @@
 - [Import and Export](./import-export.md)
 - [Multiple Vaults and Organizations](./multi-vault.md)
 - [Organizations](./organizations.md)
+- [CI/CD Integration](./ci-cd.md)
 - [Examples](./examples.md)
 - [FAQ](./FAQ.md)
 
