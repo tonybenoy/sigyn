@@ -163,10 +163,13 @@ runs:
           done
         fi
 
+        # Compact JSON for GITHUB_OUTPUT (must be single-line)
+        COMPACT_JSON=$(echo "$RAW_JSON" | jq -c '.')
+
         case "$SIGYN_EXPORT_MODE" in
           env)
             echo "$RAW_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
-            echo "secrets-json=$RAW_JSON" >> "$GITHUB_OUTPUT"
+            echo "secrets-json=$COMPACT_JSON" >> "$GITHUB_OUTPUT"
             echo "::notice::Exported $COUNT secrets to environment variables"
             ;;
           dotenv)
@@ -175,7 +178,7 @@ runs:
             ;;
           json)
             echo "$RAW_JSON" > "$SIGYN_DOTENV_PATH"
-            echo "secrets-json=$RAW_JSON" >> "$GITHUB_OUTPUT"
+            echo "secrets-json=$COMPACT_JSON" >> "$GITHUB_OUTPUT"
             echo "::notice::Exported $COUNT secrets as JSON to $SIGYN_DOTENV_PATH"
             ;;
           mask-only)
