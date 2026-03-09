@@ -78,7 +78,7 @@ jobs:
 | `vault` | Yes | — | Vault name |
 | `environment` | Yes | — | Environment name (e.g., `dev`, `staging`, `prod`) |
 | `export` | No | `env` | Export mode: `env`, `dotenv`, `json`, or `mask-only` |
-| `dotenv-path` | No | `.env` | Output path for `dotenv` or `json` export modes |
+| `dotenv-path` | No | `.env` | Output path for `dotenv` or `json` export modes (must be a relative path) |
 | `keys` | No | `""` (all) | Comma-separated list of specific secret keys to export |
 | `mask` | No | `true` | Mask all secret values in GitHub Actions logs |
 | `version` | No | `latest` | Sigyn version to install |
@@ -87,7 +87,7 @@ jobs:
 
 | Output | Description |
 |--------|-------------|
-| `secrets-json` | JSON object of exported secrets (available when `export=env` or `export=json`) |
+| `secrets-json` | Compact JSON of exported secrets (`env`/`json` modes only). **Warning:** accessible to all subsequent steps in the job — use key filtering to limit exposure. |
 | `count` | Number of secrets exported |
 
 ### Export Modes
@@ -101,12 +101,13 @@ jobs:
 
 ### What the Action Does
 
-The composite action performs four steps:
+The composite action performs five steps:
 
-1. **Install Sigyn** — downloads and installs the Sigyn binary (version controlled via the `version` input)
-2. **Restore identity** — decodes the CI bundle, writes the identity file and device key to `$SIGYN_HOME`
-3. **Clone vault** — uses the provided SSH key to clone (or pull) the vault repository
-4. **Export secrets** — runs `sigyn run export --format json`, optionally filters by key, masks values, and writes to the chosen destination
+1. **Install Sigyn** — downloads and installs the Sigyn binary (prefers the install script bundled with the action ref; version controlled via the `version` input)
+2. **Restore identity** — decodes the CI bundle, validates the fingerprint format, writes the identity file and device key to `$SIGYN_HOME`
+3. **Clone vault** — validates the vault name, fetches SSH host keys for github.com/gitlab.com, uses the provided SSH key to clone (or pull) the vault repository with strict host key checking
+4. **Export secrets** — runs `sigyn run export --format json`, optionally filters by key, masks values in logs, and writes to the chosen destination
+5. **Cleanup** — removes identity files, device key, vault data, and SSH keys from the runner (runs even if previous steps fail)
 
 ## Examples
 
@@ -304,6 +305,16 @@ sigyn run exec --vault "$VAULT_NAME" --env "$ENVIRONMENT" -- your-command-here
 ```
 
 ## Security Best Practices
+
+### Built-in protections
+
+The action includes several security hardening measures:
+
+- **Input validation** — vault names and fingerprints are validated against strict patterns to prevent path traversal attacks
+- **SSH host key verification** — uses `StrictHostKeyChecking=yes` with pre-fetched host keys for github.com and gitlab.com (no TOFU)
+- **Automatic cleanup** — identity files, device keys, vault data, and SSH keys are removed from the runner after every run (even on failure)
+- **Path restriction** — `dotenv-path` must be a relative path with no `..` components to prevent writing secrets to arbitrary locations
+- **Stderr suppression** — `sigyn run export` stderr is suppressed to prevent leaking values before masking takes effect
 
 ### Pin the action to a commit SHA
 

@@ -52,6 +52,10 @@ what Sigyn is about.
 - **Auto-sync** -- automatically push changes after writes when `auto_sync` is enabled.
 - **Webhook notifications** -- get notified on secret changes, rotations, and revocations.
 - **Self-update** -- `sigyn update` downloads and installs the latest release with checksum verification.
+- **CI/CD integration** -- official GitHub Action plus GitLab CI and generic pipeline support with CI identity bundles.
+- **Passphrase agent** -- ssh-agent-like daemon caches your passphrase for a session.
+- **Watch mode** -- `sigyn watch` auto-restarts your app when secrets change.
+- **Context switching** -- `sigyn context` sets persistent vault/env/identity defaults.
 - **Shell completions** -- bash, zsh, fish, and PowerShell.
 
 ---
@@ -149,6 +153,53 @@ sigyn sync pull
 
 ---
 
+## CI/CD Integration
+
+Sigyn has a first-class [GitHub Action](docs-site/src/ci-cd.md) for injecting vault secrets into your pipelines.
+
+### Setup
+
+```bash
+# Create a CI-specific identity
+sigyn identity create --name ci-bot
+
+# Invite it with minimal permissions
+sigyn delegation invite create --role reader --envs staging,prod
+
+# Generate a CI bundle (single base64 string)
+sigyn ci setup ci-bot
+```
+
+Add three secrets to your GitHub repo: `SIGYN_CI_BUNDLE`, `SIGYN_PASSPHRASE`, and `VAULT_SSH_KEY`.
+
+### GitHub Actions usage
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load secrets
+        uses: tonybenoy/sigyn/action@main
+        with:
+          bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
+          passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
+          vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
+          vault-repo: git@github.com:myorg/sigyn-vaults.git
+          vault: myapp
+          environment: prod
+
+      # All secrets are now available as environment variables
+      - name: Deploy
+        run: ./deploy.sh
+```
+
+The action supports multiple export modes (`env`, `dotenv`, `json`, `mask-only`), key filtering, and automatic log masking. See the [CI/CD guide](docs-site/src/ci-cd.md) for GitLab CI, generic CI platforms, and security best practices.
+
+---
+
 ## Architecture
 
 Sigyn is a Cargo workspace with four crates:
@@ -187,7 +238,11 @@ sigyn <command>
 | `run` | Inject secrets into processes, export, or serve via socket |
 | `rotate` | Rotate secrets, schedule rotation, breach mode |
 | `import` | Import from Doppler, AWS, GCP, 1Password, dotenv, JSON |
+| `ci` | Set up CI/CD identities and generate bundles |
 | `notification` | Configure and test webhook notifications |
+| `context` | Set persistent vault/env/identity context |
+| `agent` | Passphrase caching agent (ssh-agent-like) |
+| `watch` | Watch mode — auto-restart app on secret changes |
 | `onboard` | Guided first-run setup wizard |
 | `tui` | Launch the interactive TUI dashboard |
 | `update` | Self-update to the latest release |
@@ -255,12 +310,24 @@ pull request. The CI pipeline enforces both.
 
 - [**Getting Started**](docs-site/src/getting-started.md) — install and use Sigyn
 - [**CLI Reference**](docs-site/src/cli-reference.md) — complete command documentation
+- [**Configuration**](docs-site/src/configuration.md) — config files, resolution priority, directory layout
+- [**Environments**](docs-site/src/environments.md) — per-environment key isolation
+- [**Import and Export**](docs-site/src/import-export.md) — bring secrets in and out
+- [**Multiple Vaults**](docs-site/src/multi-vault.md) — multi-vault and monorepo patterns
+- [**Organizations**](docs-site/src/organizations.md) — hierarchical org structure and inherited RBAC
+- [**CI/CD Integration**](docs-site/src/ci-cd.md) — GitHub Action, GitLab CI, and generic pipelines
+- [**Team Collaboration**](docs-site/src/delegation.md) — delegation, invites, and offboarding
+- [**Git Sync**](docs-site/src/sync.md) — sync and CRDT conflict resolution
+- [**Forks**](docs-site/src/forks.md) — vault forking for team branches
+- [**Security Model**](docs-site/src/security.md) — crypto primitives and threat model
+- [**MFA**](docs-site/src/mfa.md) — TOTP multi-factor authentication
+- [**Audit & Rotation**](docs-site/src/audit.md) — signed audit trail and secret rotation
+- [**Disaster Recovery**](docs-site/src/recovery.md) — Shamir secret sharing
+- [**Architecture**](docs-site/src/architecture.md) — deep dive into how it works
 - [**Examples**](docs-site/src/examples.md) — real-world recipes and workflows
 - [**FAQ**](docs-site/src/FAQ.md) — frequently asked questions
-- [**Architecture**](docs-site/src/architecture.md) — deep dive into how it works
-- [**Security Model**](docs-site/src/security.md) — crypto primitives and threat model
 - [**Development Guide**](docs-site/src/DEVELOPMENT.md) — hacking on Sigyn
-- [**Organizations**](docs-site/src/organizations.md) — hierarchical org structure and inherited RBAC
+- [**Testing**](docs-site/src/testing.md) — running and writing tests
 - [**Contributing**](CONTRIBUTING.md) — how to contribute
 
 ---
