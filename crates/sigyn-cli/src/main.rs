@@ -381,6 +381,7 @@ fn main() -> Result<()> {
                                 names: vec![name.clone()],
                                 org: None,
                                 split_audit: false,
+                                remote_url: None,
                             },
                             cfg.default_identity.as_deref(),
                             false,

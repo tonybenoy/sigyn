@@ -123,6 +123,7 @@ pub fn handle(json: bool) -> Result<()> {
                     names: vec![name.clone()],
                     org: None,
                     split_audit: false,
+                    remote_url: None,
                 },
                 identity_name,
                 false,

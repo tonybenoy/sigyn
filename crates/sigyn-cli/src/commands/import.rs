@@ -131,6 +131,11 @@ pub fn handle(
     identity: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    // Resolve vault name for auto-sync at the end
+    let resolved_vault = vault
+        .map(|s| s.to_string())
+        .or_else(|| crate::config::load_config().default_vault);
+
     match cmd {
         ImportCommands::Dotenv { file, env } => {
             let content =
@@ -230,6 +235,11 @@ pub fn handle(
             let count = store_pairs(pairs, vault, identity, env.as_deref())?;
             print_summary(count, "1Password", &source, json)?;
         }
+    }
+
+    // Auto-sync after import (consistent with secret set/edit/remove)
+    if let Some(ref vn) = resolved_vault {
+        crate::commands::secret::maybe_auto_sync(vn);
     }
 
     Ok(())

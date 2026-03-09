@@ -352,10 +352,17 @@ Share the resulting JSON file with Bob.
 
 ## Accept an Invitation
 
-Bob accepts the invitation on his machine:
+Bob clones the vault and accepts the invitation in one step:
 
 ```bash
-# On Bob's machine:
+# On Bob's machine (single command):
+sigyn vault clone git@github.com:team/secrets.git --invitation ./invitation-abc123.json
+```
+
+Or as separate steps:
+
+```bash
+sigyn vault clone git@github.com:team/secrets.git
 sigyn delegation invite accept ./invitation-abc123.json
 ```
 
@@ -399,6 +406,7 @@ Copy secrets from one environment to another:
 
 ```bash
 sigyn env promote --from dev --to staging
+sigyn env promote --from dev --to staging,prod     # chained: dev → staging → prod
 ```
 
 Promote specific keys only:
@@ -418,7 +426,13 @@ sigyn secret set DATABASE_URL 'postgres://user:pass@prod-host/myapp' --env prod
 Sigyn vaults are directories of encrypted files that can be synced through git. All
 data is encrypted at rest, so syncing never exposes secrets.
 
-Configure sync for a vault:
+Configure sync during vault creation (recommended):
+
+```bash
+sigyn vault create myapp --remote-url git@github.com:team/secrets.git
+```
+
+Or configure sync for an existing vault:
 
 ```bash
 sigyn sync configure --remote-url git@github.com:team/secrets.git
@@ -442,9 +456,10 @@ Check sync status:
 sigyn sync status
 ```
 
-On another machine (or as another team member):
+On another machine (or as another team member), clone the vault first:
 
 ```bash
+sigyn vault clone git@github.com:team/secrets.git
 sigyn sync pull --vault myapp
 ```
 

@@ -793,7 +793,7 @@ pub fn check_access(
 }
 
 /// Trigger auto-sync if enabled in config (best-effort).
-fn maybe_auto_sync(vault_name: &str) {
+pub(crate) fn maybe_auto_sync(vault_name: &str) {
     if crate::config::load_config().auto_sync {
         eprintln!("{} auto-syncing...", console::style("note:").cyan().bold());
         if let Err(e) = crate::commands::sync::auto_push(vault_name) {

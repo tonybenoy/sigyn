@@ -18,6 +18,87 @@ use sigyn_engine::vault::{env_file, VaultPaths};
 use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 use crate::config::sigyn_home;
 
+/// Resolve an invitation argument (file path, UUID, or UUID prefix) and verify it.
+/// Returns the parsed and verified invitation file.
+pub(crate) fn load_and_verify_invitation(invitation_arg: &str) -> Result<InvitationFile> {
+    let path = {
+        let p = std::path::Path::new(invitation_arg);
+        if p.exists() {
+            p.to_path_buf()
+        } else {
+            let inv_dir = sigyn_home().join("invitations");
+            let mut found = None;
+            if inv_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&inv_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".json") {
+                            let stem = name.trim_end_matches(".json");
+                            if stem == invitation_arg || stem.starts_with(invitation_arg) {
+                                if found.is_some() {
+                                    anyhow::bail!(
+                                        "ambiguous invitation prefix '{}' — multiple matches. Use a longer prefix.",
+                                        invitation_arg
+                                    );
+                                }
+                                found = Some(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+            found.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invitation '{}' not found.\n  \
+                     Use a file path, full UUID, or UUID prefix.\n  \
+                     List pending invitations with: sigyn delegation pending",
+                    invitation_arg
+                )
+            })?
+        }
+    };
+
+    let contents = std::fs::read_to_string(path).context("failed to read invitation file")?;
+    let invite_file: InvitationFile =
+        serde_json::from_str(&contents).context("invalid invitation file format")?;
+
+    // Verify signature
+    let home = sigyn_home();
+    let store = IdentityStore::new(home);
+    let identities = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+    let inviter = identities
+        .iter()
+        .find(|id| id.fingerprint == invite_file.inviter_fingerprint)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "inviter identity {} not found locally — cannot verify invitation signature.\n  \
+                 Import the inviter's identity first, then re-accept the invitation.",
+                invite_file.inviter_fingerprint.to_hex()
+            )
+        })?;
+    invite_file.verify(&inviter.signing_pubkey).map_err(|_| {
+        anyhow::anyhow!(
+            "invitation signature verification failed for inviter {}",
+            invite_file.inviter_fingerprint.to_hex()
+        )
+    })?;
+
+    // Check expiry
+    if let Some(expires_at) = invite_file.expires_at {
+        if chrono::Utc::now() > expires_at {
+            anyhow::bail!(
+                "invitation {} has expired (expired at {}). Ask the inviter to create a new invitation.",
+                invite_file.id,
+                expires_at.format("%Y-%m-%d %H:%M UTC")
+            );
+        }
+    }
+
+    Ok(invite_file)
+}
+
 #[derive(Subcommand)]
 pub enum DelegationCommands {
     /// Show the delegation tree
@@ -33,6 +114,9 @@ pub enum DelegationCommands {
         /// Allowed environments (comma-separated)
         #[arg(long, default_value = "*")]
         envs: String,
+        /// Also save invitation to vault directory for git-based sharing
+        #[arg(long)]
+        save_to_vault: bool,
     },
     /// Accept an invitation
     Accept {
@@ -258,7 +342,12 @@ pub fn handle(
                 }
             }
         }
-        DelegationCommands::Invite { pubkey, role, envs } => {
+        DelegationCommands::Invite {
+            pubkey,
+            role,
+            envs,
+            save_to_vault,
+        } => {
             let ctx = unlock_vault(identity, Some(vault_name), None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
@@ -429,6 +518,18 @@ pub fn handle(
             crate::config::secure_write(&invitation_path, invitation_json.as_bytes())
                 .map_err(|e| anyhow::anyhow!("failed to write invitation file: {}", e))?;
 
+            // Also save to vault directory for git-based sharing
+            let mut vault_invitation_path = None;
+            if save_to_vault {
+                let vault_inv_dir = ctx.paths.vault_dir(&ctx.vault_name).join("invitations");
+                std::fs::create_dir_all(&vault_inv_dir)
+                    .context("failed to create vault invitations directory")?;
+                let vip = vault_inv_dir.join(format!("{}.json", invitation_id));
+                crate::config::secure_write(&vip, invitation_json.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("failed to write invitation to vault: {}", e))?;
+                vault_invitation_path = Some(vip);
+            }
+
             // Audit
             audit_log(
                 &ctx,
@@ -438,14 +539,18 @@ pub fn handle(
             )?;
 
             if json {
-                crate::output::print_json(&serde_json::json!({
+                let mut obj = serde_json::json!({
                     "action": "invitation_created",
                     "invitee": pubkey,
                     "role": role_enum.to_string(),
                     "envs": allowed_envs,
                     "invitation_id": invitation_id.to_string(),
                     "invitation_path": invitation_path.display().to_string(),
-                }))?;
+                });
+                if let Some(ref vip) = vault_invitation_path {
+                    obj["vault_invitation_path"] = serde_json::json!(vip.display().to_string());
+                }
+                crate::output::print_json(&obj)?;
             } else {
                 crate::output::print_success(&format!(
                     "Invited {} as {} (envs: {})",
@@ -454,89 +559,17 @@ pub fn handle(
                     envs
                 ));
                 println!("  Invitation file: {}", invitation_path.display());
-            }
-        }
-        DelegationCommands::Accept { invitation } => {
-            // Accept UUID, UUID prefix, or file path
-            let path = {
-                let p = std::path::Path::new(&invitation);
-                if p.exists() {
-                    p.to_path_buf()
-                } else {
-                    // Try to find by UUID in the invitations directory
-                    let inv_dir = sigyn_home().join("invitations");
-                    let mut found = None;
-                    if inv_dir.is_dir() {
-                        if let Ok(entries) = std::fs::read_dir(&inv_dir) {
-                            for entry in entries.flatten() {
-                                let name = entry.file_name().to_string_lossy().to_string();
-                                if name.ends_with(".json") {
-                                    let stem = name.trim_end_matches(".json");
-                                    if stem == invitation || stem.starts_with(&invitation) {
-                                        if found.is_some() {
-                                            anyhow::bail!(
-                                                "ambiguous invitation prefix '{}' — multiple matches. Use a longer prefix.",
-                                                invitation
-                                            );
-                                        }
-                                        found = Some(entry.path());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    found.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "invitation '{}' not found.\n  \
-                         Use a file path, full UUID, or UUID prefix.\n  \
-                         List pending invitations with: sigyn delegation pending",
-                            invitation
-                        )
-                    })?
-                }
-            };
-
-            // Read and parse the invitation file
-            let contents =
-                std::fs::read_to_string(path).context("failed to read invitation file")?;
-            let invite_file: InvitationFile =
-                serde_json::from_str(&contents).context("invalid invitation file format")?;
-
-            // Verify the inviter's signature by looking up their identity in the store
-            let home = sigyn_home();
-            let store = IdentityStore::new(home);
-            let identities = store
-                .list()
-                .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
-
-            let inviter_identity = identities
-                .iter()
-                .find(|id| id.fingerprint == invite_file.inviter_fingerprint);
-
-            let inviter = inviter_identity.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "inviter identity {} not found locally — cannot verify invitation signature.\n  \
-                     Import the inviter's identity first, then re-accept the invitation.",
-                    invite_file.inviter_fingerprint.to_hex()
-                )
-            })?;
-            invite_file.verify(&inviter.signing_pubkey).map_err(|_| {
-                anyhow::anyhow!(
-                    "invitation signature verification failed for inviter {}",
-                    invite_file.inviter_fingerprint.to_hex()
-                )
-            })?;
-
-            // Check invitation expiry
-            if let Some(expires_at) = invite_file.expires_at {
-                if chrono::Utc::now() > expires_at {
-                    anyhow::bail!(
-                        "invitation {} has expired (expired at {}). Ask the inviter to create a new invitation.",
-                        invite_file.id,
-                        expires_at.format("%Y-%m-%d %H:%M UTC")
+                if let Some(ref vip) = vault_invitation_path {
+                    println!("  Vault copy:      {}", vip.display());
+                    println!(
+                        "  Run '{}' to share via git",
+                        style(format!("sigyn sync push -v {}", ctx.vault_name)).cyan()
                     );
                 }
             }
+        }
+        DelegationCommands::Accept { invitation } => {
+            let invite_file = load_and_verify_invitation(&invitation)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({

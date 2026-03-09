@@ -25,6 +25,9 @@ pub enum VaultCommands {
         /// Create separate git repo for audit data (enables per-repo access control)
         #[arg(long)]
         split_audit: bool,
+        /// Configure git sync remote URL (skips separate `sync configure` step)
+        #[arg(long)]
+        remote_url: Option<String>,
     },
     /// List all vaults
     List,
@@ -80,6 +83,20 @@ pub enum VaultCommands {
     AcceptTransfer {
         /// Vault name
         name: String,
+    },
+    /// Clone a shared vault from a remote git repository
+    Clone {
+        /// Git remote URL (HTTPS or SSH)
+        url: String,
+        /// Override vault name (default: derived from URL)
+        #[arg(long)]
+        name: Option<String>,
+        /// Accept a delegation invitation (file path, UUID, or UUID prefix)
+        #[arg(long)]
+        invitation: Option<String>,
+        /// Git branch to clone
+        #[arg(long, default_value = "main")]
+        branch: String,
     },
     /// Export a vault as an encrypted tar.gz archive
     Export {
@@ -198,6 +215,24 @@ fn create_single_vault(
     Ok(manifest)
 }
 
+/// Derive a vault name from a git URL.
+///
+/// Handles SSH (`git@host:org/name.git`), HTTPS (`https://host/org/name.git`),
+/// and `ssh://` URLs. Strips trailing `.git` and `/`.
+fn vault_name_from_url(url: &str) -> Result<String> {
+    let cleaned = url.trim_end_matches('/').trim_end_matches(".git");
+    let name = cleaned
+        .rsplit('/')
+        .next()
+        .or_else(|| cleaned.rsplit(':').next())
+        .ok_or_else(|| anyhow::anyhow!("cannot derive vault name from URL: {}", url))?;
+    if name.is_empty() {
+        anyhow::bail!("cannot derive vault name from URL: {}", url);
+    }
+    sigyn_engine::vault::validate_name(name, "vault")?;
+    Ok(name.to_string())
+}
+
 pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<()> {
     let home = sigyn_home();
     let store = IdentityStore::new(home.clone());
@@ -208,6 +243,7 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
             names,
             org,
             split_audit,
+            remote_url,
         } => {
             let loaded = load_identity(&store, identity)?;
             let fingerprint = loaded.identity.fingerprint.clone();
@@ -245,19 +281,59 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 ) {
                     Ok(manifest) => {
                         created += 1;
+
+                        // Configure git sync if --remote-url was provided
+                        let mut sync_configured = false;
+                        if let Some(ref url) = remote_url {
+                            let vault_dir = paths.vault_dir(name);
+                            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+                            if !engine.is_repo() {
+                                if let Err(e) = engine.init() {
+                                    crate::output::print_error(&format!(
+                                        "failed to init git repo for vault '{}': {}",
+                                        name, e
+                                    ));
+                                } else if let Err(e) = engine.add_remote("origin", url) {
+                                    crate::output::print_error(&format!(
+                                        "failed to add remote for vault '{}': {}",
+                                        name, e
+                                    ));
+                                } else {
+                                    sync_configured = true;
+                                }
+                            } else if let Err(e) = engine.add_remote("origin", url) {
+                                crate::output::print_error(&format!(
+                                    "failed to add remote for vault '{}': {}",
+                                    name, e
+                                ));
+                            } else {
+                                sync_configured = true;
+                            }
+                        }
+
                         if json {
-                            json_results.push(serde_json::json!({
+                            let mut obj = serde_json::json!({
                                 "name": name,
                                 "vault_id": manifest.vault_id.to_string(),
                                 "status": "created",
-                            }));
+                            });
+                            if sync_configured {
+                                obj["remote_url"] = serde_json::json!(remote_url);
+                            }
+                            json_results.push(obj);
                         } else if is_batch {
                             crate::output::print_success(&format!("Vault '{}' created", name));
+                            if sync_configured {
+                                println!("  Sync: {}", remote_url.as_deref().unwrap());
+                            }
                         } else {
                             crate::output::print_success(&format!("Vault '{}' created", name));
                             println!("  ID:           {}", manifest.vault_id);
                             println!("  Owner:        {}", style(fingerprint.to_hex()).cyan());
                             println!("  Environments: {}", manifest.environments.join(", "));
+                            if sync_configured {
+                                println!("  Sync:         {}", remote_url.as_deref().unwrap());
+                            }
 
                             println!();
                             println!("{}", style("Next steps:").bold());
@@ -265,7 +341,14 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                                 "  sigyn secret set DATABASE_URL='postgres://...' -v {} -e dev",
                                 name
                             );
-                            println!("  sigyn project init --vault {}", name);
+                            if sync_configured {
+                                println!("  sigyn sync push -v {}", name);
+                            } else {
+                                println!(
+                                    "  sigyn sync configure --remote-url <git-url> -v {}",
+                                    name
+                                );
+                            }
                             println!("  sigyn run -v {} -e dev -- ./your-app", name);
 
                             // Offer to create .sigyn.toml
@@ -907,6 +990,98 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
                 println!("  All data is encrypted — no plaintext secrets in the archive.");
             }
         }
+        VaultCommands::Clone {
+            url,
+            name,
+            invitation,
+            branch,
+        } => {
+            let vault_name = match name {
+                Some(n) => {
+                    sigyn_engine::vault::validate_name(&n, "vault")?;
+                    n
+                }
+                None => vault_name_from_url(&url)?,
+            };
+
+            let vault_dir = paths.vault_dir(&vault_name);
+            if vault_dir.exists() {
+                anyhow::bail!("vault '{}' already exists", vault_name);
+            }
+
+            println!("Cloning vault '{}' from {}...", vault_name, url);
+            if let Err(e) =
+                sigyn_engine::sync::git::GitSyncEngine::clone_repo(&url, &vault_dir, &branch)
+            {
+                // Clean up partial clone
+                let _ = std::fs::remove_dir_all(&vault_dir);
+                return Err(e.into());
+            }
+
+            // Record checkpoint after successful clone
+            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+            if let Some((mut store, device_key)) = crate::commands::sync::get_checkpoint_store() {
+                if let Ok(Some(oid)) = engine.head_oid() {
+                    let state = store.entry_mut(&vault_name);
+                    let checkpoint = state.checkpoint.get_or_insert_with(Default::default);
+                    checkpoint.vault_commit_oid = Some(oid);
+                    crate::commands::sync::persist_checkpoint_store(&store, &device_key);
+                }
+            }
+
+            // Optionally accept a delegation invitation
+            let invitation_accepted = if let Some(ref inv_arg) = invitation {
+                match crate::commands::delegation::load_and_verify_invitation(inv_arg) {
+                    Ok(invite_file) => {
+                        if invite_file.vault_name != vault_name {
+                            eprintln!(
+                                "{} invitation is for vault '{}', but cloned as '{}' — skipping acceptance",
+                                style("warning:").yellow().bold(),
+                                invite_file.vault_name,
+                                vault_name,
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} could not accept invitation: {}",
+                            style("warning:").yellow().bold(),
+                            e,
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "vault_cloned",
+                    "vault": vault_name,
+                    "url": url,
+                    "invitation_accepted": invitation_accepted,
+                }))?;
+            } else {
+                crate::output::print_success(&format!("Vault '{}' cloned", vault_name));
+                println!("  Source: {}", url);
+                if invitation_accepted {
+                    println!("  Invitation: accepted");
+                }
+                println!();
+                println!("{}", style("Next steps:").bold());
+                if !invitation_accepted {
+                    println!(
+                        "  sigyn delegation accept <invitation-file> -v {}",
+                        vault_name
+                    );
+                }
+                println!("  sigyn secret list -v {} -e dev", vault_name);
+            }
+        }
         VaultCommands::Delete { name, force } => {
             let manifest_path = paths.manifest_path(&name);
             if !manifest_path.exists() {
@@ -1017,4 +1192,55 @@ pub fn handle(cmd: VaultCommands, identity: Option<&str>, json: bool) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vault_name_from_https_url() {
+        assert_eq!(
+            vault_name_from_url("https://github.com/org/myapp-vault.git").unwrap(),
+            "myapp-vault"
+        );
+    }
+
+    #[test]
+    fn test_vault_name_from_ssh_url() {
+        assert_eq!(
+            vault_name_from_url("git@github.com:org/myapp-vault.git").unwrap(),
+            "myapp-vault"
+        );
+    }
+
+    #[test]
+    fn test_vault_name_from_url_no_git_suffix() {
+        assert_eq!(
+            vault_name_from_url("https://github.com/org/secrets").unwrap(),
+            "secrets"
+        );
+    }
+
+    #[test]
+    fn test_vault_name_from_url_trailing_slash() {
+        assert_eq!(
+            vault_name_from_url("https://github.com/org/myapp.git/").unwrap(),
+            "myapp"
+        );
+    }
+
+    #[test]
+    fn test_vault_name_from_ssh_protocol_url() {
+        assert_eq!(
+            vault_name_from_url("ssh://git@host/path/to/vault.git").unwrap(),
+            "vault"
+        );
+    }
+
+    #[test]
+    fn test_vault_name_from_url_invalid_chars() {
+        // Names with invalid characters should fail validation
+        assert!(vault_name_from_url("https://github.com/org/bad name.git").is_err());
+    }
 }

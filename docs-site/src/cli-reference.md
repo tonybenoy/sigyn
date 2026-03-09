@@ -216,8 +216,15 @@ Create one or more vaults. The caller's identity becomes the Owner. Generates a 
 
 ```bash
 sigyn vault create myapp
+sigyn vault create myapp --remote-url git@github.com:team/secrets.git
 sigyn vault create frontend backend worker --org acme -i alice
 ```
+
+| Flag | Description |
+|---|---|
+| `--org <PATH>` | Link vault to an org hierarchy path |
+| `--split-audit` | Create separate git repo for audit data |
+| `--remote-url <URL>` | Configure git sync remote URL (skips separate `sync configure` step) |
 
 Accepts multiple names for batch creation. All vaults share the same `--org` and flags.
 Creates the vault directory with `vault.toml`, `members.cbor`, `policy.cbor`, default
@@ -226,6 +233,27 @@ suggested next steps and offers to create a `.sigyn.toml` project config in the
 current directory (interactive terminals only, single vault only).
 
 **Naming rules:** Vault and environment names must be 1-64 characters, contain only `[a-zA-Z0-9-_]`, and cannot start with `.` or contain `..`.
+
+### vault clone
+
+Clone a shared vault from a remote git repository. Derives the local vault name from
+the URL (strips trailing `.git`), or use `--name` to override. Optionally accepts a
+delegation invitation in the same command for single-step onboarding.
+
+```bash
+sigyn vault clone git@github.com:team/myapp-vault.git
+sigyn vault clone https://github.com/team/vault.git --name myapp
+sigyn vault clone git@github.com:team/vault.git --invitation ./invitation-abc123.json
+sigyn vault clone git@github.com:team/vault.git --branch develop
+```
+
+| Flag | Description |
+|---|---|
+| `--name <NAME>` | Override the vault name (default: derived from URL) |
+| `--invitation <PATH>` | Accept a delegation invitation (file path, UUID, or UUID prefix) |
+| `--branch <BRANCH>` | Git branch to clone (default: `main`) |
+
+After cloning, the vault's rollback-protection checkpoint is recorded automatically.
 
 ### vault list
 
@@ -522,13 +550,14 @@ skipped keys.
 
 ```bash
 sigyn env promote --from dev --to staging
+sigyn env promote --from dev --to staging,prod              # chained: dev→staging→prod
 sigyn env promote --from staging --to prod --keys DATABASE_URL,API_KEY
 ```
 
 | Flag | Description |
 |---|---|
 | `--from <ENV>` | Source environment |
-| `--to <ENV>` | Target environment |
+| `--to <ENV,...>` | Target environment(s). Multiple targets are chained: each uses the previous target as its source. |
 | `--keys <K1,K2,...>` | Optional comma-separated list of keys to promote (default: all) |
 
 ### env delete
@@ -720,15 +749,27 @@ alice (a1b2c3d4...) [owner]
   dave (a3b4c5d6...) [manager]
 ```
 
-### delegation invite create
+### delegation invite
 
 Create a signed invitation file for a new member. The invitation is an Ed25519-signed
-JSON document that can be shared out-of-band (email, chat, etc.).
+JSON document that can be shared out-of-band (email, chat, etc.) or saved to the vault
+directory for git-based sharing.
 
 ```bash
-sigyn delegation invite create --role contributor --envs dev,staging
-sigyn delegation invite create --role readonly --envs '*' --expires 7d
+sigyn delegation invite --pubkey <FP> --role contributor --envs dev,staging
+sigyn delegation invite --pubkey <FP> --role readonly --envs '*'
+sigyn delegation invite --pubkey <FP> --role operator --save-to-vault
 ```
+
+| Flag | Description |
+|---|---|
+| `--pubkey <FP>` | Invitee's public key fingerprint |
+| `--role <ROLE>` | Role to assign (default: `readonly`) |
+| `--envs <E1,E2>` | Allowed environments, comma-separated (default: `*`) |
+| `--save-to-vault` | Also save invitation to vault directory for git-based sharing |
+
+When `--save-to-vault` is used, the invitation is written to `<vault>/invitations/<uuid>.json`.
+After `sigyn sync push`, the invitee can `sigyn vault clone` the repo and accept using the UUID.
 
 ### delegation accept
 

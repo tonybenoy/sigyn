@@ -297,13 +297,13 @@ No data is silently overwritten during sync.
 A typical team workflow:
 
 ```bash
-# Alice creates a vault and pushes
-sigyn vault create myapp
+# Alice creates a vault with sync and pushes
+sigyn vault create myapp --remote-url git@github.com:team/secrets.git
 sigyn secret set DATABASE_URL 'postgres://...' --env dev
-sigyn sync configure --remote-url git@github.com:team/secrets.git
 sigyn sync push
 
-# Bob clones and pulls
+# Bob clones the vault, then pulls latest
+sigyn vault clone git@github.com:team/secrets.git
 sigyn sync pull --vault myapp
 
 # Bob adds a secret and pushes

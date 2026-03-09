@@ -45,14 +45,14 @@ pub enum EnvCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Promote secrets from one environment to another
+    /// Promote secrets from one environment to another (or chain through multiple)
     Promote {
         /// Source environment name
         #[arg(long)]
         from: String,
-        /// Target environment name
-        #[arg(long)]
-        to: String,
+        /// Target environment name(s), comma-separated for chained promotion (e.g. staging,prod)
+        #[arg(long, value_delimiter = ',', required = true, num_args = 1..)]
+        to: Vec<String>,
         /// Optional comma-separated list of keys to promote
         #[arg(long, value_delimiter = ',')]
         keys: Option<Vec<String>>,
@@ -587,101 +587,108 @@ pub fn handle(
             let ctx = unlock_vault(identity, vault, Some(&from))?;
             check_access(&ctx, AccessAction::Promote, None)?;
 
-            // Read source environment
-            let source_cipher = ctx
-                .cipher_for_env(&from)
-                .ok_or_else(|| anyhow::anyhow!("no access to env '{}'", from))?;
-            let source_path = paths.env_path(&vault_name, &from);
-            if !source_path.exists() {
-                anyhow::bail!("source environment '{}' has no secrets", from);
-            }
-            let source_encrypted = env_file::read_encrypted_env(&source_path)?;
-            let source_env = env_file::decrypt_env(&source_encrypted, source_cipher)?;
-
-            // Read target environment (or create empty)
-            let target_cipher = ctx
-                .cipher_for_env(&to)
-                .ok_or_else(|| anyhow::anyhow!("no access to env '{}'", to))?;
-            let target_path = paths.env_path(&vault_name, &to);
-            let mut target_env = if target_path.exists() {
-                let target_encrypted = env_file::read_encrypted_env(&target_path)?;
-                env_file::decrypt_env(&target_encrypted, target_cipher)?
-            } else {
-                PlaintextEnv::new()
-            };
-
-            // Perform promotion
             let filter = keys.as_deref();
-            let result = promote_env(&source_env, &mut target_env, &ctx.fingerprint, filter);
+            let mut current_source = from.clone();
+            let mut json_results: Vec<serde_json::Value> = Vec::new();
 
-            // Write target env back encrypted
-            let encrypted = env_file::encrypt_env(&target_env, target_cipher, &to)?;
-            env_file::write_encrypted_env(&target_path, &encrypted)?;
-
-            // Audit log
-            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-            let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                ctx.vault_cipher.key_bytes(),
-                b"sigyn-audit-v1",
-                &ctx.manifest.vault_id,
-            );
-            if let Ok(ac) = audit_cipher {
-                if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
-                    let _ = log.append(
-                        &ctx.fingerprint,
-                        AuditAction::EnvironmentPromoted {
-                            source: from.clone(),
-                            target: to.clone(),
-                        },
-                        None,
-                        AuditOutcome::Success,
-                        ctx.loaded_identity.signing_key(),
-                    );
+            for target in &to {
+                // Read source environment
+                let source_cipher = ctx
+                    .cipher_for_env(&current_source)
+                    .ok_or_else(|| anyhow::anyhow!("no access to env '{}'", current_source))?;
+                let source_path = paths.env_path(&vault_name, &current_source);
+                if !source_path.exists() {
+                    anyhow::bail!("source environment '{}' has no secrets", current_source);
                 }
+                let source_encrypted = env_file::read_encrypted_env(&source_path)?;
+                let source_env = env_file::decrypt_env(&source_encrypted, source_cipher)?;
+
+                // Read target environment (or create empty)
+                let target_cipher = ctx
+                    .cipher_for_env(target)
+                    .ok_or_else(|| anyhow::anyhow!("no access to env '{}'", target))?;
+                let target_path = paths.env_path(&vault_name, target);
+                let mut target_env = if target_path.exists() {
+                    let target_encrypted = env_file::read_encrypted_env(&target_path)?;
+                    env_file::decrypt_env(&target_encrypted, target_cipher)?
+                } else {
+                    PlaintextEnv::new()
+                };
+
+                // Perform promotion
+                let result = promote_env(&source_env, &mut target_env, &ctx.fingerprint, filter);
+
+                // Write target env back encrypted
+                let encrypted = env_file::encrypt_env(&target_env, target_cipher, target)?;
+                env_file::write_encrypted_env(&target_path, &encrypted)?;
+
+                // Audit log
+                let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+                let audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &ctx.manifest.vault_id,
+                );
+                if let Ok(ac) = audit_cipher {
+                    if let Ok(mut log) = AuditLog::open(&audit_path, ac) {
+                        let _ = log.append(
+                            &ctx.fingerprint,
+                            AuditAction::EnvironmentPromoted {
+                                source: current_source.clone(),
+                                target: target.clone(),
+                            },
+                            None,
+                            AuditOutcome::Success,
+                            ctx.loaded_identity.signing_key(),
+                        );
+                    }
+                }
+
+                if json {
+                    json_results.push(serde_json::json!({
+                        "source": current_source,
+                        "target": target,
+                        "promoted": result.promoted_keys,
+                        "skipped": result.skipped_keys,
+                        "overwritten": result.overwritten_keys,
+                    }));
+                } else {
+                    crate::output::print_success(&format!(
+                        "Promoted {} secret(s) from '{}' to '{}'",
+                        result.promoted_keys.len(),
+                        current_source,
+                        target,
+                    ));
+                    if !result.overwritten_keys.is_empty() {
+                        println!(
+                            "  {} overwritten: {}",
+                            style("Keys").dim(),
+                            result.overwritten_keys.join(", ")
+                        );
+                    }
+                    if !result.skipped_keys.is_empty() {
+                        println!(
+                            "  {} skipped (not in source): {}",
+                            style("Keys").dim(),
+                            result.skipped_keys.join(", ")
+                        );
+                    }
+                }
+
+                // Chain: next iteration uses this target as source
+                current_source = target.clone();
             }
 
-            if json {
-                crate::output::print_json(&serde_json::json!({
-                    "source": from,
-                    "target": to,
-                    "promoted": result.promoted_keys,
-                    "skipped": result.skipped_keys,
-                    "overwritten": result.overwritten_keys,
-                }))?;
-            } else {
-                crate::output::print_success(&format!(
-                    "Promoted {} secret(s) from '{}' to '{}'",
-                    result.promoted_keys.len(),
-                    from,
-                    to,
-                ));
-                if !result.overwritten_keys.is_empty() {
-                    println!(
-                        "  {} overwritten: {}",
-                        style("Keys").dim(),
-                        result.overwritten_keys.join(", ")
-                    );
-                }
-                if !result.skipped_keys.is_empty() {
-                    println!(
-                        "  {} skipped (not in source): {}",
-                        style("Keys").dim(),
-                        result.skipped_keys.join(", ")
-                    );
+            if json && json_results.len() > 1 {
+                crate::output::print_json(&json_results)?;
+            } else if json {
+                if let Some(r) = json_results.into_iter().next() {
+                    crate::output::print_json(&r)?;
                 }
             }
 
             // Auto-sync after promote
-            if crate::config::load_config().auto_sync {
-                eprintln!("{} auto-syncing...", style("note:").cyan().bold());
-                if let Err(e) = crate::commands::sync::auto_push(&vault_name) {
-                    eprintln!(
-                        "{} auto-sync failed: {}",
-                        style("warning:").yellow().bold(),
-                        e
-                    );
-                }
-            }
+            crate::commands::secret::maybe_auto_sync(&vault_name);
         }
     }
     Ok(())

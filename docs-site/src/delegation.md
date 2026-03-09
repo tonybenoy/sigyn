@@ -89,9 +89,14 @@ invitee can verify it was created by a legitimate vault member.
 
 ### Step 3: Accept the Invitation
 
-The invitee accepts the invitation on their machine:
+The invitee clones the vault and accepts the invitation on their machine:
 
 ```bash
+# Single command (clone + accept):
+sigyn vault clone git@github.com:team/secrets.git --invitation ./invitation-abc123.json
+
+# Or separately:
+sigyn vault clone git@github.com:team/secrets.git
 sigyn delegation invite accept ./invitation-abc123.json
 ```
 

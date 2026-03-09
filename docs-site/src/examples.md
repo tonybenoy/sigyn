@@ -179,11 +179,15 @@ sigyn delegation invite create \
 # Produces invitation-<id>.json — send it to Bob
 ```
 
-**Step 3 — New member accepts and verifies access:**
+**Step 3 — New member clones the vault, accepts, and verifies access:**
 
 ```bash
-# Bob accepts the invitation
-sigyn delegation invite accept ./invitation-abc123.json
+# Bob clones and accepts in one step
+sigyn vault clone git@github.com:team/secrets.git --invitation ./invitation-abc123.json
+
+# Or separately:
+# sigyn vault clone git@github.com:team/secrets.git
+# sigyn delegation invite accept ./invitation-abc123.json
 
 # Pull the vault to get encrypted secrets
 sigyn sync pull

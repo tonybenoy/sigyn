@@ -72,14 +72,14 @@ pub enum DeployKeyCommands {
 }
 
 /// Load the device key and pinned vaults store (best-effort for sync ops).
-fn get_checkpoint_store() -> Option<(PinnedVaultsStore, [u8; 32])> {
+pub(crate) fn get_checkpoint_store() -> Option<(PinnedVaultsStore, [u8; 32])> {
     let home = crate::config::sigyn_home();
     let device_key = sigyn_engine::device::load_or_create_device_key(&home).ok()?;
     let store = sigyn_engine::vault::local_state::load_pinned_store(&home, &device_key).ok()?;
     Some((store, device_key))
 }
 
-fn persist_checkpoint_store(store: &PinnedVaultsStore, device_key: &[u8; 32]) {
+pub(crate) fn persist_checkpoint_store(store: &PinnedVaultsStore, device_key: &[u8; 32]) {
     let home = crate::config::sigyn_home();
     if let Err(e) = sigyn_engine::vault::local_state::save_pinned_store(store, &home, device_key) {
         eprintln!(

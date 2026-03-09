@@ -80,6 +80,21 @@ impl GitSyncEngine {
         Self { vault_path }
     }
 
+    /// Clone a remote repository into the given local path.
+    pub fn clone_repo(url: &str, target_path: &std::path::Path, branch: &str) -> Result<()> {
+        let mut fetch_opts = git2::FetchOptions::new();
+        fetch_opts.remote_callbacks(make_callbacks());
+
+        let mut builder = git2::build::RepoBuilder::new();
+        builder.fetch_options(fetch_opts);
+        builder.branch(branch);
+
+        builder
+            .clone(url, target_path)
+            .map_err(|e| SigynError::GitError(format!("clone failed: {}", e)))?;
+        Ok(())
+    }
+
     pub fn init(&self) -> Result<()> {
         git2::Repository::init(&self.vault_path)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
@@ -600,6 +615,33 @@ mod tests {
         let vk = kp.verifying_key();
         // Missing signature file should be an error
         assert!(verify_commit_sig(dir.path(), "abc", &vk).is_err());
+    }
+
+    #[test]
+    fn test_clone_repo_from_local_bare() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
+
+        // Create an initial commit in the bare repo
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let tree_oid = {
+            let mut index = bare_repo.index().unwrap();
+            index.write_tree().unwrap()
+        };
+        let tree = bare_repo.find_tree(tree_oid).unwrap();
+        bare_repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // Clone into a new directory
+        let clone_dir = tempfile::tempdir().unwrap();
+        let target = clone_dir.path().join("cloned");
+        GitSyncEngine::clone_repo(bare_dir.path().to_str().unwrap(), &target, "main").unwrap();
+
+        // Verify the clone is a valid repo with a commit
+        let engine = GitSyncEngine::new(target);
+        assert!(engine.is_repo());
+        assert!(engine.head_oid().unwrap().is_some());
     }
 
     #[test]
