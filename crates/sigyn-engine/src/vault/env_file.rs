@@ -12,7 +12,19 @@ pub fn write_encrypted_env(path: &Path, env_file: &EncryptedEnvFile) -> Result<(
 
 pub fn read_encrypted_env(path: &Path) -> Result<EncryptedEnvFile> {
     let data = std::fs::read(path)?;
-    ciborium::from_reader(data.as_slice()).map_err(|e| SigynError::CborDecode(e.to_string()))
+    // Use a cursor to detect trailing bytes after CBOR deserialization.
+    // Trailing bytes indicate the file was tampered with (appended data).
+    let mut cursor = std::io::Cursor::new(&data);
+    let env_file: EncryptedEnvFile =
+        ciborium::from_reader(&mut cursor).map_err(|e| SigynError::CborDecode(e.to_string()))?;
+    let consumed = cursor.position() as usize;
+    if consumed != data.len() {
+        return Err(SigynError::CborDecode(format!(
+            "vault file has {} trailing bytes — file may be tampered",
+            data.len() - consumed
+        )));
+    }
+    Ok(env_file)
 }
 
 #[cfg(test)]

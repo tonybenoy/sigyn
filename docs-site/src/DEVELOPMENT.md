@@ -70,22 +70,20 @@ cargo run -- tui
 
 ## Testing Strategy
 
-### Unit Tests
-
-Unit tests should be colocated with the code they test. Focus on:
-- Cryptographic roundtrips.
-- Policy evaluation edge cases.
-- CRDT merge logic.
-
-### Integration Tests
-
-Integration tests are in `tests/integration/src/`. They use the `sigyn` binary or call the CLI functions directly to test end-to-end workflows.
-
-Example of running a specific integration test:
+Sigyn uses 5 test layers: unit tests, integration tests, CLI workflow tests, E2E tests, and adversarial security tests.
 
 ```bash
-cargo test --test integration vault_lifecycle
+# Run all tests (fast KDF for speed)
+cargo test --all --features sigyn-cli/fast-kdf
+
+# E2E test (requires release build)
+cargo build --release && bash tests/e2e_test.sh
+
+# Adversarial security test
+bash tests/adversarial_test.sh
 ```
+
+See the [Testing](./testing.md) page for the full testing guide, including how to write tests and CI integration.
 
 ## Debugging
 

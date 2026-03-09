@@ -427,16 +427,20 @@ pub fn handle(
         }
         RotateCommands::BreachMode { force } => {
             if !force {
-                use dialoguer::Confirm;
-                let confirmed = Confirm::new()
-                    .with_prompt(
-                        "BREACH MODE will rotate ALL secrets and revoke delegated access. Continue?",
-                    )
-                    .default(false)
-                    .interact()?;
-                if !confirmed {
-                    println!("Aborted.");
-                    return Ok(());
+                if crate::config::is_interactive() {
+                    use dialoguer::Confirm;
+                    let confirmed = Confirm::new()
+                        .with_prompt(
+                            "BREACH MODE will rotate ALL secrets and revoke delegated access. Continue?",
+                        )
+                        .default(false)
+                        .interact()?;
+                    if !confirmed {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                } else {
+                    anyhow::bail!("use --force in non-interactive mode");
                 }
             }
 

@@ -224,6 +224,53 @@ impl AuditLog {
         Ok(entry)
     }
 
+    /// Re-encrypt the entire audit log with a new cipher.
+    /// Used when the vault key is rotated (e.g., after member revocation).
+    pub fn rekey(path: &Path, old_cipher: VaultCipher, new_cipher: VaultCipher) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        use base64::Engine;
+
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        let mut new_lines = Vec::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Decrypt with old cipher
+            let encrypted = base64::engine::general_purpose::STANDARD
+                .decode(line.trim())
+                .map_err(|e| SigynError::Deserialization(format!("base64 decode: {}", e)))?;
+            let plaintext = old_cipher.decrypt(&encrypted, b"audit-entry")?;
+
+            // Re-encrypt with new cipher
+            let re_encrypted = new_cipher.encrypt(&plaintext, b"audit-entry")?;
+            new_lines.push(base64::engine::general_purpose::STANDARD.encode(&re_encrypted));
+        }
+
+        // Write atomically
+        let tmp_path = path.with_extension("rekey.tmp");
+        {
+            let mut out = std::fs::File::create(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                out.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            for line in &new_lines {
+                out.write_all(line.as_bytes())?;
+                out.write_all(b"\n")?;
+            }
+            out.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
     /// Verify the audit chain: hash linkage, hash integrity, and Ed25519 signatures.
     ///
     /// `lookup_key` resolves an actor fingerprint to their signing public key.

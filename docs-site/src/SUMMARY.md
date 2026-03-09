@@ -36,4 +36,5 @@
 # Development
 
 - [Development Guide](./DEVELOPMENT.md)
+- [Testing](./testing.md)
 - [Contributing](./contributing.md)

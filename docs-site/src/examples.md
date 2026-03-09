@@ -90,29 +90,93 @@ server restarts with the new values automatically.
 
 ## CI/CD Integration
 
-### GitHub Actions
+### GitHub Actions (Official Action)
 
-To use Sigyn in GitHub Actions, you can store your identity's private key and passphrase as GitHub Secrets, then use them to inject secrets into your build.
+Sigyn provides an official GitHub Action that handles identity setup, vault sync, and
+secret injection automatically.
+
+**Step 1 — Create a CI identity and add it to your vault:**
+
+```bash
+sigyn identity create --name ci-bot
+sigyn delegation invite create --role reader --envs staging,prod
+# Accept the invite on the CI identity, then:
+sigyn ci setup ci-bot
+```
+
+**Step 2 — Add 3 secrets** to your repository (Settings > Secrets and variables > Actions):
+
+| Secret | Source |
+|--------|--------|
+| `SIGYN_CI_BUNDLE` | Output of `sigyn ci setup` (single base64 string with identity + device key + fingerprint) |
+| `SIGYN_PASSPHRASE` | Your CI identity's passphrase |
+| `VAULT_SSH_KEY` | SSH deploy key with read access to your vault repo |
+
+**Step 3 — Use the action in your workflow:**
 
 ```yaml
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Sigyn
-        run: cargo install sigyn-cli
 
-      - name: Setup Identity
-        run: |
-          echo "${{ secrets.SIGYN_IDENTITY_KEY }}" > ~/.sigyn/identities/ci/identity.toml
-          # The identity must be unlocked. For CI, consider using a non-passphrase protected
-          # identity if the environment is secure, or use a tool like 'expect' to provide
-          # the passphrase securely.
+      - name: Load secrets
+        uses: tonybenoy/sigyn/action@main
+        with:
+          bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
+          passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
+          vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
+          vault-repo: git@github.com:myorg/sigyn-vaults.git
+          vault: myapp
+          environment: prod
 
-      - name: Run Tests with Secrets
+      # All secrets are now available as environment variables
+      - name: Deploy
         run: |
-          sigyn run --staging -- ./scripts/run-tests.sh
+          echo "Deploying with database at $DATABASE_URL"
+          ./deploy.sh
+```
+
+**Export modes:**
+
+| Mode | Description |
+|------|-------------|
+| `env` (default) | Writes secrets to `$GITHUB_ENV` — available in all subsequent steps |
+| `dotenv` | Writes a `.env` file (path configurable via `dotenv-path`) |
+| `json` | Writes a JSON file (path configurable via `dotenv-path`) |
+| `mask-only` | Masks values in logs but doesn't export them |
+
+**Filtering specific keys:**
+
+```yaml
+- uses: tonybenoy/sigyn/action@main
+  with:
+    bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
+    passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
+    vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
+    vault-repo: git@github.com:myorg/sigyn-vaults.git
+    vault: myapp
+    environment: prod
+    keys: "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION"
+```
+
+**ECR login example:**
+
+```yaml
+- name: Load AWS credentials
+  uses: tonybenoy/sigyn/action@main
+  with:
+    bundle: ${{ secrets.SIGYN_CI_BUNDLE }}
+    passphrase: ${{ secrets.SIGYN_PASSPHRASE }}
+    vault-ssh-key: ${{ secrets.VAULT_SSH_KEY }}
+    vault-repo: git@github.com:myorg/sigyn-vaults.git
+    vault: infra
+    environment: prod
+    keys: "AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION"
+
+- name: Login to ECR
+  run: aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
 ```
 
 ### GitLab CI
@@ -120,8 +184,12 @@ jobs:
 ```yaml
 test:
   image: rust:latest
+  variables:
+    SIGYN_PASSPHRASE: $SIGYN_PASSPHRASE
+  before_script:
+    - curl -fsSL https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh | sh
+    - export PATH="$HOME/.sigyn/bin:$PATH"
   script:
-    - cargo install sigyn-cli
     - sigyn run -e dev -- npm test
 ```
 

@@ -4,6 +4,37 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use sigyn_engine::vault::PlaintextEnv;
 
+/// System environment variables that must never be overridden by secrets.
+/// Overriding these enables code execution (LD_PRELOAD), PATH hijacking, or DoS.
+const DANGEROUS_ENV_VARS: &[&str] = &[
+    "PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_BIND_NOW",
+    "HOME",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "IFS",
+    "CDPATH",
+    "ENV",
+    "BASH_ENV",
+    "SIGYN_HOME",
+    "SIGYN_PASSPHRASE",
+];
+
+/// Check if a secret key name would shadow a dangerous system environment variable.
+/// Returns the blocked var name if dangerous, None if safe.
+pub fn check_dangerous_env_override(key: &str) -> Option<&'static str> {
+    DANGEROUS_ENV_VARS
+        .iter()
+        .find(|&&v| v.eq_ignore_ascii_case(key))
+        .copied()
+}
+
 pub fn run_with_secrets(env: &PlaintextEnv, command: &[String], inherit_env: bool) -> Result<i32> {
     if command.is_empty() {
         anyhow::bail!("no command specified");
@@ -24,10 +55,23 @@ pub fn run_with_secrets(env: &PlaintextEnv, command: &[String], inherit_env: boo
     if !inherit_env {
         cmd.env_clear();
     }
+    // Never leak sigyn internals to child processes
+    cmd.env_remove("SIGYN_PASSPHRASE");
+    cmd.env_remove("SIGYN_HOME");
 
-    // Inject secrets as environment variables
+    // Inject secrets as environment variables, blocking dangerous overrides
     for (key, entry) in &env.entries {
         if let Some(val) = entry.value.as_str() {
+            if let Some(blocked) = check_dangerous_env_override(key) {
+                eprintln!(
+                    "{} secret '{}' shadows system variable '{}' — skipped to prevent hijacking. \
+                     Rename this secret or use `sigyn run serve` for socket-based injection.",
+                    console::style("warning:").yellow().bold(),
+                    key,
+                    blocked,
+                );
+                continue;
+            }
             cmd.env(key, val);
         }
     }

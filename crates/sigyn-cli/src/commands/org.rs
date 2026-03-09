@@ -304,10 +304,7 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
 
                 std::fs::create_dir_all(hierarchy_paths.children_dir(&child_path))?;
 
-                crate::config::secure_write(
-                    &hierarchy_paths.manifest_path(&child_path),
-                    manifest.to_toml()?.as_bytes(),
-                )?;
+                save_org_manifest(&hierarchy_paths.manifest_path(&child_path), &manifest)?;
 
                 let signed_header = envelope::sign_header(&header, loaded.signing_key(), node_id)
                     .map_err(|e| anyhow::anyhow!("failed to sign header: {}", e))?;

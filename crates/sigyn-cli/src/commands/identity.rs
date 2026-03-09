@@ -63,6 +63,22 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
 
     match cmd {
         IdentityCommands::Create { name, email } => {
+            // Validate identity name
+            if name.is_empty() {
+                anyhow::bail!("identity name cannot be empty");
+            }
+            if name.len() > 64 {
+                anyhow::bail!("identity name too long (max 64 characters)");
+            }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                anyhow::bail!(
+                    "identity name may only contain [a-zA-Z0-9-_], got '{}'",
+                    name
+                );
+            }
             if store.find_by_name(&name)?.is_some() {
                 anyhow::bail!("identity with name '{}' already exists", name);
             }
@@ -341,6 +357,11 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Public variant for use by other command modules (e.g. `ci`).
+pub fn resolve_identity_pub(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<Identity> {
+    resolve_identity(store, name_or_fp)
 }
 
 fn resolve_identity(store: &IdentityStore, name_or_fp: Option<&str>) -> Result<Identity> {

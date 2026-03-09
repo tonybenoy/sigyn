@@ -385,14 +385,14 @@ sigyn secret list --env dev --reveal
 | `--env` | `-e` | Target environment (default: dev) |
 | `--reveal` | `-r` | Show decrypted values instead of masked output |
 
-### secret remove (alias: rm)
+### secret remove (aliases: rm, delete, del)
 
 Delete one or more secrets from an environment.
 
 ```bash
 sigyn secret remove OLD_KEY --env dev
-sigyn secret rm UNUSED_VAR --env staging
-sigyn secret remove OLD_KEY1 OLD_KEY2 OLD_KEY3 -e dev
+sigyn secret delete UNUSED_VAR --env staging
+sigyn secret rm OLD_KEY1 OLD_KEY2 OLD_KEY3 -e dev
 ```
 
 ### secret generate
@@ -694,14 +694,21 @@ sigyn delegation invite create --role contributor --envs dev,staging
 sigyn delegation invite create --role readonly --envs '*' --expires 7d
 ```
 
-### delegation invite accept
+### delegation accept
 
-Accept an invitation file and join a vault. Verifies the Ed25519 signature before
-accepting. After acceptance, Sigyn prints next steps (sync pull, test access) and
-offers to create a `.sigyn.toml` for the vault.
+Accept an invitation and join a vault. Accepts a file path, full UUID, or UUID prefix.
+Verifies the Ed25519 signature before accepting. After acceptance, Sigyn prints
+next steps (sync pull, test access).
 
 ```bash
-sigyn delegation invite accept ./invitation-abc123.json
+# By file path
+sigyn delegation accept ./invitation-abc123.json
+
+# By UUID (from 'sigyn delegation pending')
+sigyn delegation accept 3a03a59b-114e-444c-a346-6ff33566aa71
+
+# By UUID prefix (shortest unambiguous match)
+sigyn delegation accept 3a03a59b
 ```
 
 ### delegation revoke
@@ -1587,6 +1594,28 @@ sigyn completions powershell >> $PROFILE
 ```
 
 Supported shells: `bash`, `zsh`, `fish`, `powershell`.
+
+## ci
+
+CI/CD integration helpers.
+
+### ci setup
+
+Export identity bundle for use in CI/CD pipelines. Outputs the base64-encoded
+identity file, device key, and fingerprint needed to configure GitHub Actions
+secrets (or equivalent in other CI systems).
+
+```bash
+sigyn ci setup              # uses default identity
+sigyn ci setup ci-bot       # uses specific identity
+sigyn ci setup --json       # machine-readable output
+```
+
+The command outputs a single `SIGYN_CI_BUNDLE` value (base64-encoded JSON containing
+identity file, device key, and fingerprint). You also need `SIGYN_PASSPHRASE` and
+`VAULT_SSH_KEY` as separate GitHub secrets — 3 secrets total.
+
+See [Examples > CI/CD Integration](examples.md#cicd-integration) for full workflow examples.
 
 ## Related Documentation
 

@@ -1,0 +1,184 @@
+name: "Sigyn Secrets"
+description: "Decrypt and inject secrets from a Sigyn vault into your GitHub Actions workflow"
+author: "tonybenoy"
+branding:
+  icon: "lock"
+  color: "purple"
+
+inputs:
+  bundle:
+    description: "CI bundle from `sigyn ci setup` (contains identity + device key + fingerprint)"
+    required: true
+  passphrase:
+    description: "Identity passphrase"
+    required: true
+  vault-ssh-key:
+    description: "SSH private key for cloning the vault repo"
+    required: true
+  vault-repo:
+    description: "Git URL for vault repository"
+    required: true
+  vault:
+    description: "Vault name"
+    required: true
+  environment:
+    description: "Environment name (e.g. dev, staging, prod)"
+    required: true
+  export:
+    description: "Export mode: env (GITHUB_ENV), dotenv (file), json (file), mask-only (mask values, no export)"
+    required: false
+    default: "env"
+  dotenv-path:
+    description: "Output path for dotenv/json export"
+    required: false
+    default: ".env"
+  keys:
+    description: "Comma-separated list of specific secret keys to export (default: all)"
+    required: false
+    default: ""
+  mask:
+    description: "Mask all secret values in GitHub Actions logs"
+    required: false
+    default: "true"
+  version:
+    description: "Sigyn version to install (default: latest)"
+    required: false
+    default: "latest"
+
+outputs:
+  secrets-json:
+    description: "JSON object of exported secrets (only when export=json or export=env)"
+    value: ${{ steps.export.outputs.secrets-json }}
+  count:
+    description: "Number of secrets exported"
+    value: ${{ steps.export.outputs.count }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Sigyn
+      shell: bash
+      env:
+        SIGYN_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL "https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh" | sh
+        echo "$HOME/.sigyn/bin" >> "$GITHUB_PATH"
+
+    - name: Setup Identity from Bundle
+      shell: bash
+      env:
+        SIGYN_BUNDLE: ${{ inputs.bundle }}
+      run: |
+        set -euo pipefail
+
+        SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
+        mkdir -p "$SIGYN_HOME/identities"
+
+        # Unpack bundle: base64-encoded JSON with fingerprint, identity, device_key
+        BUNDLE_JSON=$(echo "$SIGYN_BUNDLE" | base64 -d)
+        FINGERPRINT=$(echo "$BUNDLE_JSON" | jq -r '.fingerprint')
+        IDENTITY_B64=$(echo "$BUNDLE_JSON" | jq -r '.identity')
+        DEVICE_KEY_B64=$(echo "$BUNDLE_JSON" | jq -r '.device_key')
+
+        # Restore identity file
+        echo "$IDENTITY_B64" | base64 -d > "$SIGYN_HOME/identities/${FINGERPRINT}.identity"
+        chmod 600 "$SIGYN_HOME/identities/${FINGERPRINT}.identity"
+
+        # Restore device key
+        echo "$DEVICE_KEY_B64" | base64 -d > "$SIGYN_HOME/.device_key"
+        chmod 400 "$SIGYN_HOME/.device_key"
+
+        echo "::debug::Identity restored for fingerprint ${FINGERPRINT:0:16}..."
+
+    - name: Clone Vault
+      shell: bash
+      env:
+        VAULT_REPO: ${{ inputs.vault-repo }}
+        VAULT_NAME: ${{ inputs.vault }}
+        VAULT_SSH_KEY: ${{ inputs.vault-ssh-key }}
+      run: |
+        set -euo pipefail
+
+        SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
+        VAULT_DIR="$SIGYN_HOME/vaults/$VAULT_NAME"
+
+        # Setup SSH key
+        mkdir -p ~/.ssh
+        echo "$VAULT_SSH_KEY" > ~/.ssh/sigyn_vault_key
+        chmod 600 ~/.ssh/sigyn_vault_key
+        export GIT_SSH_COMMAND="ssh -i ~/.ssh/sigyn_vault_key -o StrictHostKeyChecking=accept-new"
+
+        if [ -d "$VAULT_DIR/.git" ]; then
+          git -C "$VAULT_DIR" pull --ff-only
+        else
+          mkdir -p "$SIGYN_HOME/vaults"
+          git clone "$VAULT_REPO" "$VAULT_DIR"
+        fi
+
+        # Cleanup SSH key
+        rm -f ~/.ssh/sigyn_vault_key
+
+    - name: Export Secrets
+      id: export
+      shell: bash
+      env:
+        SIGYN_PASSPHRASE: ${{ inputs.passphrase }}
+        SIGYN_VAULT: ${{ inputs.vault }}
+        SIGYN_ENV: ${{ inputs.environment }}
+        SIGYN_EXPORT_MODE: ${{ inputs.export }}
+        SIGYN_DOTENV_PATH: ${{ inputs.dotenv-path }}
+        SIGYN_KEYS: ${{ inputs.keys }}
+        SIGYN_MASK: ${{ inputs.mask }}
+      run: |
+        set -euo pipefail
+
+        # Export secrets as JSON
+        RAW_JSON=$("$HOME/.sigyn/bin/sigyn" run export \
+          --vault "$SIGYN_VAULT" \
+          --env "$SIGYN_ENV" \
+          --format json)
+
+        # Filter to specific keys if requested
+        if [ -n "$SIGYN_KEYS" ]; then
+          FILTER=$(echo "$SIGYN_KEYS" | tr ',' '\n' | jq -R . | jq -s '.')
+          RAW_JSON=$(echo "$RAW_JSON" | jq --argjson keys "$FILTER" \
+            'to_entries | map(select(.key as $k | $keys | index($k))) | from_entries')
+        fi
+
+        # Count secrets
+        COUNT=$(echo "$RAW_JSON" | jq 'length')
+        echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+        # Mask all secret values in logs
+        if [ "$SIGYN_MASK" = "true" ]; then
+          echo "$RAW_JSON" | jq -r 'to_entries[].value' | while IFS= read -r val; do
+            if [ -n "$val" ]; then
+              echo "::add-mask::$val"
+            fi
+          done
+        fi
+
+        case "$SIGYN_EXPORT_MODE" in
+          env)
+            echo "$RAW_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+            echo "secrets-json=$RAW_JSON" >> "$GITHUB_OUTPUT"
+            echo "::notice::Exported $COUNT secrets to environment variables"
+            ;;
+          dotenv)
+            echo "$RAW_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > "$SIGYN_DOTENV_PATH"
+            echo "::notice::Exported $COUNT secrets to $SIGYN_DOTENV_PATH"
+            ;;
+          json)
+            echo "$RAW_JSON" > "$SIGYN_DOTENV_PATH"
+            echo "secrets-json=$RAW_JSON" >> "$GITHUB_OUTPUT"
+            echo "::notice::Exported $COUNT secrets as JSON to $SIGYN_DOTENV_PATH"
+            ;;
+          mask-only)
+            echo "::notice::Masked $COUNT secret values (no export)"
+            ;;
+          *)
+            echo "::error::Unknown export mode: $SIGYN_EXPORT_MODE (use: env, dotenv, json, mask-only)"
+            exit 1
+            ;;
+        esac

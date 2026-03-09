@@ -116,7 +116,7 @@ pub enum SecretCommands {
         reveal: bool,
     },
     /// Remove secret(s)
-    #[command(alias = "rm")]
+    #[command(aliases = ["rm", "delete", "del"])]
     Remove {
         /// Secret key name(s)
         #[arg(required = true, num_args = 1..)]
@@ -352,29 +352,63 @@ pub fn unlock_vault(
     // Decrypt manifest (rejects plaintext — must be sealed)
     let manifest = VaultManifest::from_sealed_bytes(&vault_cipher, &manifest_data, vault_id)?;
 
-    // Now verify the header signature using the owner's signing key from the manifest.
-    // This prevents an attacker from replacing members.cbor with a crafted header.
+    // Verify the header signature. The header may be signed by the vault owner
+    // OR by an admin who modified it (e.g., during delegation invite/revoke).
+    // We try the owner's key first, then fall back to other known identities.
+    // After loading the policy, we verify the signer has admin+ authorization.
     let store = IdentityStore::new(sigyn_home());
     let identities = store
         .list()
         .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
-    if let Some(owner_id) = identities
-        .iter()
-        .find(|id| id.fingerprint == manifest.owner)
-    {
-        envelope::verify_and_load_header(&header_bytes, vault_id, &owner_id.signing_pubkey)
-            .map_err(|e| anyhow::anyhow!("header signature verification failed: {}", e))?;
-    } else if loaded.identity.fingerprint == manifest.owner {
-        // We are the owner — verify with our own signing key
-        envelope::verify_and_load_header(&header_bytes, vault_id, &loaded.identity.signing_pubkey)
-            .map_err(|e| anyhow::anyhow!("header signature verification failed: {}", e))?;
-    } else {
-        anyhow::bail!(
-            "cannot verify header signature: owner identity {} not found locally.\n  \
-             Import the owner's identity or ask them to re-sign the vault.",
-            manifest.owner.to_hex()
-        );
-    }
+    let header_signer_fp = {
+        // Build candidate keys: owner first, then all other identities
+        let mut candidates: Vec<(
+            &sigyn_engine::crypto::keys::KeyFingerprint,
+            &sigyn_engine::crypto::keys::VerifyingKeyWrapper,
+        )> = Vec::new();
+        // Owner from identity store
+        if let Some(owner_id) = identities
+            .iter()
+            .find(|id| id.fingerprint == manifest.owner)
+        {
+            candidates.push((&owner_id.fingerprint, &owner_id.signing_pubkey));
+        } else if loaded.identity.fingerprint == manifest.owner {
+            candidates.push((
+                &loaded.identity.fingerprint,
+                &loaded.identity.signing_pubkey,
+            ));
+        }
+        // All other known identities (potential admin signers)
+        for id in &identities {
+            if !candidates.iter().any(|(fp, _)| *fp == &id.fingerprint) {
+                candidates.push((&id.fingerprint, &id.signing_pubkey));
+            }
+        }
+        // Also try current user if not already included
+        if !candidates
+            .iter()
+            .any(|(fp, _)| *fp == &loaded.identity.fingerprint)
+        {
+            candidates.push((
+                &loaded.identity.fingerprint,
+                &loaded.identity.signing_pubkey,
+            ));
+        }
+        let mut verified_fp = None;
+        for (fp, key) in &candidates {
+            if envelope::verify_and_load_header(&header_bytes, vault_id, key).is_ok() {
+                verified_fp = Some((*fp).clone());
+                break;
+            }
+        }
+        match verified_fp {
+            Some(fp) => fp,
+            None => anyhow::bail!(
+                "header signature verification failed: no known identity could verify the signature.\n  \
+                 Import the signer's identity or ask them to re-export it.",
+            ),
+        }
+    };
 
     // --- Origin pinning (TOFU) ---
     // Check the vault owner against the pinned identity on this device.
@@ -502,69 +536,87 @@ pub fn unlock_vault(
     // Resolve env prefix matching against manifest environments
     let env_name = resolve_env_name(&env_name, &manifest)?;
 
-    // Determine the vault owner's verifying key for policy signature verification.
-    // We already verified the header with this key above; reuse the same lookup.
-    let owner_verifying_key: sigyn_engine::crypto::keys::VerifyingKeyWrapper = {
-        if loaded.identity.fingerprint == manifest.owner {
-            loaded.identity.signing_pubkey.clone()
-        } else if let Some(owner_id) = identities
+    // Load policy — try the header signer's key first (may be owner or admin),
+    // then fall back to other known identities. The policy may have been signed
+    // by the same admin who last modified the header.
+    let policy = {
+        // Build candidate keys for policy verification: header signer first, then others
+        let mut policy_candidates: Vec<sigyn_engine::crypto::keys::VerifyingKeyWrapper> =
+            Vec::new();
+        // Header signer's key first (most likely also signed the policy)
+        if let Some(signer_id) = identities
             .iter()
-            .find(|id| id.fingerprint == manifest.owner)
+            .find(|id| id.fingerprint == header_signer_fp)
         {
-            owner_id.signing_pubkey.clone()
-        } else {
-            // Fall back to TOFU pin if available
-            let home = sigyn_home();
-            let dk = sigyn_engine::device::load_or_create_device_key(&home).ok();
-            let pin_key = dk.and_then(|dk| {
-                sigyn_engine::vault::local_state::load_pinned_store(&home, &dk)
-                    .ok()
-                    .and_then(|store| {
-                        store.get(&vault_name).and_then(|ls| {
-                            ls.pin.as_ref().and_then(|p| {
-                                if p.owner_signing_pubkey_bytes.len() == 32 {
-                                    let mut arr = [0u8; 32];
-                                    arr.copy_from_slice(&p.owner_signing_pubkey_bytes);
-                                    sigyn_engine::crypto::keys::VerifyingKeyWrapper::from_bytes(
-                                        &arr,
-                                    )
-                                    .ok()
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-            });
-            match pin_key {
-                Some(k) => k,
-                None => {
-                    eprintln!(
-                        "{} cannot determine vault owner's signing key for policy verification",
-                        console::style("warning:").yellow().bold()
-                    );
-                    loaded.identity.signing_pubkey.clone()
-                }
+            policy_candidates.push(signer_id.signing_pubkey.clone());
+        } else if loaded.identity.fingerprint == header_signer_fp {
+            policy_candidates.push(loaded.identity.signing_pubkey.clone());
+        }
+        // Owner's key (if different from header signer)
+        if header_signer_fp != manifest.owner {
+            if let Some(owner_id) = identities
+                .iter()
+                .find(|id| id.fingerprint == manifest.owner)
+            {
+                policy_candidates.push(owner_id.signing_pubkey.clone());
+            } else if loaded.identity.fingerprint == manifest.owner {
+                policy_candidates.push(loaded.identity.signing_pubkey.clone());
             }
         }
+        // All other known identities
+        for id in &identities {
+            if !policy_candidates
+                .iter()
+                .any(|k| k.to_bytes() == id.signing_pubkey.to_bytes())
+            {
+                policy_candidates.push(id.signing_pubkey.clone());
+            }
+        }
+        if !policy_candidates
+            .iter()
+            .any(|k| k.to_bytes() == loaded.identity.signing_pubkey.to_bytes())
+        {
+            policy_candidates.push(loaded.identity.signing_pubkey.clone());
+        }
+
+        let mut loaded_policy = None;
+        for key in &policy_candidates {
+            match VaultPolicy::load_signed(
+                &paths.policy_path(&vault_name),
+                &vault_cipher,
+                key,
+                &manifest.vault_id,
+            ) {
+                Ok(p) => {
+                    loaded_policy = Some(p);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        loaded_policy.ok_or_else(|| anyhow::anyhow!(
+            "policy signature verification failed: no known identity could verify the signature.\n  \
+             The policy file may have been tampered with.\n  \
+             If the vault owner changed, run: sigyn vault trust {} --accept-new-owner",
+            vault_name
+        ))?
     };
 
-    // Load policy — verify signature with the owner's key, not the current user's.
-    let policy = VaultPolicy::load_signed(
-        &paths.policy_path(&vault_name),
-        &vault_cipher,
-        &owner_verifying_key,
-        &manifest.vault_id,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "policy signature verification failed: {}. \
-             The policy file may have been tampered with. \
-             If the vault owner changed, run: sigyn vault trust {} --accept-new-owner",
-            e,
-            vault_name
-        )
-    })?;
+    // Verify the header signer is authorized (owner or admin+).
+    // This prevents a low-privilege member from signing a crafted header.
+    if header_signer_fp != manifest.owner {
+        match policy.get_member(&header_signer_fp) {
+            Some(member) if member.role.can_manage_policy() => {
+                // Admin+ — authorized to sign header and policy
+            }
+            _ => {
+                anyhow::bail!(
+                    "header signed by {} who is not the owner or an admin — possible tampering",
+                    header_signer_fp.to_hex()
+                );
+            }
+        }
+    }
 
     // Build env ciphers map
     let mut env_ciphers = std::collections::BTreeMap::new();

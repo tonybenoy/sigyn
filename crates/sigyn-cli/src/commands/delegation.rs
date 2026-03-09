@@ -36,7 +36,7 @@ pub enum DelegationCommands {
     },
     /// Accept an invitation
     Accept {
-        /// Path to invitation file
+        /// Invitation ID (UUID) or path to invitation file
         invitation: String,
     },
     /// Revoke member(s)' access
@@ -274,6 +274,7 @@ pub fn handle(
                     &ctx.policy,
                     &ctx.fingerprint,
                     role_enum,
+                    Some(&ctx.manifest.owner),
                 )
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             }
@@ -430,10 +431,44 @@ pub fn handle(
             }
         }
         DelegationCommands::Accept { invitation } => {
-            let path = std::path::Path::new(&invitation);
-            if !path.exists() {
-                anyhow::bail!("invitation file not found: {}", invitation);
-            }
+            // Accept UUID, UUID prefix, or file path
+            let path = {
+                let p = std::path::Path::new(&invitation);
+                if p.exists() {
+                    p.to_path_buf()
+                } else {
+                    // Try to find by UUID in the invitations directory
+                    let inv_dir = sigyn_home().join("invitations");
+                    let mut found = None;
+                    if inv_dir.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(&inv_dir) {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if name.ends_with(".json") {
+                                    let stem = name.trim_end_matches(".json");
+                                    if stem == invitation || stem.starts_with(&invitation) {
+                                        if found.is_some() {
+                                            anyhow::bail!(
+                                                "ambiguous invitation prefix '{}' — multiple matches. Use a longer prefix.",
+                                                invitation
+                                            );
+                                        }
+                                        found = Some(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invitation '{}' not found.\n  \
+                         Use a file path, full UUID, or UUID prefix.\n  \
+                         List pending invitations with: sigyn delegation pending",
+                            invitation
+                        )
+                    })?
+                }
+            };
 
             // Read and parse the invitation file
             let contents =
@@ -650,7 +685,7 @@ pub fn handle(
                     }
                 }
 
-                // Re-encrypt manifest and policy with new vault cipher if rotated
+                // Re-encrypt manifest, audit log, and policy with new vault cipher if rotated
                 if let Some(ref new_vc) = result_v2.new_vault_cipher {
                     // Re-encrypt manifest with new vault key
                     let manifest_path = ctx.paths.manifest_path(&ctx.vault_name);
@@ -662,6 +697,25 @@ pub fn handle(
                     )?;
                     let resealed = manifest.to_sealed_bytes(new_vc)?;
                     crate::config::secure_write(&manifest_path, &resealed)?;
+
+                    // Re-encrypt audit log with new vault cipher
+                    let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+                    if audit_path.exists() {
+                        let old_audit_cipher =
+                            sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                                ctx.vault_cipher.key_bytes(),
+                                b"sigyn-audit-v1",
+                                &ctx.manifest.vault_id,
+                            )?;
+                        let new_audit_cipher =
+                            sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                                new_vc.key_bytes(),
+                                b"sigyn-audit-v1",
+                                &ctx.manifest.vault_id,
+                            )?;
+                        AuditLog::rekey(&audit_path, old_audit_cipher, new_audit_cipher)
+                            .map_err(|e| anyhow::anyhow!("failed to rekey audit log: {}", e))?;
+                    }
 
                     // Update the effective vault cipher key for saving policy below
                     effective_vault_cipher_key = *new_vc.key_bytes();
@@ -894,6 +948,7 @@ pub fn handle(
                         &ctx.policy,
                         &ctx.fingerprint,
                         role,
+                        Some(&ctx.manifest.owner),
                     )
                     .map_err(|e| anyhow::anyhow!("entry {}: {}", i, e))?;
                 }
@@ -1332,7 +1387,19 @@ pub fn handle(
                 }
 
                 if let Some(mp) = policy.get_member_mut(&target_fp) {
-                    mp.allowed_envs.retain(|e| e != &env);
+                    // If member has wildcard access, expand to explicit env list
+                    // minus the revoked env. Otherwise just remove the specific env.
+                    if mp.allowed_envs.iter().any(|e| e == "*") {
+                        mp.allowed_envs = ctx
+                            .manifest
+                            .environments
+                            .iter()
+                            .filter(|e| *e != &env)
+                            .cloned()
+                            .collect();
+                    } else {
+                        mp.allowed_envs.retain(|e| e != &env);
+                    }
                 }
 
                 envelope::remove_env_recipient(&mut header, &env, &target_fp);

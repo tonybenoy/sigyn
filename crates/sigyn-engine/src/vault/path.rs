@@ -17,6 +17,13 @@ pub fn validate_name(name: &str, kind: &str) -> crate::Result<()> {
             kind
         )));
     }
+    // Reject NUL bytes early (prevents C-string truncation attacks)
+    if name.bytes().any(|b| b == 0) {
+        return Err(SigynError::InvalidName(format!(
+            "{} name must not contain NUL bytes",
+            kind
+        )));
+    }
     if name.len() > 64 {
         return Err(SigynError::InvalidName(format!(
             "{} name exceeds 64 characters",

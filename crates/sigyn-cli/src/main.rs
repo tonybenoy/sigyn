@@ -176,6 +176,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::import::ImportCommands,
     },
+    /// CI/CD integration helpers
+    Ci {
+        #[command(subcommand)]
+        command: commands::ci::CiCommands,
+    },
     /// Guided first-run setup wizard
     Onboard,
     /// Manage notification webhooks
@@ -450,6 +455,9 @@ fn main() -> Result<()> {
         }
         Commands::Import { command } => {
             commands::import::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
+        }
+        Commands::Ci { command } => {
+            commands::ci::handle(command, json)?;
         }
         Commands::Onboard => {
             commands::onboard::handle(json)?;

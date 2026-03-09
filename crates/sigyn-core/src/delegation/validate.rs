@@ -10,10 +10,12 @@ use crate::policy::storage::VaultPolicy;
 /// - Inviter has remaining delegation depth (`max_delegation_depth > 0`)
 /// - Inviter has not exceeded their delegatee limit (`max_delegatees`)
 /// - Invitee role is strictly lower than inviter role
+/// - Delegation chain is intact (inviter's delegator is still a member or the owner)
 pub fn validate_delegation(
     policy: &VaultPolicy,
     inviter_fp: &KeyFingerprint,
     invitee_role: Role,
+    owner_fp: Option<&KeyFingerprint>,
 ) -> Result<()> {
     let inviter = policy
         .get_member(inviter_fp)
@@ -50,10 +52,11 @@ pub fn validate_delegation(
     }
 
     // If the inviter was themselves delegated, verify the delegation chain integrity:
-    // the inviter's delegated_by must point to a valid member who actually signed
-    // the invitation (checked via policy membership).
+    // the inviter's delegated_by must point to a valid member OR the vault owner.
+    // The owner is not stored in the policy members list — it's in the manifest.
     if let Some(ref delegator_fp) = inviter.delegated_by {
-        if policy.get_member(delegator_fp).is_none() {
+        let is_owner = owner_fp.is_some_and(|ofp| ofp == delegator_fp);
+        if !is_owner && policy.get_member(delegator_fp).is_none() {
             return Err(SigynError::PolicyViolation(format!(
                 "inviter's delegator {} is not a current policy member — delegation chain broken",
                 delegator_fp.to_hex()
@@ -82,14 +85,14 @@ mod tests {
         admin.max_delegatees = 10;
         policy.add_member(admin);
 
-        assert!(validate_delegation(&policy, &admin_fp, Role::Contributor).is_ok());
+        assert!(validate_delegation(&policy, &admin_fp, Role::Contributor, None).is_ok());
     }
 
     #[test]
     fn test_inviter_not_found() {
         let policy = VaultPolicy::new();
         let fp = test_fp(0xBB);
-        assert!(validate_delegation(&policy, &fp, Role::ReadOnly).is_err());
+        assert!(validate_delegation(&policy, &fp, Role::ReadOnly, None).is_err());
     }
 
     #[test]
@@ -100,7 +103,7 @@ mod tests {
         member.max_delegation_depth = 0;
         policy.add_member(member);
 
-        let err = validate_delegation(&policy, &fp, Role::Contributor).unwrap_err();
+        let err = validate_delegation(&policy, &fp, Role::Contributor, None).unwrap_err();
         assert!(matches!(err, SigynError::DelegationDepthExceeded { .. }));
     }
 
@@ -118,7 +121,7 @@ mod tests {
         delegatee.delegated_by = Some(inviter_fp.clone());
         policy.add_member(delegatee);
 
-        let err = validate_delegation(&policy, &inviter_fp, Role::ReadOnly).unwrap_err();
+        let err = validate_delegation(&policy, &inviter_fp, Role::ReadOnly, None).unwrap_err();
         assert!(matches!(err, SigynError::PolicyViolation(_)));
     }
 
@@ -130,14 +133,14 @@ mod tests {
         policy.add_member(member);
 
         // Same level
-        let err = validate_delegation(&policy, &fp, Role::Manager).unwrap_err();
+        let err = validate_delegation(&policy, &fp, Role::Manager, None).unwrap_err();
         assert!(matches!(err, SigynError::PolicyViolation(_)));
 
         // Higher level
-        let err = validate_delegation(&policy, &fp, Role::Admin).unwrap_err();
+        let err = validate_delegation(&policy, &fp, Role::Admin, None).unwrap_err();
         assert!(matches!(err, SigynError::PolicyViolation(_)));
 
         // Lower level — OK
-        assert!(validate_delegation(&policy, &fp, Role::Contributor).is_ok());
+        assert!(validate_delegation(&policy, &fp, Role::Contributor, None).is_ok());
     }
 }

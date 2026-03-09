@@ -14,6 +14,9 @@ pub enum SyncCommands {
         /// Branch name
         #[arg(long, default_value = "main")]
         branch: String,
+        /// Force push (overwrite remote history)
+        #[arg(long)]
+        force: bool,
     },
     /// Pull remote changes
     Pull {
@@ -104,7 +107,11 @@ pub fn auto_push(vault_name: &str) -> Result<()> {
 
 pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> {
     match cmd {
-        SyncCommands::Push { remote, branch } => {
+        SyncCommands::Push {
+            remote,
+            branch,
+            force,
+        } => {
             let vault_name = vault.unwrap_or("default");
             let home = crate::config::sigyn_home();
             let vault_dir = home.join("vaults").join(vault_name);
@@ -114,7 +121,7 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
             }
 
             let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir.clone());
-            engine.push(&remote, &branch)?;
+            engine.push_with_options(&remote, &branch, force)?;
 
             // Update checkpoint after successful push
             if let Some((mut store, device_key)) = get_checkpoint_store() {

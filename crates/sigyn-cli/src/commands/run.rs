@@ -435,12 +435,17 @@ pub fn handle_watch(
         let mut proc = Command::new(&cmd[0]);
         proc.args(&cmd[1..]);
         if !clean {
-            // inherit parent env (default)
+            // inherit parent env (default), but strip sensitive sigyn vars
         } else {
             proc.env_clear();
         }
+        proc.env_remove("SIGYN_PASSPHRASE");
+        proc.env_remove("SIGYN_HOME");
         for (key, entry) in &plaintext.entries {
             if let Some(val) = entry.value.as_str() {
+                if crate::inject::process::check_dangerous_env_override(key).is_some() {
+                    continue;
+                }
                 proc.env(key, val);
             }
         }

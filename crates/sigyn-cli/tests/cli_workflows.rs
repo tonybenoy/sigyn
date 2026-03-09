@@ -1876,7 +1876,7 @@ fn test_delegation_accept_missing_file() {
         .args(["delegation", "accept", "/nonexistent/invitation.json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invitation file not found"));
+        .stderr(predicate::str::contains("not found"));
 }
 
 #[test]

@@ -12,9 +12,15 @@ pub fn validate_key_name(key: &str) -> Result<()> {
             "key name cannot be empty".into(),
         ));
     }
-    if key.len() > 256 {
+    // Reject NUL bytes (prevents C-string truncation attacks)
+    if key.bytes().any(|b| b == 0) {
         return Err(SigynError::InvalidKeyName(
-            "key name too long (max 256)".into(),
+            "key name must not contain NUL bytes".into(),
+        ));
+    }
+    if key.len() > 128 {
+        return Err(SigynError::InvalidKeyName(
+            "key name too long (max 128)".into(),
         ));
     }
     if !KEY_PATTERN.is_match(key) {
