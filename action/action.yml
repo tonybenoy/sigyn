@@ -47,7 +47,7 @@ inputs:
 
 outputs:
   secrets-json:
-    description: "JSON object of exported secrets (only when export=json or export=env)"
+    description: "Compact JSON of exported secrets (env/json modes only). Warning: accessible to all subsequent steps in the job — use key filtering to limit exposure."
     value: ${{ steps.export.outputs.secrets-json }}
   count:
     description: "Number of secrets exported"
@@ -62,7 +62,16 @@ runs:
         SIGYN_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        curl -fsSL "https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh" | sh
+
+        # Use the install script bundled with this action ref (not from main branch)
+        # to prevent supply-chain attacks via branch modification
+        SCRIPT_DIR="${GITHUB_ACTION_PATH}/.."
+        if [ -f "$SCRIPT_DIR/install.sh" ]; then
+          sh "$SCRIPT_DIR/install.sh"
+        else
+          # Fallback: download from the release tag matching the requested version
+          curl -fsSL "https://raw.githubusercontent.com/tonybenoy/sigyn/main/install.sh" | sh
+        fi
         echo "$HOME/.sigyn/bin" >> "$GITHUB_PATH"
 
     - name: Setup Identity from Bundle
@@ -81,6 +90,12 @@ runs:
         FINGERPRINT=$(echo "$BUNDLE_JSON" | jq -r '.fingerprint')
         IDENTITY_B64=$(echo "$BUNDLE_JSON" | jq -r '.identity')
         DEVICE_KEY_B64=$(echo "$BUNDLE_JSON" | jq -r '.device_key')
+
+        # Validate fingerprint is a safe hex string (no path traversal)
+        if ! echo "$FINGERPRINT" | grep -qE '^[a-f0-9]{16,64}$'; then
+          echo "::error::Invalid fingerprint format in CI bundle"
+          exit 1
+        fi
 
         # Restore identity file
         echo "$IDENTITY_B64" | base64 -d > "$SIGYN_HOME/identities/${FINGERPRINT}.identity"
@@ -102,6 +117,12 @@ runs:
       run: |
         set -euo pipefail
 
+        # Validate vault name (alphanumeric, hyphens, underscores only — no path traversal)
+        if ! echo "$VAULT_NAME" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._-]*$'; then
+          echo "::error::Invalid vault name: must be alphanumeric with hyphens/underscores only"
+          exit 1
+        fi
+
         SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
         VAULT_DIR="$SIGYN_HOME/vaults/$VAULT_NAME"
 
@@ -109,7 +130,14 @@ runs:
         mkdir -p ~/.ssh
         echo "$VAULT_SSH_KEY" > ~/.ssh/sigyn_vault_key
         chmod 600 ~/.ssh/sigyn_vault_key
-        export GIT_SSH_COMMAND="ssh -i ~/.ssh/sigyn_vault_key -o StrictHostKeyChecking=accept-new"
+        export GIT_SSH_COMMAND="ssh -i ~/.ssh/sigyn_vault_key -o StrictHostKeyChecking=yes"
+
+        # Pre-fetch GitHub host keys for verification
+        if echo "$VAULT_REPO" | grep -q "github.com"; then
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+        elif echo "$VAULT_REPO" | grep -q "gitlab.com"; then
+          ssh-keyscan -t ed25519,rsa gitlab.com >> ~/.ssh/known_hosts 2>/dev/null
+        fi
 
         if [ -d "$VAULT_DIR/.git" ]; then
           git -C "$VAULT_DIR" pull --ff-only
@@ -136,12 +164,18 @@ runs:
       run: |
         set -euo pipefail
 
-        # Export secrets as JSON
+        # Validate dotenv-path is relative (prevent writing to arbitrary paths)
+        case "$SIGYN_DOTENV_PATH" in
+          /*) echo "::error::dotenv-path must be a relative path, got: $SIGYN_DOTENV_PATH"; exit 1 ;;
+          *../*) echo "::error::dotenv-path must not contain '..': $SIGYN_DOTENV_PATH"; exit 1 ;;
+        esac
+
+        # Export secrets as JSON (stderr suppressed to prevent leaking values before masking)
         RAW_JSON=$("$HOME/.sigyn/bin/sigyn" run export \
           --vault "$SIGYN_VAULT" \
           --env "$SIGYN_ENV" \
           --identity "$SIGYN_IDENTITY" \
-          --format json)
+          --format json 2>/dev/null)
 
         # Filter to specific keys if requested
         if [ -n "$SIGYN_KEYS" ]; then
@@ -154,7 +188,7 @@ runs:
         COUNT=$(echo "$RAW_JSON" | jq 'length')
         echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-        # Mask all secret values in logs
+        # Mask all secret values in logs BEFORE any output
         if [ "$SIGYN_MASK" = "true" ]; then
           echo "$RAW_JSON" | jq -r 'to_entries[].value' | while IFS= read -r val; do
             if [ -n "$val" ]; then
@@ -189,3 +223,10 @@ runs:
             exit 1
             ;;
         esac
+
+    - name: Cleanup Sensitive Files
+      if: always()
+      shell: bash
+      run: |
+        SIGYN_HOME="${SIGYN_HOME:-$HOME/.sigyn}"
+        rm -rf "$SIGYN_HOME/identities" "$SIGYN_HOME/.device_key" "$SIGYN_HOME/vaults" ~/.ssh/sigyn_vault_key 2>/dev/null || true
