@@ -126,6 +126,7 @@ All Sigyn data lives under `~/.sigyn/` by default (determined via the `directori
         prod.vault
       audit.log.json            # Hash-chained audit trail (JSON Lines)
       forks.cbor                # Fork metadata and state
+      deploy_key.sealed         # Sealed SSH deploy key for audit push (optional)
 ```
 
 ### Data Formats

@@ -416,7 +416,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Sync { command } => {
-            commands::sync::handle(command, cli.vault.as_deref(), json)?;
+            commands::sync::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;
         }
         Commands::Audit { command } => {
             commands::audit::handle(command, cli.vault.as_deref(), cli.identity.as_deref(), json)?;

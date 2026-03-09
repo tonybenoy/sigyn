@@ -438,6 +438,7 @@ vault key, and each environment file is protected by its own independent key:
 | `rotation_schedules.toml` | `sigyn-rotation-v1` | vault_id |
 | `audit.log.json` entries | `sigyn-audit-v1` | vault_id |
 | `witnesses.json` | `sigyn-witness-v1` | vault_id |
+| `deploy_key.sealed` | `sigyn-deploy-key-v1` (AAD) | — |
 
 **Per-environment keys** -- each `envs/<name>.vault` file is encrypted with that
 environment's dedicated 256-bit key, using the environment name as AEAD AAD.

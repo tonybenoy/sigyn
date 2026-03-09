@@ -818,17 +818,21 @@ fn derive_audit_cipher(
     .ok()
 }
 
-/// Append an audit entry (best-effort — warn on stderr but don't fail the operation)
-fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
+/// Append an audit entry, then enforce the vault's audit push policy.
+///
+/// In `Offline` mode (default), this behaves as before — best-effort local append.
+/// In `Online` mode, a failed push causes the entire operation to fail.
+/// In `BestEffort` mode, a failed push produces a warning but doesn't fail.
+fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) -> Result<()> {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let Some(audit_cipher) = derive_audit_cipher(ctx) else {
-        return;
+        return Ok(());
     };
     match AuditLog::open(&audit_path, audit_cipher) {
         Ok(mut log) => {
             if let Err(e) = log.append(
                 &ctx.fingerprint,
-                action,
+                action.clone(),
                 Some(ctx.env_name.clone()),
                 outcome,
                 ctx.loaded_identity.signing_key(),
@@ -848,6 +852,32 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
             );
         }
     }
+
+    // Enforce audit push policy
+    let audit_mode = ctx.policy.audit_mode;
+    if audit_mode != sigyn_engine::policy::AuditMode::Offline {
+        let vault_dir = ctx.paths.vault_dir(&ctx.vault_name);
+        let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+        let msg = format!("sigyn: audit ({})", action.short_name());
+        let deploy_key = sigyn_engine::sync::deploy_key::load_and_unseal(
+            &ctx.paths.deploy_key_path(&ctx.vault_name),
+            &ctx.vault_cipher,
+        )
+        .ok()
+        .flatten();
+        let dk_bytes = deploy_key.as_ref().map(|(k, _)| k.as_slice());
+        if let sigyn_engine::audit::AuditPushOutcome::BestEffortFailed(reason) =
+            sigyn_engine::audit::enforce_audit_push(audit_mode, &engine, &msg, dk_bytes)?
+        {
+            eprintln!(
+                "{} audit push failed (best-effort mode): {}",
+                style("warning:").yellow().bold(),
+                reason
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub fn handle(
@@ -941,7 +971,7 @@ pub fn handle(
                     &ctx,
                     AuditAction::SecretWritten { key: key.clone() },
                     AuditOutcome::Success,
-                );
+                )?;
 
                 if is_update {
                     updated_count += 1;
@@ -1014,7 +1044,7 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretRead { key: key.clone() },
                 AuditOutcome::Success,
-            );
+            )?;
 
             let value = entry.value.display_value(true);
 
@@ -1075,7 +1105,7 @@ pub fn handle(
                     env: ctx.env_name.clone(),
                 },
                 AuditOutcome::Success,
-            );
+            )?;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             if !env_path.exists() {
@@ -1168,7 +1198,7 @@ pub fn handle(
                     &ctx,
                     AuditAction::SecretDeleted { key: key.clone() },
                     AuditOutcome::Success,
-                );
+                )?;
 
                 crate::notifications::try_notify(
                     &ctx.vault_name,
@@ -1377,7 +1407,7 @@ pub fn handle(
                     ),
                 },
                 AuditOutcome::Success,
-            );
+            )?;
 
             crate::output::print_success(&format!(
                 "Applied {} change(s) to env '{}' ({} added, {} modified, {} removed)",
@@ -1653,7 +1683,7 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretWritten { key: key.clone() },
                 AuditOutcome::Success,
-            );
+            )?;
 
             crate::notifications::try_notify(
                 &ctx.vault_name,
@@ -1783,7 +1813,7 @@ pub fn handle(
                     &ctx,
                     AuditAction::SecretWritten { key: key.clone() },
                     AuditOutcome::Success,
-                );
+                )?;
 
                 if is_update {
                     updated_count += 1;

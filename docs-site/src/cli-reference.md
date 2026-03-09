@@ -554,8 +554,8 @@ Manage access policies, members, and RBAC rules.
 
 ### policy show
 
-Display the vault policy: owner, all members with their roles, allowed environments,
-secret patterns, and delegation chain.
+Display the vault policy: owner, audit mode, all members with their roles, allowed
+environments, secret patterns, and delegation chain.
 
 ```bash
 sigyn policy show
@@ -616,6 +616,42 @@ sigyn policy history --json
 | Flag | Short | Description |
 |---|---|---|
 | `-n` | | Number of entries to show (default: 50) |
+
+### policy audit-mode
+
+Set the vault's audit push mode. Requires `ManagePolicy` access (owner or admin).
+
+```bash
+sigyn policy audit-mode offline
+sigyn policy audit-mode online
+sigyn policy audit-mode best-effort
+```
+
+| Mode | Behavior |
+|---|---|
+| `offline` | Default. Audit entries appended locally; push when convenient. |
+| `online` | Audit entries must be pushed after each operation. Operations fail if push fails. |
+| `best-effort` | Try to push; warn on failure but don't block the operation. |
+
+The mode is stored in the signed `policy.cbor` — members cannot tamper with it.
+
+### policy require-mfa
+
+Set per-action MFA requirements on global constraints.
+
+```bash
+sigyn policy require-mfa read,write,delete
+sigyn policy require-mfa all
+sigyn policy require-mfa none
+```
+
+### policy member-require-mfa
+
+Set per-action MFA requirements on a specific member.
+
+```bash
+sigyn policy member-require-mfa a1b2c3d4e5f6... read,write
+```
 
 ## mfa
 
@@ -924,6 +960,33 @@ Configure sync settings for a vault.
 ```bash
 sigyn sync configure --remote-url git@github.com:team/secrets.git
 sigyn sync configure --auto-sync true
+```
+
+### sync deploy-key generate
+
+Generate a sealed SSH deploy key for audit push. The key is encrypted with the vault
+cipher and stored in the vault directory. Requires `ManagePolicy` access.
+
+```bash
+sigyn sync deploy-key generate
+```
+
+Prints the public key — add it as a deploy key with push access on your git remote.
+
+### sync deploy-key show-pubkey
+
+Show the public key of the vault's deploy key.
+
+```bash
+sigyn sync deploy-key show-pubkey
+```
+
+### sync deploy-key remove
+
+Remove the vault's deploy key.
+
+```bash
+sigyn sync deploy-key remove
 ```
 
 ## fork (alias: f)

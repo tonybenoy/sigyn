@@ -4,7 +4,7 @@ use console::style;
 use sigyn_engine::audit::entry::AuditOutcome;
 use sigyn_engine::audit::{AuditAction, AuditLog};
 use sigyn_engine::crypto::keys::KeyFingerprint;
-use sigyn_engine::policy::constraints::MfaActions;
+use sigyn_engine::policy::constraints::{AuditMode as AuditModeEnum, MfaActions};
 use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision};
 use sigyn_engine::policy::member::MemberPolicy;
 use sigyn_engine::policy::roles::Role;
@@ -71,9 +71,15 @@ pub enum PolicyCommands {
         /// Actions requiring MFA (comma-separated): read,write,delete,manage-members,manage-policy,create-env,promote,all,none
         actions: String,
     },
+    /// Set the vault's audit push mode (owner/admin only)
+    #[command(name = "audit-mode")]
+    AuditMode {
+        /// Mode: offline, online, best-effort
+        mode: String,
+    },
 }
 
-fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
+fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) -> Result<()> {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
         ctx.vault_cipher.key_bytes(),
@@ -81,13 +87,13 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
         &ctx.manifest.vault_id,
     ) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     match AuditLog::open(&audit_path, audit_cipher) {
         Ok(mut log) => {
             if let Err(e) = log.append(
                 &ctx.fingerprint,
-                action,
+                action.clone(),
                 Some(ctx.env_name.clone()),
                 outcome,
                 ctx.loaded_identity.signing_key(),
@@ -107,6 +113,32 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
             );
         }
     }
+
+    // Enforce audit push policy
+    let audit_mode = ctx.policy.audit_mode;
+    if audit_mode != sigyn_engine::policy::AuditMode::Offline {
+        let vault_dir = ctx.paths.vault_dir(&ctx.vault_name);
+        let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+        let msg = format!("sigyn: audit ({})", action.short_name());
+        let deploy_key = sigyn_engine::sync::deploy_key::load_and_unseal(
+            &ctx.paths.deploy_key_path(&ctx.vault_name),
+            &ctx.vault_cipher,
+        )
+        .ok()
+        .flatten();
+        let dk_bytes = deploy_key.as_ref().map(|(k, _)| k.as_slice());
+        if let sigyn_engine::audit::AuditPushOutcome::BestEffortFailed(reason) =
+            sigyn_engine::audit::enforce_audit_push(audit_mode, &engine, &msg, dk_bytes)?
+        {
+            eprintln!(
+                "{} audit push failed (best-effort mode): {}",
+                style("warning:").yellow().bold(),
+                reason
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_fingerprint(hex: &str) -> Result<KeyFingerprint> {
@@ -149,11 +181,16 @@ pub fn handle(
                 if json {
                     crate::output::print_json(&serde_json::json!({
                         "owner": ctx.manifest.owner.to_hex(),
+                        "audit_mode": ctx.policy.audit_mode.to_string(),
                         "members": [],
                     }))?;
                 } else {
                     println!("{}", style("Vault Policy").bold());
                     println!("  Owner: {}", style(ctx.manifest.owner.to_hex()).cyan());
+                    println!(
+                        "  Audit mode: {}",
+                        style(ctx.policy.audit_mode.to_string()).yellow()
+                    );
                     println!("  No additional members.");
                 }
                 return Ok(());
@@ -188,12 +225,17 @@ pub fn handle(
                     .collect();
                 crate::output::print_json(&serde_json::json!({
                     "owner": ctx.manifest.owner.to_hex(),
+                    "audit_mode": ctx.policy.audit_mode.to_string(),
                     "global_mfa": global_mfa,
                     "members": members,
                 }))?;
             } else {
                 println!("{}", style("Vault Policy").bold());
                 println!("  Owner: {}", style(ctx.manifest.owner.to_hex()).cyan());
+                println!(
+                    "  Audit mode: {}",
+                    style(ctx.policy.audit_mode.to_string()).yellow()
+                );
                 if let Some(global) = &ctx.policy.global_constraints {
                     if global.mfa_actions.any_enabled() {
                         println!(
@@ -268,7 +310,7 @@ pub fn handle(
                 &ctx.manifest.vault_id,
             )?;
 
-            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -307,7 +349,7 @@ pub fn handle(
                 &ctx,
                 AuditAction::MemberRevoked { fingerprint: fp },
                 AuditOutcome::Success,
-            );
+            )?;
 
             crate::output::print_success(&format!(
                 "Removed member {} from policy",
@@ -397,7 +439,7 @@ pub fn handle(
                 &ctx.manifest.vault_id,
             )?;
 
-            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -531,7 +573,7 @@ pub fn handle(
                 &ctx.manifest.vault_id,
             )?;
 
-            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success);
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success)?;
 
             if json {
                 crate::output::print_json(&serde_json::json!({
@@ -545,6 +587,34 @@ pub fn handle(
                     &fingerprint[..16.min(fingerprint.len())],
                     mfa_actions.to_csv()
                 ));
+            }
+        }
+
+        PolicyCommands::AuditMode { mode } => {
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::ManagePolicy, None)?;
+
+            let audit_mode: AuditModeEnum =
+                mode.parse().map_err(|e: String| anyhow::anyhow!("{}", e))?;
+
+            let mut policy = ctx.policy.clone();
+            policy.audit_mode = audit_mode;
+            policy.save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &ctx.vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )?;
+
+            audit(&ctx, AuditAction::PolicyChanged, AuditOutcome::Success)?;
+
+            if json {
+                crate::output::print_json(&serde_json::json!({
+                    "action": "audit_mode_updated",
+                    "audit_mode": audit_mode.to_string(),
+                }))?;
+            } else {
+                crate::output::print_success(&format!("Audit mode set to: {}", audit_mode));
             }
         }
     }

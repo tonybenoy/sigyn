@@ -80,7 +80,7 @@ pub enum RunCommands {
     },
 }
 
-fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
+fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) -> Result<()> {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
         ctx.vault_cipher.key_bytes(),
@@ -88,17 +88,43 @@ fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) {
         &ctx.manifest.vault_id,
     ) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
         let _ = log.append(
             &ctx.fingerprint,
-            action,
+            action.clone(),
             Some(ctx.env_name.clone()),
             AuditOutcome::Success,
             ctx.loaded_identity.signing_key(),
         );
     }
+
+    // Enforce audit push policy
+    let audit_mode = ctx.policy.audit_mode;
+    if audit_mode != sigyn_engine::policy::AuditMode::Offline {
+        let vault_dir = ctx.paths.vault_dir(&ctx.vault_name);
+        let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+        let msg = format!("sigyn: audit ({})", action.short_name());
+        let deploy_key = sigyn_engine::sync::deploy_key::load_and_unseal(
+            &ctx.paths.deploy_key_path(&ctx.vault_name),
+            &ctx.vault_cipher,
+        )
+        .ok()
+        .flatten();
+        let dk_bytes = deploy_key.as_ref().map(|(k, _)| k.as_slice());
+        if let sigyn_engine::audit::AuditPushOutcome::BestEffortFailed(reason) =
+            sigyn_engine::audit::enforce_audit_push(audit_mode, &engine, &msg, dk_bytes)?
+        {
+            eprintln!(
+                "{} audit push failed (best-effort mode): {}",
+                console::style("warning:").yellow().bold(),
+                reason
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolve the effective environment from flags and project config.
@@ -260,7 +286,7 @@ fn exec_with_secrets(
             env: ctx.env_name.clone(),
             command: command.first().cloned().unwrap_or_default(),
         },
-    );
+    )?;
 
     if dry_run {
         println!(
@@ -343,7 +369,7 @@ pub fn handle(
                     env: ctx.env_name.clone(),
                     format: format.clone(),
                 },
-            );
+            )?;
 
             let export_format = crate::inject::ExportFormat::from_str(&format)?;
             let output = crate::inject::export_secrets(&plaintext, export_format, &name)?;
@@ -372,7 +398,7 @@ pub fn handle(
                 AuditAction::SecretsServed {
                     env: ctx.env_name.clone(),
                 },
-            );
+            )?;
 
             let socket_path = socket.unwrap_or_else(|| {
                 let sigyn_dir = crate::config::sigyn_home();

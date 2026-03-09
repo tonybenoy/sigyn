@@ -950,7 +950,85 @@ fi
 
 # ── Phase 19: Final Audit Verification ────────────────────────────────────────
 
-phase "Phase 19: Final Audit Verification"
+phase "Phase 19: Audit Mode & Deploy Key"
+
+# ── audit-mode lifecycle ──
+assert_contains "Policy show includes audit_mode (default offline)" "offline" \
+    "$SIGYN" policy show -v python-app -i alice
+
+assert_ok "Owner sets audit-mode to best-effort" \
+    "$SIGYN" policy audit-mode best-effort -v python-app -i alice
+
+assert_contains "Policy show reflects best-effort" "best-effort" \
+    "$SIGYN" policy show -v python-app -i alice
+
+assert_ok "Owner sets audit-mode to online" \
+    "$SIGYN" policy audit-mode online -v python-app -i alice
+
+assert_contains "Policy show reflects online" "online" \
+    "$SIGYN" policy show -v python-app -i alice
+
+assert_ok "Owner resets audit-mode to offline" \
+    "$SIGYN" policy audit-mode offline -v python-app -i alice
+
+assert_contains "Policy show reflects offline again" "offline" \
+    "$SIGYN" policy show -v python-app -i alice
+
+# ── RBAC: non-admin cannot change audit-mode ──
+assert_fail "Contributor cannot set audit-mode" \
+    "$SIGYN" policy audit-mode online -v python-app -i dave
+
+assert_fail "ReadOnly cannot set audit-mode" \
+    "$SIGYN" policy audit-mode online -v python-app -i eve
+
+# Admin can change it
+assert_ok "Admin (bob) can set audit-mode" \
+    "$SIGYN" policy audit-mode best-effort -v python-app -i bob
+
+# Reset for rest of tests
+assert_ok "Reset audit-mode to offline" \
+    "$SIGYN" policy audit-mode offline -v python-app -i alice
+
+# ── Deploy key lifecycle ──
+assert_ok "Generate deploy key" \
+    "$SIGYN" sync deploy-key generate -v python-app -i alice
+
+assert_contains "Show deploy key pubkey" "ssh-ed25519" \
+    "$SIGYN" sync deploy-key show-pubkey -v python-app -i alice
+
+# Non-admin cannot generate (would need ManagePolicy)
+assert_fail "Contributor cannot show deploy key" \
+    "$SIGYN" sync deploy-key show-pubkey -v python-app -i dave
+
+# Cannot generate twice
+assert_fail "Cannot generate deploy key twice" \
+    "$SIGYN" sync deploy-key generate -v python-app -i alice
+
+assert_ok "Remove deploy key" \
+    "$SIGYN" sync deploy-key remove -v python-app -i alice
+
+# After removal, show-pubkey should fail
+assert_fail "Show pubkey after removal fails" \
+    "$SIGYN" sync deploy-key show-pubkey -v python-app -i alice
+
+# ── Invalid audit-mode values rejected ──
+assert_fail "Invalid audit-mode rejected" \
+    "$SIGYN" policy audit-mode "bogus" -v python-app -i alice
+
+assert_fail "SQL injection in audit-mode rejected" \
+    "$SIGYN" policy audit-mode "offline; DROP TABLE" -v python-app -i alice
+
+# ── Audit mode JSON output ──
+assert_contains "JSON policy show includes audit_mode" "audit_mode" \
+    "$SIGYN" policy show -v python-app -i alice --json
+
+assert_contains "JSON audit-mode set output" "audit_mode_updated" \
+    "$SIGYN" policy audit-mode best-effort -v python-app -i alice --json
+
+# Reset
+"$SIGYN" policy audit-mode offline -v python-app -i alice > /dev/null 2>&1
+
+phase "Phase 20: Final Audit Verification"
 
 # python-app audit may be corrupted from transfer
 run "$SIGYN" audit verify -v python-app -i alice

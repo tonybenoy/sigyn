@@ -52,6 +52,23 @@ pub enum SyncCommands {
         #[arg(long)]
         auto_sync: Option<bool>,
     },
+    /// Generate a sealed deploy key for audit push (owner/admin only)
+    #[command(name = "deploy-key")]
+    DeployKey {
+        #[command(subcommand)]
+        action: DeployKeyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DeployKeyCommands {
+    /// Generate a new deploy key (sealed with vault cipher, stored in vault dir)
+    Generate,
+    /// Show the deploy key's public key (for adding to git hosting)
+    #[command(name = "show-pubkey")]
+    ShowPubkey,
+    /// Remove the deploy key
+    Remove,
 }
 
 /// Load the device key and pinned vaults store (best-effort for sync ops).
@@ -105,7 +122,12 @@ pub fn auto_push(vault_name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> {
+pub fn handle(
+    cmd: SyncCommands,
+    vault: Option<&str>,
+    identity: Option<&str>,
+    json: bool,
+) -> Result<()> {
     match cmd {
         SyncCommands::Push {
             remote,
@@ -401,6 +423,74 @@ pub fn handle(cmd: SyncCommands, vault: Option<&str>, json: bool) -> Result<()> 
             }
             crate::config::save_config(&cfg)?;
             crate::output::print_success("Sync configuration updated");
+        }
+        SyncCommands::DeployKey { action } => {
+            use super::secret::{check_access, unlock_vault};
+            use sigyn_engine::policy::engine::AccessAction;
+
+            let ctx = unlock_vault(identity, vault, None)?;
+            check_access(&ctx, AccessAction::ManagePolicy, None)?;
+
+            let dk_path = ctx.paths.deploy_key_path(&ctx.vault_name);
+
+            match action {
+                DeployKeyCommands::Generate => {
+                    if dk_path.exists() {
+                        anyhow::bail!(
+                            "deploy key already exists. Remove it first with: sigyn sync deploy-key remove"
+                        );
+                    }
+
+                    let (private_key, public_key) =
+                        sigyn_engine::sync::deploy_key::generate_ssh_keypair()?;
+                    sigyn_engine::sync::deploy_key::seal_and_save(
+                        &dk_path,
+                        &private_key,
+                        &public_key,
+                        &ctx.vault_cipher,
+                    )?;
+
+                    if json {
+                        crate::output::print_json(&serde_json::json!({
+                            "action": "deploy_key_generated",
+                            "public_key": public_key,
+                        }))?;
+                    } else {
+                        crate::output::print_success("Deploy key generated and sealed");
+                        println!("\nAdd this public key as a deploy key (with push access) on your git remote:\n");
+                        println!("  {}", style(&public_key).cyan());
+                        println!();
+                    }
+                }
+                DeployKeyCommands::ShowPubkey => {
+                    let loaded = sigyn_engine::sync::deploy_key::load_and_unseal(
+                        &dk_path,
+                        &ctx.vault_cipher,
+                    )?;
+                    match loaded {
+                        Some((_, public_key)) => {
+                            if json {
+                                crate::output::print_json(&serde_json::json!({
+                                    "public_key": public_key,
+                                }))?;
+                            } else {
+                                println!("{}", public_key);
+                            }
+                        }
+                        None => {
+                            anyhow::bail!("no deploy key configured. Generate one with: sigyn sync deploy-key generate");
+                        }
+                    }
+                }
+                DeployKeyCommands::Remove => {
+                    if dk_path.exists() {
+                        std::fs::remove_file(&dk_path)?;
+                        crate::output::print_success("Deploy key removed");
+                    } else {
+                        println!("No deploy key found");
+                    }
+                }
+            }
         }
     }
     Ok(())

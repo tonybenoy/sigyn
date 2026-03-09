@@ -29,6 +29,7 @@ The files synced for each vault:
     prod.vault
   audit.log.json    # Hash-chained audit trail (JSON Lines)
   forks.cbor        # Fork metadata
+  deploy_key.sealed # Sealed SSH deploy key for audit push (optional)
 ```
 
 All `.cbor` and `.vault` files are encrypted with ChaCha20-Poly1305. The sync engine
@@ -103,6 +104,15 @@ sigyn sync status
 
 # Enable auto-sync
 sigyn sync configure --auto-sync true
+
+# Generate a deploy key for audit push (sealed with vault cipher)
+sigyn sync deploy-key generate
+
+# Show the deploy key's public key
+sigyn sync deploy-key show-pubkey
+
+# Remove the deploy key
+sigyn sync deploy-key remove
 ```
 
 ## Vector Clocks

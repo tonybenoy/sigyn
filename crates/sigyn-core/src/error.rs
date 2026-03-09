@@ -95,6 +95,8 @@ pub enum SigynError {
     AuditChainBroken(u64),
     #[error("audit signature invalid at sequence {0}")]
     AuditSignatureInvalid(u64),
+    #[error("audit push required by vault policy but failed: {0}")]
+    AuditPushRequired(String),
 
     // Sync errors
     #[error("sync conflict on key {key} in env {env}")]

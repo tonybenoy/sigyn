@@ -141,6 +141,10 @@ impl VaultPaths {
         self.vault_dir(name).join("audit.checkpoint")
     }
 
+    pub fn deploy_key_path(&self, name: &str) -> PathBuf {
+        self.vault_dir(name).join("deploy_key.sealed")
+    }
+
     pub fn list_vaults(&self) -> crate::Result<Vec<String>> {
         let vaults_dir = self.base.join("vaults");
         if !vaults_dir.exists() {

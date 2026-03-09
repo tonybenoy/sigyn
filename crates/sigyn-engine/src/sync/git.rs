@@ -146,6 +146,15 @@ impl GitSyncEngine {
 
     pub fn commit(&self, message: &str) -> Result<git2::Oid> {
         let repo = self.open_repo()?;
+
+        // Disable GPG/SSH commit signing in this repo — sigyn uses its own
+        // sidecar Ed25519 signatures. Without this, users with global
+        // `commit.gpgsign = true` would cause libgit2 to fail or invoke
+        // an external signing program unexpectedly.
+        if let Ok(mut config) = repo.config() {
+            let _ = config.set_bool("commit.gpgsign", false);
+        }
+
         let mut index = repo
             .index()
             .map_err(|e| SigynError::GitError(e.to_string()))?;
@@ -179,6 +188,28 @@ impl GitSyncEngine {
     }
 
     pub fn push_with_options(&self, remote_name: &str, branch: &str, force: bool) -> Result<()> {
+        self.push_with_callbacks(remote_name, branch, force, make_callbacks())
+    }
+
+    /// Push using a sealed deploy key for SSH auth (no user SSH key needed).
+    /// The `_temp_dir` keeps the temporary key file alive until push completes.
+    pub fn push_with_deploy_key(
+        &self,
+        remote_name: &str,
+        branch: &str,
+        deploy_key_bytes: &[u8],
+    ) -> Result<()> {
+        let (cb, _temp_dir) = super::deploy_key::make_deploy_key_callbacks(deploy_key_bytes)?;
+        self.push_with_callbacks(remote_name, branch, false, cb)
+    }
+
+    fn push_with_callbacks(
+        &self,
+        remote_name: &str,
+        branch: &str,
+        force: bool,
+        callbacks: git2::RemoteCallbacks<'_>,
+    ) -> Result<()> {
         let repo = self.open_repo()?;
 
         // Force-push detection: fetch remote HEAD and verify we descend from it
@@ -222,7 +253,7 @@ impl GitSyncEngine {
             format!("refs/heads/{}:refs/heads/{}", branch, branch)
         };
         let mut push_opts = git2::PushOptions::new();
-        push_opts.remote_callbacks(make_callbacks());
+        push_opts.remote_callbacks(callbacks);
         remote
             .push(&[&refspec], Some(&mut push_opts))
             .map_err(|e| SigynError::GitError(e.to_string()))?;
@@ -366,6 +397,18 @@ impl GitSyncEngine {
             .statuses(None)
             .map_err(|e| SigynError::GitError(e.to_string()))?;
         Ok(!statuses.is_empty())
+    }
+
+    /// Check if a named remote (e.g. "origin") is configured with a URL.
+    pub fn has_remote(&self, name: &str) -> bool {
+        let repo = match self.open_repo() {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        repo.find_remote(name)
+            .ok()
+            .and_then(|r| r.url().map(|_| ()))
+            .is_some()
     }
 
     pub fn sync(&self, remote_name: &str, branch: &str, message: &str) -> Result<SyncResult> {

@@ -82,6 +82,55 @@ This is useful for compliance workflows where multiple parties must acknowledge 
 
 The witness log itself is encrypted and optionally signed. When signed, the format is `SGNW || sig_len(4 LE) || Ed25519_signature || ciphertext`. The signature is verified on load when the owner's verifying key is available, preventing tampering with witness records.
 
+## Audit Push Modes
+
+Vaults have a configurable audit push mode, set in the signed policy (owner/admin only):
+
+| Mode | Behavior |
+|------|----------|
+| `offline` | Default. Audit entries are appended locally; push when convenient via `sigyn sync push`. |
+| `online` | Audit entries must be pushed to the remote after each operation. Operations fail if the push fails (e.g., SSH key locked, network down). Only enforced when a git remote is configured. |
+| `best-effort` | Attempts to push audit entries after each operation. Warns on failure but doesn't block the operation. |
+
+```bash
+# Set audit mode (requires ManagePolicy access — owner/admin)
+sigyn policy audit-mode online
+sigyn policy audit-mode best-effort
+sigyn policy audit-mode offline
+
+# View current mode
+sigyn policy show
+```
+
+**Design notes:**
+
+- The mode is part of the signed `policy.cbor`, so members cannot tamper with it.
+- New vaults default to `offline` — you must configure a git remote before `online` mode has any effect.
+- `online` mode is a compliance guarantee: if audit can't reach the remote, the operation is rejected. This prevents exfiltration without audit visibility.
+
+### Deploy Keys
+
+For `online` and `best-effort` modes, you can generate a **sealed deploy key** so audit push works even when the user's SSH key is locked or unavailable:
+
+```bash
+# Generate a deploy key (sealed with vault cipher, stored in vault dir)
+sigyn sync deploy-key generate
+
+# Show the public key (add this to your git remote with push access)
+sigyn sync deploy-key show-pubkey
+
+# Remove the deploy key
+sigyn sync deploy-key remove
+```
+
+The deploy key is:
+- **Encrypted at rest** with the vault cipher — only vault members can use it
+- **Ed25519** — passwordless, no passphrase prompt
+- **Scoped** — should be added as a deploy key with push-only access to the audit/vault repo, not as a personal key
+- **Not stored in plaintext** — the raw key bytes are sealed in `deploy_key.sealed`
+
+When a deploy key exists, audit push uses it automatically. When absent, it falls back to the user's SSH agent / credential helper.
+
 ## Storage
 
 The audit log is stored as JSON Lines in `audit.log.json` within the vault directory. Each line is individually encrypted with a vault-derived cipher (HKDF from the vault key with context `sigyn-audit-v1`) and base64-encoded. This format is streamable and compatible with external log analysis tools after decryption.

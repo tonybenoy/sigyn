@@ -80,6 +80,37 @@ pub enum AuditAction {
     },
 }
 
+impl AuditAction {
+    /// Short human-readable name for commit messages and logs.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            AuditAction::VaultCreated => "vault-created",
+            AuditAction::SecretRead { .. } => "secret-read",
+            AuditAction::SecretWritten { .. } => "secret-written",
+            AuditAction::SecretDeleted { .. } => "secret-deleted",
+            AuditAction::MemberInvited { .. } => "member-invited",
+            AuditAction::MemberRevoked { .. } => "member-revoked",
+            AuditAction::PolicyChanged => "policy-changed",
+            AuditAction::MasterKeyRotated => "key-rotated",
+            AuditAction::ForkCreated { .. } => "fork-created",
+            AuditAction::EnvironmentCreated { .. } => "env-created",
+            AuditAction::EnvironmentPromoted { .. } => "env-promoted",
+            AuditAction::BreakGlassActivated => "break-glass",
+            AuditAction::IdentityCreated { .. } => "identity-created",
+            AuditAction::SecretsExported { .. } => "secrets-exported",
+            AuditAction::SecretsInjected { .. } => "secrets-injected",
+            AuditAction::SecretsServed { .. } => "secrets-served",
+            AuditAction::SecretsListed { .. } => "secrets-listed",
+            AuditAction::EnvironmentDeleted { .. } => "env-deleted",
+            AuditAction::VaultDeleted { .. } => "vault-deleted",
+            AuditAction::VaultExported => "vault-exported",
+            AuditAction::OwnershipTransferred { .. } => "ownership-transferred",
+            AuditAction::OwnershipTransferAccepted { .. } => "ownership-accepted",
+            AuditAction::SecretsCopied { .. } => "secrets-copied",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditOutcome {
     Success,

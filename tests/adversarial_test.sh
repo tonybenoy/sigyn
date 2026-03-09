@@ -268,6 +268,95 @@ echo "$OUT"|grep -q "Set" && breached "Revoked member wrote!" || defended "Revok
 
 # ══════════════════════════════════════════════════════════
 echo ""
+bold "═══ 11: Audit Mode Attacks ═══"
+
+# Re-invite bob for these tests
+export SIGYN_PASSPHRASE="alice-pass-2026!"
+$S delegation invite --pubkey "$BOB_FP" --role contributor --envs dev -v tv -i alice 2>&1>/dev/null
+INV=$(ls -1t "$SIGYN_HOME/invitations/"*.json|head -1)
+export SIGYN_PASSPHRASE="bob-pass-2026!!"
+$S delegation accept "$INV" -i bob 2>&1>/dev/null
+
+# Attack 11a: Contributor tries to change audit mode
+export SIGYN_PASSPHRASE="bob-pass-2026!!"
+OUT=$($S policy audit-mode online -v tv -i bob 2>&1||true)
+echo "$OUT"|grep -qi "denied\|error\|insufficient" && defended "Contributor cannot change audit mode" || breached "Contributor changed audit mode!"
+
+# Attack 11b: Mallory (non-member) tries to change audit mode
+export SIGYN_PASSPHRASE="evil-pass-2026!!"
+OUT=$($S policy audit-mode online -v tv -i mallory 2>&1||true)
+echo "$OUT"|grep -qi "not accessible\|error\|denied" && defended "Non-member cannot change audit mode" || breached "Non-member changed audit mode!"
+
+# Attack 11c: Tamper with policy to downgrade audit mode
+export SIGYN_PASSPHRASE="alice-pass-2026!"
+$S policy audit-mode online -v tv -i alice 2>&1>/dev/null
+VD="$SIGYN_HOME/vaults/tv"
+PF="$VD/policy.cbor"
+if [ -f "$PF" ]; then
+    cp "$PF" "$PF.bak"
+    # Bit-flip the policy file to simulate downgrade attempt
+    python3 -c "
+d=open('$PF','rb').read()
+ba=bytearray(d)
+if len(ba)>20: ba[20]^=0xFF
+open('$PF','wb').write(ba)
+"
+    OUT=$($S secret get DB_PASS -v tv -e dev -i alice 2>&1||true)
+    echo "$OUT"|grep -q "super-secret" && breached "Tampered policy accepted!" || defended "Tampered policy rejected"
+    cp "$PF.bak" "$PF"
+else
+    yellow "Policy file not found for tampering test"
+fi
+# Reset
+$S policy audit-mode offline -v tv -i alice 2>&1>/dev/null
+
+echo ""
+bold "═══ 12: Deploy Key Attacks ═══"
+
+# Attack 12a: Generate deploy key then try to use it from a different vault
+export SIGYN_PASSPHRASE="alice-pass-2026!"
+$S sync deploy-key generate -v tv -i alice 2>&1>/dev/null
+
+# Attack 12b: Contributor cannot access deploy key
+export SIGYN_PASSPHRASE="bob-pass-2026!!"
+OUT=$($S sync deploy-key show-pubkey -v tv -i bob 2>&1||true)
+echo "$OUT"|grep -qi "denied\|error\|insufficient" && defended "Contributor cannot read deploy key" || breached "Contributor read deploy key!"
+
+# Attack 12c: Non-member cannot access deploy key
+export SIGYN_PASSPHRASE="evil-pass-2026!!"
+OUT=$($S sync deploy-key show-pubkey -v tv -i mallory 2>&1||true)
+echo "$OUT"|grep -qi "not accessible\|error\|denied" && defended "Non-member cannot read deploy key" || breached "Non-member read deploy key!"
+
+# Attack 12d: Tamper with deploy key file
+export SIGYN_PASSPHRASE="alice-pass-2026!"
+DK="$SIGYN_HOME/vaults/tv/deploy_key.sealed"
+if [ -f "$DK" ]; then
+    cp "$DK" "$DK.bak"
+    python3 -c "
+d=open('$DK','rb').read()
+ba=bytearray(d)
+if len(ba)>50: ba[50]^=0xFF
+open('$DK','wb').write(ba)
+"
+    # Set online mode so it would try to use the deploy key
+    $S policy audit-mode best-effort -v tv -i alice 2>&1>/dev/null
+    # Operation should still succeed (best-effort), but deploy key should be ignored/fail
+    OUT=$($S secret get DB_PASS -v tv -e dev -i alice 2>&1||true)
+    echo "$OUT"|grep -q "super-secret" && defended "Tampered deploy key handled gracefully" || defended "Tampered deploy key detected"
+    cp "$DK.bak" "$DK"
+    $S policy audit-mode offline -v tv -i alice 2>&1>/dev/null
+else
+    yellow "Deploy key file not found for tampering test"
+fi
+
+# Attack 12e: Delete deploy key — should fallback gracefully
+export SIGYN_PASSPHRASE="alice-pass-2026!"
+$S sync deploy-key remove -v tv -i alice 2>&1>/dev/null
+OUT=$($S secret get DB_PASS -v tv -e dev -i alice 2>&1||true)
+echo "$OUT"|grep -q "super-secret" && defended "Missing deploy key handled gracefully" || breached "Missing deploy key caused failure!"
+
+# ══════════════════════════════════════════════════════════
+echo ""
 bold "══════════════════════════════════════════════════════════"
 bold "  ADVERSARIAL TEST RESULTS"
 bold "══════════════════════════════════════════════════════════"

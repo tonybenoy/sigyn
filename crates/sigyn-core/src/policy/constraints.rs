@@ -1,4 +1,49 @@
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+
+/// Vault-level audit push mode. Controls whether audit log entries must be
+/// pushed to the remote after operations. Only configurable by owner/admin
+/// via the signed policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditMode {
+    /// Audit entries are appended locally; push when convenient (current default).
+    #[default]
+    Offline,
+    /// Audit entries must be pushed to the remote after each operation.
+    /// Operations fail if push fails (only enforced when a git remote is configured).
+    Online,
+    /// Try to push audit entries; warn on failure but don't block the operation.
+    BestEffort,
+}
+
+impl fmt::Display for AuditMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuditMode::Offline => write!(f, "offline"),
+            AuditMode::Online => write!(f, "online"),
+            AuditMode::BestEffort => write!(f, "best-effort"),
+        }
+    }
+}
+
+impl FromStr for AuditMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().replace('_', "-").as_str() {
+            "offline" => Ok(AuditMode::Offline),
+            "online" => Ok(AuditMode::Online),
+            "best-effort" | "besteffort" => Ok(AuditMode::BestEffort),
+            other => Err(format!(
+                "unknown audit mode '{}'. Valid: offline, online, best-effort",
+                other
+            )),
+        }
+    }
+}
 
 /// Per-action MFA requirements. Each field controls whether MFA is needed for
 /// that specific action. All default to `false`.
@@ -367,5 +412,47 @@ mod tests {
         assert!(c.mfa_actions.read);
         assert!(c.mfa_actions.manage_members);
         assert!(!c.mfa_actions.write);
+    }
+
+    #[test]
+    fn test_audit_mode_default() {
+        assert_eq!(AuditMode::default(), AuditMode::Offline);
+    }
+
+    #[test]
+    fn test_audit_mode_display_fromstr_roundtrip() {
+        for mode in [AuditMode::Offline, AuditMode::Online, AuditMode::BestEffort] {
+            let s = mode.to_string();
+            let parsed: AuditMode = s.parse().unwrap();
+            assert_eq!(mode, parsed);
+        }
+    }
+
+    #[test]
+    fn test_audit_mode_fromstr_variants() {
+        assert_eq!("offline".parse::<AuditMode>().unwrap(), AuditMode::Offline);
+        assert_eq!("ONLINE".parse::<AuditMode>().unwrap(), AuditMode::Online);
+        assert_eq!(
+            "best-effort".parse::<AuditMode>().unwrap(),
+            AuditMode::BestEffort
+        );
+        assert_eq!(
+            "best_effort".parse::<AuditMode>().unwrap(),
+            AuditMode::BestEffort
+        );
+        assert_eq!(
+            "besteffort".parse::<AuditMode>().unwrap(),
+            AuditMode::BestEffort
+        );
+        assert!("invalid".parse::<AuditMode>().is_err());
+    }
+
+    #[test]
+    fn test_audit_mode_serde_roundtrip() {
+        for mode in [AuditMode::Offline, AuditMode::Online, AuditMode::BestEffort] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let parsed: AuditMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, parsed);
+        }
     }
 }

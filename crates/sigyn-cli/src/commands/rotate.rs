@@ -152,8 +152,8 @@ fn save_schedules(
     Ok(())
 }
 
-/// Append an audit entry (best-effort -- don't fail the operation on audit error)
-fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) {
+/// Append an audit entry, then enforce the vault's audit push policy.
+fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome) -> Result<()> {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
         ctx.vault_cipher.key_bytes(),
@@ -161,17 +161,43 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
         &ctx.manifest.vault_id,
     ) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
         let _ = log.append(
             &ctx.fingerprint,
-            action,
+            action.clone(),
             Some(ctx.env_name.clone()),
             outcome,
             ctx.loaded_identity.signing_key(),
         );
     }
+
+    // Enforce audit push policy
+    let audit_mode = ctx.policy.audit_mode;
+    if audit_mode != sigyn_engine::policy::AuditMode::Offline {
+        let vault_dir = ctx.paths.vault_dir(&ctx.vault_name);
+        let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+        let msg = format!("sigyn: audit ({})", action.short_name());
+        let deploy_key = sigyn_engine::sync::deploy_key::load_and_unseal(
+            &ctx.paths.deploy_key_path(&ctx.vault_name),
+            &ctx.vault_cipher,
+        )
+        .ok()
+        .flatten();
+        let dk_bytes = deploy_key.as_ref().map(|(k, _)| k.as_slice());
+        if let sigyn_engine::audit::AuditPushOutcome::BestEffortFailed(reason) =
+            sigyn_engine::audit::enforce_audit_push(audit_mode, &engine, &msg, dk_bytes)?
+        {
+            eprintln!(
+                "{} audit push failed (best-effort mode): {}",
+                console::style("warning:").yellow().bold(),
+                reason
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub fn handle(
@@ -231,7 +257,7 @@ pub fn handle(
                 &ctx,
                 AuditAction::SecretWritten { key: key.clone() },
                 AuditOutcome::Success,
-            );
+            )?;
 
             // Execute rotation hooks if a schedule exists for this key
             let vault_dir = crate::config::sigyn_home()
@@ -597,7 +623,7 @@ pub fn handle(
             };
 
             // Audit
-            audit(&ctx, AuditAction::MasterKeyRotated, AuditOutcome::Success);
+            audit(&ctx, AuditAction::MasterKeyRotated, AuditOutcome::Success)?;
 
             // Build breach report
             let report = BreachReport {

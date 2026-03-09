@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod audit_chain;
 #[cfg(test)]
+mod audit_mode;
+#[cfg(test)]
 mod delegation_invite;
 #[cfg(test)]
 mod env_promotion;

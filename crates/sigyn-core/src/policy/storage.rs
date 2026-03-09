@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use super::constraints::Constraints;
+use super::constraints::{AuditMode, Constraints};
 use super::member::MemberPolicy;
 use crate::crypto::keys::KeyFingerprint;
 use crate::error::{Result, SigynError};
@@ -10,6 +10,9 @@ use crate::error::{Result, SigynError};
 pub struct VaultPolicy {
     pub members: IndexMap<String, MemberPolicy>,
     pub global_constraints: Option<Constraints>,
+    /// Vault-level audit push mode. Defaults to `Offline` for backward compatibility.
+    #[serde(default)]
+    pub audit_mode: AuditMode,
 }
 
 impl VaultPolicy {
@@ -167,5 +170,45 @@ mod tests {
         assert_eq!(loaded.members.len(), 1);
         let fp = test_fp(0xEE);
         assert_eq!(loaded.get_member(&fp).unwrap().role, Role::Manager);
+    }
+
+    #[test]
+    fn test_audit_mode_defaults_to_offline() {
+        let policy = VaultPolicy::new();
+        assert_eq!(
+            policy.audit_mode,
+            crate::policy::constraints::AuditMode::Offline
+        );
+    }
+
+    #[test]
+    fn test_audit_mode_survives_encrypted_roundtrip() {
+        let cipher = VaultCipher::generate();
+
+        let mut policy = VaultPolicy::new();
+        policy.audit_mode = crate::policy::constraints::AuditMode::Online;
+
+        let bytes = policy.to_encrypted_bytes(&cipher).unwrap();
+        let loaded = VaultPolicy::from_encrypted_bytes(&bytes, &cipher).unwrap();
+
+        assert_eq!(
+            loaded.audit_mode,
+            crate::policy::constraints::AuditMode::Online
+        );
+    }
+
+    #[test]
+    fn test_audit_mode_backward_compat() {
+        // A policy serialized without audit_mode should deserialize with Offline default
+        let cipher = VaultCipher::generate();
+        let policy = VaultPolicy::new(); // audit_mode = Offline (default)
+
+        let bytes = policy.to_encrypted_bytes(&cipher).unwrap();
+        let loaded = VaultPolicy::from_encrypted_bytes(&bytes, &cipher).unwrap();
+
+        assert_eq!(
+            loaded.audit_mode,
+            crate::policy::constraints::AuditMode::Offline
+        );
     }
 }
