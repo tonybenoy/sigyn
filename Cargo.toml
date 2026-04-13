@@ -92,6 +92,7 @@ proptest = "1.5"
 lto = true
 strip = true
 codegen-units = 1
+panic = "abort"
 
 # Speed up test compilation: don't inherit aggressive release settings
 [profile.dev]
