@@ -9,7 +9,7 @@ fast-kdf = ["sigyn-core/fast-kdf"]
 vendored-openssl = ["openssl-sys/vendored"]
 
 [dependencies]
-sigyn-core = { path = "../sigyn-core", version = "0.13.0" }
+sigyn-core = { path = "../sigyn-core", version = "0.14.0" }
 
 # Crypto
 x25519-dalek.workspace = true

@@ -165,6 +165,10 @@ When accepting an invitation, Sigyn verifies the Ed25519 signature using the inv
 
 Sigyn uses vector clocks and CRDTs (Conflict-free Replicated Data Types) to resolve conflicts deterministically. By default, Last-Write-Wins (LWW) is used. You can manually resolve conflicts with `sigyn sync resolve`.
 
+### Does Sigyn have a GUI?
+
+Yes. Sigyn includes a local web GUI that runs in your browser. Build with `--features web` and launch with `sigyn web --open`. It provides visual vault and secret management while enforcing the same security model as the CLI. See the [Web GUI](web-gui.md) page for details.
+
 ---
 
 ## Security

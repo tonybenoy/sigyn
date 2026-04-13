@@ -14,8 +14,8 @@ vendored-openssl = ["sigyn-engine/vendored-openssl"]
 web = ["sigyn-web"]
 
 [dependencies]
-sigyn-engine = { path = "../sigyn-engine", version = "0.13.0" }
-sigyn-web = { path = "../sigyn-web", version = "0.13.0", optional = true }
+sigyn-engine = { path = "../sigyn-engine", version = "0.14.0" }
+sigyn-web = { path = "../sigyn-web", version = "0.14.0", optional = true }
 
 # CLI
 clap.workspace = true

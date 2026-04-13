@@ -8,6 +8,7 @@
 
 - [Getting Started](./getting-started.md)
 - [CLI Reference](./cli-reference.md)
+- [Web GUI](./web-gui.md)
 - [Environments](./environments.md)
 - [Import and Export](./import-export.md)
 - [Multiple Vaults and Organizations](./multi-vault.md)

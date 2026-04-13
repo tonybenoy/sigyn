@@ -8,7 +8,7 @@ license.workspace = true
 fast-kdf = ["sigyn-engine/fast-kdf"]
 
 [dependencies]
-sigyn-engine = { path = "../sigyn-engine", version = "0.13.0" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.14.0" }
 
 # Web
 axum.workspace = true

@@ -1593,6 +1593,25 @@ sigyn agent status
 
 ## Utility Commands
 
+### web
+
+Launch the local web GUI in your browser. Requires building with `--features web`.
+
+```bash
+sigyn web                          # http://127.0.0.1:9847
+sigyn web --port 8080              # custom port
+sigyn web --open                   # auto-open browser
+sigyn web --timeout 60             # 60-minute session timeout
+```
+
+| Flag | Description |
+|---|---|
+| `--port <PORT>` | Port to listen on (default: 9847) |
+| `--timeout <MINUTES>` | Session timeout in minutes (default: 30) |
+| `--open` | Open browser automatically on start |
+
+The web GUI binds exclusively to `127.0.0.1` (localhost) and is never accessible remotely. See the [Web GUI](web-gui.md) page for details.
+
 ### tui
 
 Launch the interactive TUI dashboard (built with ratatui + crossterm).
