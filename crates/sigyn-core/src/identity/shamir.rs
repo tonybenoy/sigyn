@@ -38,7 +38,7 @@ pub fn split_secret(secret: &[u8], threshold: u8, total: u8) -> Result<RecoveryS
         return Err(SigynError::ShamirInvalid("secret must not be empty".into()));
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let mut shards: Vec<Vec<u8>> = (0..total)
         .map(|_| Vec::with_capacity(secret.len()))
         .collect();

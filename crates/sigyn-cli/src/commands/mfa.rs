@@ -339,7 +339,7 @@ fn make_totp(state: &MfaState) -> Result<TOTP> {
 
 fn generate_backup_codes(count: usize) -> Vec<String> {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     (0..count)
         .map(|_| {
