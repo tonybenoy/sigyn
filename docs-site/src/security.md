@@ -622,9 +622,21 @@ variables, `.env` files, shell history, and process listings.
 3. For maximum isolation, use `sigyn run serve` — secrets are accessible only via the Unix socket.
 4. Run your AI coding agent in a separate terminal from your application.
 
+### Allowing agents to run and debug safely
+
+If you need the agent to run your app for debugging, use non-sensitive dev credentials
+and environment separation:
+
+1. **Dev environment**: localhost databases, test API keys — not worth protecting.
+2. **Staging/prod environments**: real credentials — agent never touches these.
+3. **Named commands**: `.sigyn.toml` defines an allowlist of commands the agent can run.
+4. **No passphrase caching**: don't run `sigyn agent start` in the agent's terminal — it can only use pre-configured `sigyn run` commands.
+
+See [Letting AI Agents Run and Debug Your App](examples.md#letting-ai-agents-run-and-debug-your-app) for detailed workflows.
+
 ### What Sigyn does NOT protect against
 
-- An AI agent that has been explicitly granted access to run `sigyn` commands (e.g., `sigyn secret get`)
+- An AI agent that has been explicitly granted access to run `sigyn` commands with a cached passphrase
 - Secrets that your application logs to stdout/stderr (visible if the agent reads log files)
 - Secrets embedded in source code (use Sigyn instead of hardcoding)
 

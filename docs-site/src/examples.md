@@ -170,6 +170,115 @@ sigyn run test    # same — AI agent can't see them
 | `sigyn run --clean` | Child only | No | No |
 | `sigyn run serve` | Never | No | No |
 
+## Letting AI Agents Run and Debug Your App
+
+The previous section covers keeping secrets away from agents entirely. But what if you need the agent to actually **run** your app (which needs secrets) for debugging?
+
+### Strategy 1: Dev Environment with Non-Sensitive Credentials
+
+The simplest approach — use local/dummy credentials in dev that aren't actually secrets:
+
+```bash
+# These dev values aren't sensitive — it's fine if the agent sees them
+sigyn secret set DATABASE_URL "postgres://localhost/myapp_dev" -e dev
+sigyn secret set REDIS_URL "redis://localhost:6379" -e dev
+sigyn secret set API_KEY "sk-test-not-a-real-key" -e dev
+```
+
+Configure `.sigyn.toml` so the agent just runs commands:
+
+```toml
+[project]
+vault = "myapp"
+env = "dev"
+
+[commands]
+dev = "npm run dev"
+test = "npm test"
+```
+
+The agent can run `sigyn run dev`, see the app output, debug errors — and the dev credentials aren't worth protecting because they only work against localhost.
+
+**Keep real credentials in staging/prod environments only.** The agent works in dev where exposure doesn't matter.
+
+### Strategy 2: Sigyn Run with Output Isolation
+
+Let the agent invoke `sigyn run` but prevent it from reading individual secret values:
+
+```bash
+# Agent CAN do this (runs the app, sees stdout/stderr):
+sigyn run -e dev -- npm run dev
+
+# Agent CANNOT do this (requires interactive passphrase):
+sigyn secret get DATABASE_URL -e dev
+# ^ Blocked because the agent doesn't have your passphrase
+```
+
+As long as you don't cache your passphrase in the agent's terminal session (don't run `eval $(sigyn agent start)` there), the agent can only run pre-configured commands — not extract individual secrets.
+
+### Strategy 3: Named Commands as an Allowlist
+
+Define exactly which commands the agent is allowed to run:
+
+```toml
+# .sigyn.toml
+[project]
+vault = "myapp"
+env = "dev"
+
+[commands]
+dev = "npm run dev"
+test = "npm test"
+lint = "npm run lint"
+migrate = "npx prisma migrate dev"
+debug = "node --inspect ./src/index.js"
+```
+
+The agent can run `sigyn run dev`, `sigyn run test`, `sigyn run debug` — but can't invent new commands that extract secrets. Combined with not having the passphrase cached, this acts as an effective allowlist.
+
+### Strategy 4: Socket Server for Running Apps
+
+Start the socket server yourself, then let the agent restart the app as needed:
+
+```bash
+# You start the socket server (once, in your terminal):
+sigyn run serve -e dev --socket /tmp/sigyn-dev.sock &
+
+# Your app reads secrets from the socket at runtime.
+# The agent can restart the app, read logs, debug — but
+# the secret values only flow through the socket, never
+# through environment variables the agent could inspect.
+```
+
+This requires your app to support reading from a Unix socket (via `SIGYN_SOCK` env var), but provides the strongest isolation.
+
+### What to Watch Out For
+
+Even with these strategies, secrets can leak through:
+
+- **Application logs** — if your app logs `Connected to postgres://user:password@host`, the agent sees it in stdout. Configure your app to redact credentials from logs.
+- **Error messages** — database connection errors often include the connection string. Use structured error handling that strips credentials.
+- **Core dumps / stack traces** — these can contain in-memory secrets. Disable core dumps in dev.
+
+### Recommended Setup
+
+For most teams, **Strategy 1 + Strategy 2** is the sweet spot:
+
+```bash
+# 1. Use non-sensitive dev credentials
+sigyn secret set DATABASE_URL "postgres://localhost/myapp_dev" -e dev
+
+# 2. Keep real secrets in staging/prod only
+sigyn secret set DATABASE_URL "postgres://prod:real-secret@db.internal/myapp" -e prod
+
+# 3. Agent works in dev — can run and debug freely
+# .sigyn.toml points to dev by default
+# Agent runs: sigyn run dev
+
+# 4. You deploy to prod yourself — agent never touches it
+sigyn run -e prod -- ./deploy.sh
+```
+
 ## CI/CD Integration
 
 For full CI/CD documentation including the GitHub Action reference, all export modes, security best practices, and troubleshooting, see the dedicated [CI/CD Integration](ci-cd.md) page.

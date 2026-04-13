@@ -224,9 +224,23 @@ sigyn run serve -e prod &
 | `sigyn run --clean` | Clean environment, only vault secrets | No |
 | `sigyn run serve` | Served over Unix socket (0600 perms) | No (no env vars at all) |
 
-Your workflow: run `sigyn run` for your app in one terminal, run your AI coding agent in another. The agent never sees your credentials because they were never in its environment.
+**For debugging with AI agents:** use non-sensitive dev credentials (localhost DBs, test API keys) and keep real secrets in staging/prod only. The agent can freely run and debug your app in dev where exposure doesn't matter:
 
-See the [security documentation](docs-site/src/security.md) for details.
+```toml
+# .sigyn.toml — agent runs these, dev secrets aren't sensitive
+[commands]
+dev = "npm run dev"
+test = "npm test"
+debug = "node --inspect ./src/index.js"
+```
+
+```bash
+sigyn run dev     # agent can run this — dev DB is localhost
+sigyn run test    # agent can debug test failures
+# Real credentials stay in prod, untouched by the agent
+```
+
+See the [examples](docs-site/src/examples.md) and [security documentation](docs-site/src/security.md) for details.
 
 ---
 
