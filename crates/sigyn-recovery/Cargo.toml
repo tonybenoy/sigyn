@@ -12,7 +12,7 @@ path = "src/main.rs"
 vendored-openssl = ["sigyn-engine/vendored-openssl"]
 
 [dependencies]
-sigyn-engine = { path = "../sigyn-engine", version = "0.14.0" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.14.1" }
 
 # CLI
 clap.workspace = true

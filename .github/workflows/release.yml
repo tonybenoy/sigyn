@@ -111,14 +111,14 @@ jobs:
 
       - name: Build
         run: |
-          FEATURES=""
+          FEATURES="web"
           if [ "${{ matrix.vendored-openssl }}" = "true" ]; then
-            FEATURES="--features vendored-openssl"
+            FEATURES="$FEATURES,vendored-openssl"
           fi
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} $FEATURES
+            cross build --release --target ${{ matrix.target }} --features "$FEATURES"
           else
-            cargo build --release --target ${{ matrix.target }} $FEATURES
+            cargo build --release --target ${{ matrix.target }} --features "$FEATURES"
           fi
         shell: bash
 
