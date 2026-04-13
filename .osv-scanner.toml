@@ -1,0 +1,6 @@
+[[IgnoredVulns]]
+# rand 0.8 unsoundness with thread_rng + custom logger reseeding.
+# Not applicable: we use OsRng exclusively, never thread_rng.
+# Blocked from upgrading to rand 0.9 by chacha20poly1305 depending on rand_core 0.6.
+id = "RUSTSEC-2026-0097"
+reason = "Only affects thread_rng with custom loggers; we use OsRng exclusively"
