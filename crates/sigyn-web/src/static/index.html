@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sigyn</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+  .fade-in { animation: fadeIn 0.15s ease-in; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #1e293b; }
+  ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+</style>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: { colors: { sigyn: { 50: '#f0f4ff', 100: '#dbe4ff', 500: '#5b7cfa', 600: '#4263eb', 700: '#3b53cc', 800: '#2b3ea0', 900: '#1e2d6d' } } } }
+}
+</script>
+</head>
+<body class="dark bg-slate-900 text-slate-100 min-h-screen">
+
+<div x-data="app()" x-init="init()" x-cloak class="min-h-screen flex flex-col">
+
+  <!-- Toast notifications -->
+  <div class="fixed top-4 right-4 z-50 space-y-2">
+    <template x-for="(toast, i) in toasts" :key="i">
+      <div class="fade-in px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm"
+           :class="toast.type === 'error' ? 'bg-red-900/90 text-red-100 border border-red-700' : 'bg-emerald-900/90 text-emerald-100 border border-emerald-700'"
+           x-text="toast.message"
+           x-init="setTimeout(() => toasts.splice(i, 1), 4000)">
+      </div>
+    </template>
+  </div>
+
+  <!-- LOGIN SCREEN -->
+  <template x-if="view === 'login'">
+    <div class="flex-1 flex items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="text-center mb-8">
+          <h1 class="text-3xl font-bold tracking-tight">
+            <span class="text-sigyn-500">sigyn</span>
+          </h1>
+          <p class="text-slate-400 mt-2">Encrypted P2P Secret Manager</p>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl border border-slate-700 p-6 shadow-xl">
+          <h2 class="text-lg font-semibold mb-4">Sign In</h2>
+
+          <div x-show="identities.length === 0 && !loadingIdentities" class="text-slate-400 text-sm py-4 text-center">
+            No identities found. Create one with:<br>
+            <code class="text-sigyn-500 bg-slate-900 px-2 py-1 rounded mt-2 inline-block">sigyn identity create -n yourname</code>
+          </div>
+
+          <form x-show="identities.length > 0" @submit.prevent="login()" class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-1">Identity</label>
+              <select x-model="loginForm.fingerprint"
+                      class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sigyn-500 focus:ring-1 focus:ring-sigyn-500">
+                <option value="">Select identity...</option>
+                <template x-for="id in identities" :key="id.fingerprint">
+                  <option :value="id.fingerprint" x-text="id.name + ' (' + id.fingerprint.substring(0, 8) + '...)'"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-1">Passphrase</label>
+              <input type="password" x-model="loginForm.passphrase" placeholder="Enter passphrase"
+                     class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sigyn-500 focus:ring-1 focus:ring-sigyn-500"
+                     :disabled="loginLoading">
+            </div>
+            <button type="submit"
+                    class="w-full bg-sigyn-600 hover:bg-sigyn-700 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition disabled:opacity-50"
+                    :disabled="!loginForm.fingerprint || !loginForm.passphrase || loginLoading">
+              <span x-show="!loginLoading">Unlock</span>
+              <span x-show="loginLoading">Unlocking...</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- MAIN APP (post-login) -->
+  <template x-if="view !== 'login'">
+    <div class="flex-1 flex flex-col">
+      <!-- Top bar -->
+      <header class="bg-slate-800 border-b border-slate-700 px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <button @click="navigateTo('dashboard')" class="text-xl font-bold text-sigyn-500 hover:text-sigyn-400 transition">sigyn</button>
+          <template x-if="currentVault">
+            <div class="flex items-center gap-2 text-sm text-slate-400">
+              <span>/</span>
+              <span class="text-slate-200" x-text="currentVault"></span>
+              <template x-if="currentEnv">
+                <span class="flex items-center gap-2">
+                  <span>/</span>
+                  <select x-model="currentEnv" @change="loadSecrets()"
+                          class="bg-slate-700 border border-slate-600 rounded px-2 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-sigyn-500">
+                    <template x-for="env in vaultInfo.environments" :key="env">
+                      <option :value="env" x-text="env"></option>
+                    </template>
+                  </select>
+                </span>
+              </template>
+            </div>
+          </template>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-slate-400" x-text="sessionIdentity"></span>
+          <button @click="logout()" class="text-xs text-slate-400 hover:text-red-400 transition">Logout</button>
+        </div>
+      </header>
+
+      <!-- DASHBOARD VIEW -->
+      <template x-if="view === 'dashboard'">
+        <div class="flex-1 p-6 fade-in">
+          <h2 class="text-xl font-semibold mb-4">Vaults</h2>
+          <div x-show="vaults.length === 0" class="text-slate-400 text-sm">
+            No vaults found. Create one with <code class="text-sigyn-500">sigyn vault create</code>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <template x-for="v in vaults" :key="v.name">
+              <button @click="openVault(v.name)"
+                      class="bg-slate-800 hover:bg-slate-750 border border-slate-700 hover:border-sigyn-600 rounded-xl p-5 text-left transition group">
+                <div class="flex items-center gap-3 mb-2">
+                  <div class="w-10 h-10 bg-sigyn-900/50 text-sigyn-500 rounded-lg flex items-center justify-center text-lg font-bold"
+                       x-text="v.name[0].toUpperCase()"></div>
+                  <h3 class="font-semibold text-slate-100 group-hover:text-sigyn-400 transition" x-text="v.name"></h3>
+                </div>
+                <p class="text-xs text-slate-500">Click to open</p>
+              </button>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- VAULT DETAIL VIEW -->
+      <template x-if="view === 'vault'">
+        <div class="flex-1 flex flex-col fade-in">
+          <!-- Tabs -->
+          <div class="bg-slate-800 border-b border-slate-700 px-4">
+            <nav class="flex gap-1">
+              <template x-for="tab in ['secrets', 'members', 'audit', 'info']" :key="tab">
+                <button @click="activeTab = tab; if(tab === 'audit') loadAudit(); if(tab === 'secrets') loadSecrets();"
+                        class="px-4 py-2.5 text-sm font-medium capitalize transition border-b-2"
+                        :class="activeTab === tab ? 'text-sigyn-400 border-sigyn-500' : 'text-slate-400 hover:text-slate-200 border-transparent'">
+                  <span x-text="tab"></span>
+                </button>
+              </template>
+            </nav>
+          </div>
+
+          <div class="flex-1 p-6 overflow-auto">
+            <!-- SECRETS TAB -->
+            <div x-show="activeTab === 'secrets'">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-semibold">
+                  Secrets
+                  <span class="text-sm font-normal text-slate-400" x-text="'(' + secrets.length + ')'"></span>
+                </h3>
+                <button @click="showAddSecret = !showAddSecret"
+                        class="bg-sigyn-600 hover:bg-sigyn-700 text-white rounded-lg px-3 py-1.5 text-sm font-medium transition">
+                  + Add Secret
+                </button>
+              </div>
+
+              <!-- Add secret form -->
+              <div x-show="showAddSecret" x-transition class="bg-slate-800 border border-slate-700 rounded-xl p-4 mb-4">
+                <form @submit.prevent="addSecret()" class="flex flex-wrap gap-3 items-end">
+                  <div class="flex-1 min-w-[200px]">
+                    <label class="block text-xs text-slate-400 mb-1">Key</label>
+                    <input x-model="newSecret.key" placeholder="SECRET_KEY"
+                           class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sigyn-500">
+                  </div>
+                  <div class="flex-[2] min-w-[300px]">
+                    <label class="block text-xs text-slate-400 mb-1">Value</label>
+                    <input x-model="newSecret.value" placeholder="secret value" type="password"
+                           class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sigyn-500">
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Type</label>
+                    <select x-model="newSecret.secret_type"
+                            class="bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-sigyn-500">
+                      <option value="string">String</option>
+                      <option value="multiline">Multiline</option>
+                      <option value="json">JSON</option>
+                    </select>
+                  </div>
+                  <button type="submit"
+                          class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-medium transition">
+                    Save
+                  </button>
+                  <button type="button" @click="showAddSecret = false"
+                          class="text-slate-400 hover:text-slate-200 rounded-lg px-3 py-2 text-sm transition">
+                    Cancel
+                  </button>
+                </form>
+              </div>
+
+              <!-- Secrets table -->
+              <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b border-slate-700 text-slate-400 text-xs uppercase tracking-wider">
+                      <th class="text-left px-4 py-3">Key</th>
+                      <th class="text-left px-4 py-3">Type</th>
+                      <th class="text-left px-4 py-3">Value</th>
+                      <th class="text-left px-4 py-3">Updated</th>
+                      <th class="text-right px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr x-show="secrets.length === 0">
+                      <td colspan="5" class="px-4 py-8 text-center text-slate-500">No secrets in this environment</td>
+                    </tr>
+                    <template x-for="secret in secrets" :key="secret.key">
+                      <tr class="border-b border-slate-700/50 hover:bg-slate-700/30 transition">
+                        <td class="px-4 py-3 font-mono text-sigyn-400" x-text="secret.key"></td>
+                        <td class="px-4 py-3">
+                          <span class="text-xs bg-slate-700 text-slate-300 rounded px-2 py-0.5" x-text="secret.secret_type"></span>
+                        </td>
+                        <td class="px-4 py-3 font-mono text-xs">
+                          <span x-show="!secret._revealed" class="text-slate-500">••••••••</span>
+                          <span x-show="secret._revealed" class="text-slate-200 break-all" x-text="secret._value || ''"></span>
+                          <button @click="revealSecret(secret)" class="ml-2 text-xs text-sigyn-500 hover:text-sigyn-400 transition"
+                                  x-text="secret._revealed ? 'hide' : 'reveal'"></button>
+                        </td>
+                        <td class="px-4 py-3 text-xs text-slate-400" x-text="formatDate(secret.updated_at)"></td>
+                        <td class="px-4 py-3 text-right">
+                          <button @click="deleteSecret(secret.key)"
+                                  class="text-xs text-red-400 hover:text-red-300 transition">delete</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- MEMBERS TAB -->
+            <div x-show="activeTab === 'members'">
+              <h3 class="text-lg font-semibold mb-4">Members</h3>
+              <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b border-slate-700 text-slate-400 text-xs uppercase tracking-wider">
+                      <th class="text-left px-4 py-3">Fingerprint</th>
+                      <th class="text-left px-4 py-3">Role</th>
+                      <th class="text-left px-4 py-3">Environments</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="member in vaultInfo.members" :key="member.fingerprint">
+                      <tr class="border-b border-slate-700/50">
+                        <td class="px-4 py-3 font-mono text-xs" x-text="member.fingerprint"></td>
+                        <td class="px-4 py-3">
+                          <span class="text-xs rounded px-2 py-0.5"
+                                :class="roleColor(member.role)"
+                                x-text="member.role"></span>
+                        </td>
+                        <td class="px-4 py-3 text-xs text-slate-400"
+                            x-text="member.allowed_envs.length ? member.allowed_envs.join(', ') : 'all'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- AUDIT TAB -->
+            <div x-show="activeTab === 'audit'">
+              <h3 class="text-lg font-semibold mb-4">Audit Log</h3>
+              <div class="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b border-slate-700 text-slate-400 text-xs uppercase tracking-wider">
+                      <th class="text-left px-4 py-3">#</th>
+                      <th class="text-left px-4 py-3">Timestamp</th>
+                      <th class="text-left px-4 py-3">Actor</th>
+                      <th class="text-left px-4 py-3">Action</th>
+                      <th class="text-left px-4 py-3">Env</th>
+                      <th class="text-left px-4 py-3">Outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr x-show="auditEntries.length === 0">
+                      <td colspan="6" class="px-4 py-8 text-center text-slate-500">No audit entries</td>
+                    </tr>
+                    <template x-for="entry in auditEntries" :key="entry.sequence">
+                      <tr class="border-b border-slate-700/50 text-xs">
+                        <td class="px-4 py-2.5 text-slate-500" x-text="entry.sequence"></td>
+                        <td class="px-4 py-2.5 text-slate-400" x-text="formatDate(entry.timestamp)"></td>
+                        <td class="px-4 py-2.5 font-mono text-slate-400" x-text="entry.actor.substring(0, 12) + '...'"></td>
+                        <td class="px-4 py-2.5">
+                          <span class="bg-slate-700 text-slate-200 rounded px-2 py-0.5" x-text="entry.action"></span>
+                        </td>
+                        <td class="px-4 py-2.5 text-slate-400" x-text="entry.env || '-'"></td>
+                        <td class="px-4 py-2.5">
+                          <span :class="entry.outcome === 'Success' ? 'text-emerald-400' : 'text-red-400'" x-text="entry.outcome"></span>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- INFO TAB -->
+            <div x-show="activeTab === 'info'">
+              <h3 class="text-lg font-semibold mb-4">Vault Information</h3>
+              <div class="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-3 max-w-lg">
+                <div class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Name</span>
+                  <span class="font-mono text-sm" x-text="vaultInfo.name"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Vault ID</span>
+                  <span class="font-mono text-xs text-slate-300" x-text="vaultInfo.vault_id"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Owner</span>
+                  <span class="font-mono text-xs text-slate-300" x-text="vaultInfo.owner"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Environments</span>
+                  <span class="text-sm" x-text="vaultInfo.environments.join(', ')"></span>
+                </div>
+                <div x-show="vaultInfo.description" class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Description</span>
+                  <span class="text-sm" x-text="vaultInfo.description"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400 text-sm">Members</span>
+                  <span class="text-sm" x-text="vaultInfo.members.length"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+</div>
+
+<script>
+function app() {
+  return {
+    // State
+    view: 'login',
+    identities: [],
+    loadingIdentities: true,
+    loginForm: { fingerprint: '', passphrase: '' },
+    loginLoading: false,
+    sessionIdentity: '',
+
+    // Dashboard
+    vaults: [],
+
+    // Vault detail
+    currentVault: null,
+    currentEnv: null,
+    vaultInfo: { name: '', vault_id: '', owner: '', environments: [], description: null, members: [] },
+    activeTab: 'secrets',
+
+    // Secrets
+    secrets: [],
+    showAddSecret: false,
+    newSecret: { key: '', value: '', secret_type: 'string' },
+
+    // Audit
+    auditEntries: [],
+
+    // Toasts
+    toasts: [],
+
+    async init() {
+      // Check if we have an active session
+      try {
+        const res = await this.api('/api/auth/status');
+        if (res.authenticated) {
+          this.sessionIdentity = res.identity_name;
+          this.view = 'dashboard';
+          await this.loadVaults();
+          return;
+        }
+      } catch {}
+      await this.loadIdentities();
+    },
+
+    async loadIdentities() {
+      this.loadingIdentities = true;
+      try {
+        this.identities = await this.api('/api/identities');
+      } catch (e) {
+        this.toast('Failed to load identities', 'error');
+      }
+      this.loadingIdentities = false;
+    },
+
+    async login() {
+      this.loginLoading = true;
+      try {
+        const res = await this.api('/api/auth/login', {
+          method: 'POST',
+          body: JSON.stringify(this.loginForm),
+        });
+        this.sessionIdentity = res.identity_name;
+        this.loginForm = { fingerprint: '', passphrase: '' };
+        this.view = 'dashboard';
+        await this.loadVaults();
+        this.toast('Signed in as ' + res.identity_name);
+      } catch (e) {
+        this.toast(e.message || 'Login failed', 'error');
+      }
+      this.loginLoading = false;
+    },
+
+    async logout() {
+      try { await this.api('/api/auth/logout', { method: 'POST' }); } catch {}
+      this.view = 'login';
+      this.sessionIdentity = '';
+      this.currentVault = null;
+      this.vaults = [];
+      this.secrets = [];
+      await this.loadIdentities();
+    },
+
+    async loadVaults() {
+      try {
+        this.vaults = await this.api('/api/vaults');
+      } catch (e) {
+        this.toast('Failed to load vaults', 'error');
+      }
+    },
+
+    async openVault(name) {
+      try {
+        this.vaultInfo = await this.api('/api/vaults/' + encodeURIComponent(name));
+        this.currentVault = name;
+        this.currentEnv = this.vaultInfo.environments[0] || 'dev';
+        this.activeTab = 'secrets';
+        this.view = 'vault';
+        await this.loadSecrets();
+      } catch (e) {
+        this.toast('Failed to open vault: ' + (e.message || e), 'error');
+      }
+    },
+
+    async loadSecrets() {
+      if (!this.currentVault || !this.currentEnv) return;
+      try {
+        const list = await this.api('/api/vaults/' + encodeURIComponent(this.currentVault) +
+          '/envs/' + encodeURIComponent(this.currentEnv) + '/secrets');
+        this.secrets = list.map(s => ({ ...s, _revealed: false, _value: null }));
+      } catch (e) {
+        // May not have access to this env
+        this.secrets = [];
+        if (e.message && !e.message.includes('not found')) {
+          this.toast('Failed to load secrets: ' + e.message, 'error');
+        }
+      }
+    },
+
+    async revealSecret(secret) {
+      if (secret._revealed) {
+        secret._revealed = false;
+        secret._value = null;
+        return;
+      }
+      try {
+        const detail = await this.api('/api/vaults/' + encodeURIComponent(this.currentVault) +
+          '/envs/' + encodeURIComponent(this.currentEnv) +
+          '/secrets/' + encodeURIComponent(secret.key));
+        secret._value = detail.value;
+        secret._revealed = true;
+      } catch (e) {
+        this.toast('Failed to reveal: ' + (e.message || e), 'error');
+      }
+    },
+
+    async addSecret() {
+      if (!this.newSecret.key || !this.newSecret.value) return;
+      try {
+        await this.api('/api/vaults/' + encodeURIComponent(this.currentVault) +
+          '/envs/' + encodeURIComponent(this.currentEnv) + '/secrets', {
+          method: 'POST',
+          body: JSON.stringify(this.newSecret),
+        });
+        this.toast('Secret saved');
+        this.newSecret = { key: '', value: '', secret_type: 'string' };
+        this.showAddSecret = false;
+        await this.loadSecrets();
+      } catch (e) {
+        this.toast('Failed to save: ' + (e.message || e), 'error');
+      }
+    },
+
+    async deleteSecret(key) {
+      if (!confirm('Delete secret "' + key + '"?')) return;
+      try {
+        await this.api('/api/vaults/' + encodeURIComponent(this.currentVault) +
+          '/envs/' + encodeURIComponent(this.currentEnv) +
+          '/secrets/' + encodeURIComponent(key), { method: 'DELETE' });
+        this.toast('Secret deleted');
+        await this.loadSecrets();
+      } catch (e) {
+        this.toast('Failed to delete: ' + (e.message || e), 'error');
+      }
+    },
+
+    async loadAudit() {
+      if (!this.currentVault) return;
+      try {
+        this.auditEntries = await this.api('/api/vaults/' + encodeURIComponent(this.currentVault) + '/audit?limit=100');
+      } catch (e) {
+        this.toast('Failed to load audit log', 'error');
+      }
+    },
+
+    navigateTo(dest) {
+      if (dest === 'dashboard') {
+        this.currentVault = null;
+        this.currentEnv = null;
+        this.view = 'dashboard';
+      }
+    },
+
+    // Helpers
+    roleColor(role) {
+      const colors = {
+        'Owner': 'bg-amber-900/50 text-amber-300',
+        'Admin': 'bg-red-900/50 text-red-300',
+        'Manager': 'bg-purple-900/50 text-purple-300',
+        'Contributor': 'bg-blue-900/50 text-blue-300',
+        'Operator': 'bg-cyan-900/50 text-cyan-300',
+        'Auditor': 'bg-slate-700 text-slate-300',
+        'ReadOnly': 'bg-slate-700 text-slate-400',
+      };
+      return colors[role] || 'bg-slate-700 text-slate-300';
+    },
+
+    formatDate(iso) {
+      if (!iso) return '-';
+      const d = new Date(iso);
+      const now = new Date();
+      const diffMs = now - d;
+      if (diffMs < 60000) return 'just now';
+      if (diffMs < 3600000) return Math.floor(diffMs / 60000) + 'm ago';
+      if (diffMs < 86400000) return Math.floor(diffMs / 3600000) + 'h ago';
+      if (diffMs < 604800000) return Math.floor(diffMs / 86400000) + 'd ago';
+      return d.toLocaleDateString();
+    },
+
+    toast(message, type = 'success') {
+      this.toasts.push({ message, type });
+    },
+
+    async api(url, opts = {}) {
+      const res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        ...opts,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Request failed');
+      }
+      return data;
+    },
+  };
+}
+</script>
+</body>
+</html>

@@ -202,6 +202,19 @@ enum Commands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+    /// Launch local web GUI
+    #[cfg(feature = "web")]
+    Web {
+        /// Port to listen on
+        #[arg(long, default_value = "9847")]
+        port: u16,
+        /// Session timeout in minutes
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+        /// Open browser automatically
+        #[arg(long)]
+        open: bool,
+    },
     /// Launch interactive TUI dashboard
     Tui,
     /// Get a secret (shortcut for 'secret get')
@@ -492,6 +505,28 @@ fn main() -> Result<()> {
                 agent::handle_status(json)?;
             }
         },
+        #[cfg(feature = "web")]
+        Commands::Web {
+            port,
+            timeout,
+            open,
+        } => {
+            let cfg = sigyn_web::ServerConfig {
+                port,
+                sigyn_home: config::sigyn_home(),
+                session_timeout_secs: timeout * 60,
+            };
+            if open {
+                let url = format!("http://127.0.0.1:{}", port);
+                eprintln!("Opening {} in browser...", url);
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&url)
+                    .spawn()
+                    .or_else(|_| std::process::Command::new("open").arg(&url).spawn());
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(sigyn_web::start_server(cfg))?;
+        }
         Commands::Tui => {
             let vault_name = cli.vault.as_deref().unwrap_or("default");
             let env_name = cli.env.as_deref().unwrap_or("default");

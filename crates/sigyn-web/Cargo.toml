@@ -1,0 +1,36 @@
+[package]
+name = "sigyn-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+fast-kdf = ["sigyn-engine/fast-kdf"]
+
+[dependencies]
+sigyn-engine = { path = "../sigyn-engine", version = "0.13.0" }
+
+# Web
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Crypto / Identity
+rand.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+
+# Types
+uuid.workspace = true
+chrono.workspace = true
+indexmap.workspace = true
+base64.workspace = true
+
+# Error handling
+anyhow.workspace = true
