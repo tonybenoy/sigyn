@@ -167,7 +167,11 @@ Sigyn uses vector clocks and CRDTs (Conflict-free Replicated Data Types) to reso
 
 ### Does Sigyn have a GUI?
 
-Yes. Sigyn includes a local web GUI that runs in your browser. Build with `--features web` and launch with `sigyn web --open`. It provides visual vault and secret management while enforcing the same security model as the CLI. See the [Web GUI](web-gui.md) page for details.
+Yes. Sigyn includes a local web GUI that runs in your browser. Launch with `sigyn web --open`. It provides visual vault and secret management while enforcing the same security model as the CLI. See the [Web GUI](web-gui.md) page for details.
+
+### Can AI coding agents (Claude Code, Copilot, Cursor) see my secrets?
+
+Not if you use Sigyn correctly. AI agents run in your shell and can read environment variables and `.env` files. Sigyn's `sigyn run` injects secrets only into child processes, keeping them invisible to agents running in your terminal. For maximum security, use `sigyn run serve` which serves secrets over a Unix socket — no environment variables at all. See [Working with AI Coding Agents](examples.md#working-with-ai-coding-agents) for detailed workflows.
 
 ---
 

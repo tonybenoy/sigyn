@@ -88,6 +88,88 @@ sigyn watch -e dev --interval 5 -- cargo run
 Useful during development when a teammate updates shared secrets — your local
 server restarts with the new values automatically.
 
+## Working with AI Coding Agents
+
+AI coding assistants (Claude Code, GitHub Copilot, Cursor, Windsurf, etc.) run in your terminal and can read environment variables, `.env` files, and process listings. Sigyn keeps secrets invisible to them.
+
+### The Problem
+
+```bash
+# DON'T DO THIS — any AI agent in your terminal can read these:
+export DATABASE_URL="postgres://prod:s3cret@db.internal/myapp"
+echo "API_KEY=sk-live-abc123" >> .env
+source .env
+```
+
+AI agents can see secrets via `env`, `printenv`, `cat .env`, or `/proc/self/environ`. Even if the agent doesn't deliberately exfiltrate them, secrets may appear in conversation logs, tool outputs, or error messages.
+
+### Solution 1: Process Injection (Recommended)
+
+Run your app with injected secrets in one terminal, your AI agent in another:
+
+```bash
+# Terminal 1 — app runs with secrets, isolated from your shell
+sigyn run -e dev -- npm run dev
+
+# Terminal 2 — AI agent has no access to the secrets
+claude   # or cursor, copilot, etc.
+```
+
+Secrets are injected only into the child process (`npm run dev`). Your shell — where the AI agent runs — never sees them.
+
+### Solution 2: Clean Environment
+
+Use `--clean` to strip the entire parent environment, injecting only vault secrets:
+
+```bash
+sigyn run --clean -e dev -- ./myapp
+```
+
+This prevents even inherited environment variables (like `AWS_SECRET_ACCESS_KEY` from a previous `aws configure`) from being visible.
+
+### Solution 3: Unix Socket (Maximum Security)
+
+For zero-exposure secret access, serve secrets over a Unix socket:
+
+```bash
+# Start the socket server (owner-only permissions, 0600)
+sigyn run serve -e prod --socket /tmp/sigyn.sock &
+
+# Your app reads secrets from the socket at runtime
+# No environment variables, no files, no process listing exposure
+```
+
+### Solution 4: Named Commands in .sigyn.toml
+
+Set up your project so developers never need to type secrets or export them:
+
+```toml
+# .sigyn.toml
+[project]
+vault = "myapp"
+env = "dev"
+
+[commands]
+dev = "npm run dev"
+test = "npm test"
+migrate = "npx prisma migrate deploy"
+```
+
+```bash
+sigyn run dev     # secrets injected, never in your shell
+sigyn run test    # same — AI agent can't see them
+```
+
+### Quick Comparison
+
+| Method | Secrets in env? | Secrets on disk? | Agent can read? |
+|--------|:-:|:-:|:-:|
+| `.env` + `source` | Yes | Yes | Yes |
+| `export KEY=val` | Yes | No | Yes |
+| `sigyn run exec` | Child only | No | No |
+| `sigyn run --clean` | Child only | No | No |
+| `sigyn run serve` | Never | No | No |
+
 ## CI/CD Integration
 
 For full CI/CD documentation including the GitHub Action reference, all export modes, security best practices, and troubleshooting, see the dedicated [CI/CD Integration](ci-cd.md) page.

@@ -17,6 +17,8 @@ Think of it as a self-hosted alternative to Doppler, AWS Secrets Manager, or Has
 - **Per-environment secrets.** First-class support for dev, staging, production, and custom environments.
 - **Team collaboration.** Invite members, delegate access with cascade revocation, and track every operation in a signed audit trail.
 - **Process injection.** `sigyn run -- ./app` injects secrets as environment variables without writing them to disk.
+- **AI-agent safe.** Secrets stay out of your shell environment where coding agents run. Use `sigyn run serve` for zero-exposure secret access.
+- **Web GUI.** Browser-based dashboard for visual secret management (`sigyn web`).
 - **Project config.** Drop a `.sigyn.toml` in your project root for zero-flag workflows and named run commands.
 - **Cross-platform.** One-liner install for macOS, Linux, and Windows.
 
@@ -47,6 +49,7 @@ sigyn run -- ./myapp
 - **Small teams** that need to share secrets securely via git without setting up Vault or paying for Doppler
 - **Security-conscious organizations** that require audit trails, RBAC, and self-hosted secret storage
 - **CI/CD pipelines** that need secrets injected at runtime without writing `.env` files to disk
+- **AI-assisted development** where coding agents (Claude Code, Cursor, Copilot) run in your terminal and you need to keep credentials out of their reach
 
 ## The Name
 

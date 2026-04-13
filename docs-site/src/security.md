@@ -589,6 +589,45 @@ modified by anyone with push access. Sigyn applies the following safeguards:
   This prevents an attacker from silently redirecting vault operations to a
   compromised identity by modifying a committed config file.
 
+## AI Coding Agent Threat Model
+
+AI coding assistants (Claude Code, Cursor, GitHub Copilot, Windsurf, etc.) present a
+new secret exposure surface: they run in your terminal with access to environment
+variables, `.env` files, shell history, and process listings.
+
+### Attack vectors
+
+| Vector | How agent sees secrets |
+|---|---|
+| Environment variables | `env`, `printenv`, `/proc/self/environ` |
+| `.env` files | `cat .env`, file reading tools |
+| Shell history | `history`, `~/.bash_history` |
+| Process listing | `ps aux` shows command-line args with inline secrets |
+| Conversation context | Secrets pasted into prompts or visible in tool output |
+
+### Sigyn mitigations
+
+| Method | Protection level | How it works |
+|---|---|---|
+| `sigyn run exec` | Strong | Secrets injected as env vars into child process only; parent shell (where agent runs) is clean |
+| `sigyn run --clean` | Stronger | Child process gets a clean environment with only vault secrets; no inherited vars leak |
+| `sigyn run serve` | Strongest | Secrets served over a Unix socket with 0600 permissions; never appear in env vars or process listings |
+| `.sigyn.toml` named commands | Convenience | `sigyn run dev` — developers never type or see secrets |
+| `sigyn web` | GUI alternative | Manage secrets in a browser; no terminal exposure at all |
+
+### Recommended workflow
+
+1. **Never** `export` secrets or use `source .env` in terminals where AI agents run.
+2. Use `sigyn run exec` or named commands in `.sigyn.toml` to inject secrets only into the processes that need them.
+3. For maximum isolation, use `sigyn run serve` — secrets are accessible only via the Unix socket.
+4. Run your AI coding agent in a separate terminal from your application.
+
+### What Sigyn does NOT protect against
+
+- An AI agent that has been explicitly granted access to run `sigyn` commands (e.g., `sigyn secret get`)
+- Secrets that your application logs to stdout/stderr (visible if the agent reads log files)
+- Secrets embedded in source code (use Sigyn instead of hardcoding)
+
 ## Threat Model Summary
 
 | Threat | Mitigation |
@@ -605,6 +644,7 @@ modified by anyone with push access. Sigyn applies the following safeguards:
 | Unauthorized access escalation | `PolicyEngine::evaluate()` on every operation; no bypass path |
 | Brute-force passphrase | Argon2id with tuned memory/time cost |
 | Stolen credentials (passphrase only) | Optional TOTP-based MFA as second factor; session grace period limits exposure window |
+| AI agent reads env vars | `sigyn run exec` injects into child only; `sigyn run serve` uses Unix socket with no env exposure |
 | Replay of old ciphertext | Unique nonces per encryption; vault UUID bound into HKDF salt |
 | Sensitive data in memory | `secrecy::Secret` + `zeroize` on drop; constant-time fingerprint comparison |
 | Partial file writes | Atomic writes via `tempfile::persist()` |

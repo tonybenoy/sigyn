@@ -54,6 +54,8 @@ what Sigyn is about.
 - **Self-update** -- `sigyn update` downloads and installs the latest release with checksum verification.
 - **CI/CD integration** -- official GitHub Action plus GitLab CI and generic pipeline support with CI identity bundles.
 - **Passphrase agent** -- ssh-agent-like daemon caches your passphrase for a session.
+- **AI-agent safe** -- secrets never leak to coding agents (Claude Code, Cursor, Copilot). Process injection and socket-based serving keep credentials out of your shell environment where AI tools can see them.
+- **Web GUI** -- browser-based dashboard for visual secret management (`sigyn web`), with the same encryption and policy enforcement as the CLI.
 - **Watch mode** -- `sigyn watch` auto-restarts your app when secrets change.
 - **Context switching** -- `sigyn context` sets persistent vault/env/identity defaults.
 - **Shell completions** -- bash, zsh, fish, and PowerShell.
@@ -200,6 +202,34 @@ The action supports multiple export modes (`env`, `dotenv`, `json`, `mask-only`)
 
 ---
 
+## Protecting Secrets from AI Coding Agents
+
+AI coding assistants like Claude Code, GitHub Copilot, and Cursor run in your terminal and can read environment variables, `.env` files, and shell history. Sigyn keeps secrets out of their reach:
+
+```bash
+# BAD: secrets in .env or exported shell vars — visible to any agent
+export DATABASE_URL="postgres://prod:secret@db.internal/myapp"
+
+# GOOD: secrets injected only into the process that needs them
+sigyn run -e prod -- ./myapp
+
+# BEST: secrets served over a Unix socket — never in env vars at all
+sigyn run serve -e prod &
+```
+
+| Method | How it works | Agent can see it? |
+|--------|-------------|-------------------|
+| `.env` files / `export` | Secrets in plaintext on disk or in shell | Yes |
+| `sigyn run exec` | Injected as env vars into child process only | No (different process) |
+| `sigyn run --clean` | Clean environment, only vault secrets | No |
+| `sigyn run serve` | Served over Unix socket (0600 perms) | No (no env vars at all) |
+
+Your workflow: run `sigyn run` for your app in one terminal, run your AI coding agent in another. The agent never sees your credentials because they were never in its environment.
+
+See the [security documentation](docs-site/src/security.md) for details.
+
+---
+
 ## Architecture
 
 Sigyn is a Cargo workspace with four crates:
@@ -208,7 +238,8 @@ Sigyn is a Cargo workspace with four crates:
 |-------|---------|
 | `sigyn-core` | Pure library (publishable): crypto, policy, CRDT, types -- zero I/O dependencies |
 | `sigyn-engine` | I/O layer: filesystem, git sync, audit persistence -- depends on and re-exports `sigyn-core` |
-| `sigyn-cli` | Binary (`sigyn`): CLI interface, TUI, process injection, import/export |
+| `sigyn-web` | Local web GUI: axum backend, embedded SPA, REST API |
+| `sigyn-cli` | Binary (`sigyn`): CLI interface, TUI, web GUI, process injection, import/export |
 | `sigyn-recovery` | Standalone binary (`sigyn-recovery`): Shamir shard management and vault recovery |
 
 See the [`docs/`](docs/) directory for detailed design documents.
@@ -244,6 +275,7 @@ sigyn <command>
 | `agent` | Passphrase caching agent (ssh-agent-like) |
 | `watch` | Watch mode — auto-restart app on secret changes |
 | `onboard` | Guided first-run setup wizard |
+| `web` | Launch browser-based GUI for visual secret management |
 | `tui` | Launch the interactive TUI dashboard |
 | `update` | Self-update to the latest release |
 | `doctor` | Run health checks |
