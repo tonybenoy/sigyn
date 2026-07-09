@@ -1,8 +1,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use sigyn_engine::vault::PlaintextEnv;
+
+/// Serializes the process-global umask get/set/restore around socket bind.
+/// `libc::umask` is process-wide, so two threads binding sockets concurrently
+/// could otherwise interleave and leave the umask at the restrictive value.
+static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serve secrets over a Unix domain socket.
 /// Clients connect and send a key name; server responds with the value.
@@ -19,9 +25,17 @@ pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     // owner-only (0600) atomically — otherwise there is a brief window under a
     // lax umask where the socket is world-accessible before we chmod it.
     let listener = {
+        // Hold the process-global umask across the whole bind so a concurrent
+        // binder can't corrupt the saved value (poisoned lock is fine — the
+        // guard is only held for these few lines).
+        let _umask_guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: umask is a simple process-global getter/setter; we restore it
-        // immediately after binding.
-        let prev_umask = unsafe { libc::umask(0o177) };
+        // immediately after binding, under the lock above. Use 0o077 (strip all
+        // group/other access) rather than 0o177: umask is process-wide, so a
+        // concurrent directory creation on another thread would otherwise lose
+        // its owner-execute bit and become non-traversable. 0o077 still makes
+        // the socket owner-only, which is the security goal.
+        let prev_umask = unsafe { libc::umask(0o077) };
         let result = match UnixListener::bind(socket_path) {
             Ok(l) => Ok(l),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {

@@ -191,7 +191,13 @@ env = "dev"
         assert_eq!(found_dir, project_dir);
         assert_eq!(config.project.unwrap().env, Some("dev".into()));
 
-        // Should NOT find it from root
-        assert!(find_project_config(root.path()).is_none());
+        // Should NOT find OUR config when starting from root: it lives in a
+        // child directory, and the search only walks upward. (We assert our
+        // planted config isn't the match rather than strict `None`, so an
+        // unrelated `.sigyn.toml` that may exist above the system temp dir —
+        // e.g. under a parallel test's shared ancestor — can't flake this.)
+        if let Some((_, found_dir)) = find_project_config(root.path()) {
+            assert_ne!(found_dir, project_dir);
+        }
     }
 }

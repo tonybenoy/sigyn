@@ -156,7 +156,17 @@ pub fn is_interactive() -> bool {
 /// impossible to complete in any script or CI job that sets
 /// `SIGYN_PASSPHRASE`.
 fn mfa_code_from_env() -> Option<String> {
-    std::env::var("SIGYN_MFA_CODE").ok()
+    // Delegates to a pure helper so tests can exercise the lookup rule without
+    // mutating the process environment (which is a data race — and UB — against
+    // every other thread reading the environment in a parallel test run).
+    mfa_code_from(|k| std::env::var(k).ok())
+}
+
+/// The env-lookup rule for one-time MFA codes, parameterized over the getter so
+/// it is testable in isolation: consult `SIGYN_MFA_CODE` only, never
+/// `SIGYN_PASSPHRASE`.
+fn mfa_code_from(getenv: impl Fn(&str) -> Option<String>) -> Option<String> {
+    getenv("SIGYN_MFA_CODE")
 }
 
 /// Read a one-time MFA code (TOTP or backup code).
@@ -179,26 +189,24 @@ pub fn read_code(prompt: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
-    // Single combined test so the env-var manipulation cannot race with a
-    // parallel test case touching the same variables.
+    // Pure test of the env-lookup rule — no process-environment mutation, so it
+    // cannot race with (or corrupt) other tests running in parallel.
     #[test]
-    fn test_read_code_never_returns_sigyn_passphrase() {
-        std::env::set_var("SIGYN_PASSPHRASE", "super-secret-passphrase");
+    fn mfa_code_reads_only_sigyn_mfa_code_never_passphrase() {
+        // Env where SIGYN_PASSPHRASE is set but SIGYN_MFA_CODE is not: the code
+        // lookup must yield nothing — it must never fall back to the passphrase.
+        let only_passphrase = |k: &str| match k {
+            "SIGYN_PASSPHRASE" => Some("super-secret-passphrase".to_string()),
+            _ => None,
+        };
+        assert_eq!(mfa_code_from(only_passphrase), None);
 
-        // Without SIGYN_MFA_CODE, the env fast-path must yield nothing —
-        // in particular it must never pick up SIGYN_PASSPHRASE. (The only
-        // remaining path in read_code is an interactive TTY prompt.)
-        std::env::remove_var("SIGYN_MFA_CODE");
-        assert_eq!(mfa_code_from_env(), None);
-
-        // With SIGYN_MFA_CODE set, read_code returns the code, not the
-        // passphrase, and never touches the TTY.
-        std::env::set_var("SIGYN_MFA_CODE", "123456");
-        let code = read_code("unused prompt: ").unwrap();
-        assert_eq!(code, "123456");
-        assert_ne!(code, "super-secret-passphrase");
-
-        std::env::remove_var("SIGYN_MFA_CODE");
-        std::env::remove_var("SIGYN_PASSPHRASE");
+        // With SIGYN_MFA_CODE present, it returns exactly that code.
+        let with_code = |k: &str| match k {
+            "SIGYN_MFA_CODE" => Some("123456".to_string()),
+            "SIGYN_PASSPHRASE" => Some("super-secret-passphrase".to_string()),
+            _ => None,
+        };
+        assert_eq!(mfa_code_from(with_code), Some("123456".to_string()));
     }
 }
