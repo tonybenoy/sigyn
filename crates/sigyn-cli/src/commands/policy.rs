@@ -288,6 +288,27 @@ pub fn handle(
                 )
             })?;
 
+            // Ownership is never grantable via member-add (mirrors `delegation invite`)
+            if role == Role::Owner {
+                anyhow::bail!("cannot add a member with 'owner' role — ownership is not delegable");
+            }
+            // A non-owner cannot grant a role at or above their own
+            if ctx.fingerprint != ctx.manifest.owner {
+                if let Some(actor) = ctx.policy.get_member(&ctx.fingerprint) {
+                    if role.level() >= actor.role.level() {
+                        anyhow::bail!(
+                            "cannot add a member with role '{}' (level {}) — your role '{}' (level {}) must be higher",
+                            role,
+                            role.level(),
+                            actor.role,
+                            actor.role.level()
+                        );
+                    }
+                } else {
+                    anyhow::bail!("you are not a member of this vault");
+                }
+            }
+
             if ctx.policy.get_member(&fp).is_some() {
                 anyhow::bail!("member {} is already in the policy", fingerprint);
             }
@@ -355,6 +376,17 @@ pub fn handle(
                 "Removed member {} from policy",
                 &fingerprint[..16.min(fingerprint.len())]
             ));
+            eprintln!(
+                "{} policy entry removed, but the member's envelope key slots were NOT removed.",
+                style("warning:").yellow().bold()
+            );
+            eprintln!(
+                "         They can still decrypt vault data. To revoke cryptographic access and rotate keys, run:"
+            );
+            eprintln!(
+                "         sigyn delegation revoke {} -v {}",
+                fingerprint, ctx.vault_name
+            );
         }
 
         PolicyCommands::Check {

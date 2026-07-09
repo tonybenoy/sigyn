@@ -203,10 +203,23 @@ impl IdentityStore {
             }
         }
 
-        // Try without MAC (old format) — verify it's valid CBOR
-        let _: WrappedIdentity = ciborium_from_slice(file_data)?;
+        // Try without MAC (old format). The old format is a bare CBOR
+        // WrappedIdentity with NO trailing bytes, so require the deserializer
+        // to consume the entire file: ciborium ignores trailing data, and a
+        // new-format blob with a corrupted/forged MAC would otherwise parse
+        // "successfully" here and silently bypass the integrity check.
+        let mut cursor = std::io::Cursor::new(file_data);
+        let parsed: std::result::Result<WrappedIdentity, _> = ciborium::from_reader(&mut cursor);
+        let fully_consumed = cursor.position() as usize == file_data.len();
+        if parsed.is_err() || !fully_consumed {
+            return Err(SigynError::Deserialization(format!(
+                "identity file {} failed integrity verification (MAC mismatch or corrupted data)",
+                path.display()
+            )));
+        }
 
-        // Migration: rewrite with MAC appended
+        // Migration: rewrite with MAC appended. Failure to upgrade is not
+        // fatal (e.g. read-only filesystem) but must not pass silently.
         eprintln!(
             "warning: identity file {} missing integrity MAC — upgrading",
             path.display()
@@ -214,7 +227,13 @@ impl IdentityStore {
         let mac = compute_identity_mac(file_data, &device_key);
         let mut new_data = file_data.to_vec();
         new_data.extend_from_slice(mac.as_bytes());
-        let _ = crate::io::atomic_write(path, &new_data);
+        if let Err(e) = crate::io::atomic_write(path, &new_data) {
+            eprintln!(
+                "warning: failed to upgrade identity file {} with integrity MAC: {}",
+                path.display(),
+                e
+            );
+        }
 
         Ok(file_data.to_vec())
     }
@@ -262,6 +281,81 @@ mod tests {
 
         let identity = store.generate(profile, "correct").unwrap();
         assert!(store.load(&identity.fingerprint, "wrong").is_err());
+    }
+
+    #[test]
+    fn test_corrupted_mac_is_rejected_not_treated_as_old_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = IdentityStore::new(dir.path().to_path_buf());
+        let profile = IdentityProfile::new("carol".into(), None);
+
+        let identity = store.generate(profile, "pass").unwrap();
+        let path = store.identity_path(&identity.fingerprint);
+
+        // Craft a new-format blob (cbor || mac) with a corrupted MAC. The
+        // loader must ERROR — not fall back to parsing the CBOR prefix as
+        // "old format" (ciborium ignores trailing bytes).
+        let mut data = std::fs::read(&path).unwrap();
+        let last = data.len() - 1;
+        data[last] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        // Can't unwrap_err (LoadedIdentity has no Debug — key material); match.
+        match store.load(&identity.fingerprint, "pass") {
+            Ok(_) => panic!("corrupted MAC must be rejected"),
+            Err(e) => assert!(
+                e.to_string().contains("integrity verification"),
+                "error should indicate an integrity failure, got: {}",
+                e
+            ),
+        }
+        assert!(store.list().is_err(), "list must also reject corrupted MAC");
+    }
+
+    #[test]
+    fn test_corrupted_cbor_with_valid_length_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = IdentityStore::new(dir.path().to_path_buf());
+        let profile = IdentityProfile::new("dave".into(), None);
+
+        let identity = store.generate(profile, "pass").unwrap();
+        let path = store.identity_path(&identity.fingerprint);
+
+        // Corrupt a byte inside the CBOR payload (MAC now mismatches, and the
+        // fallback old-format parse must not accept it either).
+        let mut data = std::fs::read(&path).unwrap();
+        data[10] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        assert!(store.load(&identity.fingerprint, "pass").is_err());
+    }
+
+    #[test]
+    fn test_genuine_old_format_still_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = IdentityStore::new(dir.path().to_path_buf());
+        let profile = IdentityProfile::new("erin".into(), None);
+
+        let identity = store.generate(profile, "pass").unwrap();
+        let path = store.identity_path(&identity.fingerprint);
+
+        // Strip the MAC to simulate a pre-MAC (old format) identity file.
+        let data = std::fs::read(&path).unwrap();
+        let cbor_only = &data[..data.len() - IDENTITY_MAC_LEN];
+        std::fs::write(&path, cbor_only).unwrap();
+
+        // Old format loads and is migrated (MAC re-appended on disk).
+        let loaded = store.load(&identity.fingerprint, "pass").unwrap();
+        assert_eq!(loaded.identity.profile.name, "erin");
+        let migrated = std::fs::read(&path).unwrap();
+        assert_eq!(
+            migrated.len(),
+            cbor_only.len() + IDENTITY_MAC_LEN,
+            "migration should re-append the MAC"
+        );
+
+        // And the migrated file loads through the MAC-verified path.
+        store.load(&identity.fingerprint, "pass").unwrap();
     }
 
     #[test]

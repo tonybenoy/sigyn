@@ -252,23 +252,73 @@ fn save_header(
 
 /// Append an audit entry, then enforce the vault's audit push policy.
 fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) -> Result<()> {
+    audit_log_with_cipher(ctx, action, &ctx.vault_cipher)
+}
+
+/// Like [`audit_log`], but with an explicit vault cipher.
+///
+/// Needed after a key rotation (e.g. member revocation): the on-disk audit
+/// log has been rekeyed to the rotated vault key, so deriving the audit
+/// cipher from the stale `ctx.vault_cipher` would fail to open the log and
+/// the entry would be lost.
+fn audit_log_with_cipher(
+    ctx: &UnlockedVaultContext,
+    action: AuditAction,
+    vault_cipher: &sigyn_engine::crypto::vault_cipher::VaultCipher,
+) -> Result<()> {
     let audit_path = ctx.paths.audit_path(&ctx.vault_name);
     let audit_cipher = match sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-        ctx.vault_cipher.key_bytes(),
+        vault_cipher.key_bytes(),
         b"sigyn-audit-v1",
         &ctx.manifest.vault_id,
     ) {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            eprintln!(
+                "{} failed to derive audit cipher — '{}' entry NOT recorded: {}",
+                style("warning:").yellow().bold(),
+                action.short_name(),
+                e
+            );
+            return Ok(());
+        }
     };
-    if let Ok(mut log) = AuditLog::open(&audit_path, audit_cipher) {
-        let _ = log.append(
-            &ctx.fingerprint,
-            action.clone(),
-            Some(ctx.env_name.clone()),
-            AuditOutcome::Success,
-            ctx.loaded_identity.signing_key(),
-        );
+    match AuditLog::open(&audit_path, audit_cipher) {
+        Ok(mut log) => {
+            match log.append(
+                &ctx.fingerprint,
+                action.clone(),
+                Some(ctx.env_name.clone()),
+                AuditOutcome::Success,
+                ctx.loaded_identity.signing_key(),
+            ) {
+                Ok(entry) => {
+                    // Record device-local audit tip for truncation detection (H8).
+                    let _ = sigyn_engine::audit::checkpoint::record_local_tip(
+                        &sigyn_home(),
+                        &ctx.vault_name,
+                        entry.sequence,
+                        entry.entry_hash,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} failed to append audit entry '{}': {}",
+                        style("warning:").yellow().bold(),
+                        action.short_name(),
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{} failed to open audit log — '{}' entry NOT recorded: {}",
+                style("warning:").yellow().bold(),
+                action.short_name(),
+                e
+            );
+        }
     }
 
     // Enforce audit push policy
@@ -279,7 +329,7 @@ fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) -> Result<()> {
         let msg = format!("sigyn: audit ({})", action.short_name());
         let deploy_key = sigyn_engine::sync::deploy_key::load_and_unseal(
             &ctx.paths.deploy_key_path(&ctx.vault_name),
-            &ctx.vault_cipher,
+            vault_cipher,
         )
         .ok()
         .flatten();
@@ -298,17 +348,402 @@ fn audit_log(ctx: &UnlockedVaultContext, action: AuditAction) -> Result<()> {
     Ok(())
 }
 
+/// Revoke one or more members from an already-unlocked vault.
+///
+/// Correctness requirement: every successful `revoke_member` call rotates the
+/// vault key (and the affected env keys) again, so all revocations are first
+/// computed purely in memory while the rotated ciphers are threaded through
+/// the batch. Nothing is written to disk until every requested fingerprint
+/// has been processed, and all decryption needed for re-sealing is done
+/// before the first write. This guarantees a mid-batch failure cannot leave
+/// the members header (key slots) and the data files (manifest, env files,
+/// audit log) sealed under different keys — which would permanently lock
+/// everyone, including the owner, out of the vault.
+fn revoke_members(
+    ctx: &UnlockedVaultContext,
+    fingerprints: &[String],
+    cascade: bool,
+    json: bool,
+) -> Result<()> {
+    check_access(ctx, AccessAction::ManageMembers, None)?;
+
+    // Hold the vault lock across the whole rotate-and-reseal sequence so a
+    // concurrent writer can't interleave with the key rotation (H9).
+    let _vault_lock =
+        sigyn_engine::vault::lock::VaultLock::acquire(&ctx.paths.lock_path(&ctx.vault_name))?;
+
+    let is_batch = fingerprints.len() > 1;
+    let mut failed = 0usize;
+    let mut json_results: Vec<serde_json::Value> = Vec::new();
+
+    let home = sigyn_home();
+    let store = IdentityStore::new(home);
+    let identities = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
+
+    // ── Phase 1: compute all revocations in memory ──────────────────────
+    let mut header: EnvelopeHeader = ctx.header.clone();
+    let mut policy = ctx.policy.clone();
+    // Vault cipher after the most recent rotation.
+    let mut current_vault_cipher =
+        sigyn_engine::crypto::vault_cipher::VaultCipher::new(*ctx.vault_cipher.key_bytes());
+    // Final cipher per rotated env (later rotations overwrite earlier ones).
+    let mut final_env_ciphers: std::collections::BTreeMap<
+        String,
+        sigyn_engine::crypto::vault_cipher::VaultCipher,
+    > = std::collections::BTreeMap::new();
+
+    struct RevokedMember {
+        input: String,
+        fingerprint: KeyFingerprint,
+        cascade_revoked: Vec<KeyFingerprint>,
+        affected_envs: Vec<String>,
+        env_keys_rotated: usize,
+    }
+    let mut succeeded: Vec<RevokedMember> = Vec::new();
+
+    for fingerprint in fingerprints {
+        let target_fp = match KeyFingerprint::from_hex(fingerprint) {
+            Ok(fp) => fp,
+            Err(e) => {
+                failed += 1;
+                if json {
+                    json_results.push(serde_json::json!({
+                        "fingerprint": fingerprint,
+                        "status": "failed",
+                        "error": e.to_string(),
+                    }));
+                } else {
+                    crate::output::print_error(&format!(
+                        "invalid fingerprint '{}': {}",
+                        fingerprint, e
+                    ));
+                }
+                continue;
+            }
+        };
+
+        // Build remaining pubkeys from current policy state
+        let mut remaining_pubkeys: Vec<(
+            KeyFingerprint,
+            sigyn_engine::crypto::keys::X25519PublicKey,
+        )> = Vec::new();
+        remaining_pubkeys.push((
+            ctx.fingerprint.clone(),
+            ctx.loaded_identity.identity.encryption_pubkey.clone(),
+        ));
+        for member_policy in policy.members.values() {
+            if let Some(id) = identities
+                .iter()
+                .find(|id| id.fingerprint == member_policy.fingerprint)
+            {
+                remaining_pubkeys.push((id.fingerprint.clone(), id.encryption_pubkey.clone()));
+            }
+        }
+
+        // Build member_env_access map
+        let mut member_env_access = std::collections::BTreeMap::new();
+        member_env_access.insert(ctx.fingerprint.clone(), ctx.manifest.environments.clone());
+        for mp in policy.members.values() {
+            let envs = if mp.allowed_envs.iter().any(|e| e == "*") {
+                ctx.manifest.environments.clone()
+            } else {
+                mp.allowed_envs.clone()
+            };
+            member_env_access.insert(mp.fingerprint.clone(), envs);
+        }
+
+        let result_v2 = match sigyn_engine::delegation::revoke::revoke_member(
+            &target_fp,
+            cascade,
+            &mut policy,
+            &mut header,
+            ctx.manifest.vault_id,
+            &remaining_pubkeys,
+            &member_env_access,
+        ) {
+            Ok((r,)) => r,
+            Err(e @ sigyn_engine::SigynError::MemberNotFound(_)) => {
+                // Fails before mutating policy/header — safe to keep going.
+                failed += 1;
+                if json {
+                    json_results.push(serde_json::json!({
+                        "fingerprint": fingerprint,
+                        "status": "failed",
+                        "error": e.to_string(),
+                    }));
+                } else {
+                    crate::output::print_error(&format!(
+                        "revocation failed for '{}': {}",
+                        &fingerprint[..12.min(fingerprint.len())],
+                        e
+                    ));
+                }
+                continue;
+            }
+            Err(e) => {
+                // A key-rotation error may leave the in-memory state partially
+                // mutated. Nothing has been written to disk yet, so abort the
+                // whole batch and leave the vault untouched.
+                anyhow::bail!(
+                    "revocation of '{}' failed during key rotation: {} — aborting; no changes were written",
+                    &fingerprint[..12.min(fingerprint.len())],
+                    e
+                );
+            }
+        };
+
+        let env_keys_rotated = result_v2.rotated_env_ciphers.len();
+        if let Some(nc) = result_v2.new_vault_cipher {
+            current_vault_cipher = nc;
+        }
+        for (env_name, cipher) in result_v2.rotated_env_ciphers {
+            final_env_ciphers.insert(env_name, cipher);
+        }
+
+        succeeded.push(RevokedMember {
+            input: fingerprint.clone(),
+            fingerprint: target_fp,
+            cascade_revoked: result_v2.cascade_revoked,
+            affected_envs: result_v2.affected_envs,
+            env_keys_rotated,
+        });
+    }
+
+    // ── Phase 2: persist everything from one consistent state ───────────
+    if !succeeded.is_empty() {
+        let vault_key_rotated = current_vault_cipher.key_bytes() != ctx.vault_cipher.key_bytes();
+
+        // Prepare all re-encrypted payloads BEFORE writing anything, so a
+        // decryption failure aborts with the vault untouched. The files on
+        // disk are still sealed under the pre-batch ciphers held in `ctx`.
+        let mut reencrypted_envs = Vec::new();
+        for (env_name, new_cipher) in &final_env_ciphers {
+            let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
+            if env_path.exists() {
+                let old_cipher = ctx.cipher_for_env(env_name).ok_or_else(|| {
+                    anyhow::anyhow!("no access to env '{}' for re-encryption", env_name)
+                })?;
+                let encrypted = env_file::read_encrypted_env(&env_path)?;
+                let plaintext = env_file::decrypt_env(&encrypted, old_cipher)?;
+                let re_encrypted = env_file::encrypt_env(&plaintext, new_cipher, env_name)?;
+                reencrypted_envs.push((env_path, re_encrypted));
+            }
+        }
+
+        let resealed_manifest = if vault_key_rotated {
+            Some(
+                ctx.manifest
+                    .to_sealed_bytes(&current_vault_cipher)
+                    .map_err(|e| anyhow::anyhow!("failed to reseal manifest: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        // The deploy key (if any) is sealed with the vault cipher and must
+        // follow the rotation, or git-sync auth is silently lost.
+        let deploy_key_path = ctx.paths.deploy_key_path(&ctx.vault_name);
+        let deploy_key = if vault_key_rotated {
+            match sigyn_engine::sync::deploy_key::load_and_unseal(
+                &deploy_key_path,
+                &ctx.vault_cipher,
+            ) {
+                Ok(dk) => dk,
+                Err(e) => {
+                    eprintln!(
+                        "{} could not unseal deploy key for re-sealing after key rotation: {}",
+                        style("warning:").yellow().bold(),
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Write phase: all fallible crypto is done; only raw I/O remains.
+        for (env_path, re_encrypted) in &reencrypted_envs {
+            env_file::write_encrypted_env(env_path, re_encrypted)?;
+        }
+        if let Some(sealed) = resealed_manifest {
+            crate::config::secure_write(&ctx.paths.manifest_path(&ctx.vault_name), &sealed)?;
+        }
+        if vault_key_rotated {
+            let audit_path = ctx.paths.audit_path(&ctx.vault_name);
+            if audit_path.exists() {
+                let old_audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    ctx.vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &ctx.manifest.vault_id,
+                )?;
+                let new_audit_cipher = sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
+                    current_vault_cipher.key_bytes(),
+                    b"sigyn-audit-v1",
+                    &ctx.manifest.vault_id,
+                )?;
+                AuditLog::rekey(&audit_path, old_audit_cipher, new_audit_cipher)
+                    .map_err(|e| anyhow::anyhow!("failed to rekey audit log: {}", e))?;
+            }
+            if let Some((private_key, public_key)) = deploy_key {
+                if let Err(e) = sigyn_engine::sync::deploy_key::seal_and_save(
+                    &deploy_key_path,
+                    &private_key,
+                    &public_key,
+                    &current_vault_cipher,
+                ) {
+                    eprintln!(
+                        "{} failed to reseal deploy key with rotated vault key: {} — git sync may need a new deploy key",
+                        style("warning:").yellow().bold(),
+                        e
+                    );
+                }
+            }
+        }
+
+        policy
+            .save_signed(
+                &ctx.paths.policy_path(&ctx.vault_name),
+                &current_vault_cipher,
+                ctx.loaded_identity.signing_key(),
+                &ctx.manifest.vault_id,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
+        save_header(
+            &header,
+            &ctx.paths,
+            &ctx.vault_name,
+            ctx.loaded_identity.signing_key(),
+            ctx.manifest.vault_id,
+        )?;
+
+        // Record the revocations in the (now rekeyed) audit log. Must use the
+        // rotated cipher — the stale ctx.vault_cipher can no longer open it.
+        for member in &succeeded {
+            audit_log_with_cipher(
+                ctx,
+                AuditAction::MemberRevoked {
+                    fingerprint: member.fingerprint.clone(),
+                },
+                &current_vault_cipher,
+            )?;
+            for cascade_fp in &member.cascade_revoked {
+                audit_log_with_cipher(
+                    ctx,
+                    AuditAction::MemberRevoked {
+                        fingerprint: cascade_fp.clone(),
+                    },
+                    &current_vault_cipher,
+                )?;
+            }
+        }
+
+        for member in &succeeded {
+            crate::notifications::try_notify(
+                &ctx.vault_name,
+                None,
+                None,
+                &ctx.fingerprint.to_hex(),
+                "member.revoked",
+                &format!(
+                    "Member {} revoked{}",
+                    &member.input[..12.min(member.input.len())],
+                    if cascade { " (cascade)" } else { "" }
+                ),
+            );
+
+            if json {
+                let cascade_hex: Vec<String> = member
+                    .cascade_revoked
+                    .iter()
+                    .map(|fp| fp.to_hex())
+                    .collect();
+                json_results.push(serde_json::json!({
+                    "action": "revoked",
+                    "fingerprint": member.input,
+                    "cascade": cascade,
+                    "cascade_revoked": cascade_hex,
+                    "affected_envs": member.affected_envs,
+                    "env_keys_rotated": member.env_keys_rotated,
+                }));
+            } else if !is_batch {
+                crate::output::print_success(&format!(
+                    "Revoked access for {}{}",
+                    &member.input[..12.min(member.input.len())],
+                    if cascade { " (cascade)" } else { "" }
+                ));
+                if !member.cascade_revoked.is_empty() {
+                    println!(
+                        "  Cascade revoked {} additional member(s)",
+                        member.cascade_revoked.len()
+                    );
+                }
+                if !member.affected_envs.is_empty() {
+                    crate::output::print_info(&format!(
+                        "Env keys rotated for: {}",
+                        member.affected_envs.join(", ")
+                    ));
+                }
+            } else {
+                crate::output::print_success(&format!(
+                    "Revoked {}{}",
+                    &member.input[..12.min(member.input.len())],
+                    if cascade { " (cascade)" } else { "" }
+                ));
+            }
+        }
+    }
+
+    let revoked = succeeded.len();
+
+    if json {
+        if is_batch {
+            crate::output::print_json(&json_results)?;
+        } else if let Some(result) = json_results.into_iter().next() {
+            crate::output::print_json(&result)?;
+        }
+    } else if is_batch {
+        println!(
+            "\n{} revoked, {} failed",
+            style(revoked).green().bold(),
+            if failed > 0 {
+                style(failed).red().bold()
+            } else {
+                style(failed).dim()
+            }
+        );
+    }
+
+    if failed > 0 && !is_batch {
+        anyhow::bail!("revocation failed");
+    }
+
+    // Auto-sync after revoke
+    if revoked > 0 && crate::config::load_config().auto_sync {
+        eprintln!("{} auto-syncing...", style("note:").cyan().bold());
+        if let Err(e) = crate::commands::sync::auto_push(&ctx.vault_name) {
+            eprintln!(
+                "{} auto-sync failed: {}",
+                style("warning:").yellow().bold(),
+                e
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub fn handle(
     cmd: DelegationCommands,
     vault: Option<&str>,
     identity: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let vault_name = vault.unwrap_or("default");
-
     match cmd {
         DelegationCommands::Tree => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
 
             let trees = build_delegation_tree(&ctx.policy, &ctx.manifest.owner);
 
@@ -348,7 +783,7 @@ pub fn handle(
             envs,
             save_to_vault,
         } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             let role_enum = Role::from_str_name(&role).ok_or_else(|| {
@@ -482,6 +917,10 @@ pub fn handle(
             let invitation_id = uuid::Uuid::new_v4();
             let secret_patterns = vec!["*".into()];
             let max_delegation_depth = 0u32;
+            // Timestamps must be fixed BEFORE signing: format v3 covers both
+            // created_at and expires_at so the invitee can't extend/remove them.
+            let now = chrono::Utc::now();
+            let expires_at = Some(now + chrono::Duration::days(7));
             let signing_payload = InvitationFile::signing_payload(
                 invitation_id,
                 &ctx.vault_name,
@@ -491,10 +930,11 @@ pub fn handle(
                 &allowed_envs,
                 &secret_patterns,
                 max_delegation_depth,
+                &now,
+                &expires_at,
             );
             let invitation_sig = ctx.loaded_identity.signing_key().sign(&signing_payload);
 
-            let now = chrono::Utc::now();
             let invitation_file = InvitationFile {
                 id: invitation_id,
                 vault_name: ctx.vault_name.clone(),
@@ -506,7 +946,7 @@ pub fn handle(
                 max_delegation_depth,
                 signature: invitation_sig,
                 created_at: now,
-                expires_at: Some(now + chrono::Duration::days(7)),
+                expires_at,
             };
 
             let invitations_dir = home.join("invitations");
@@ -583,7 +1023,9 @@ pub fn handle(
                     "signature_verified": true,
                 }))?;
             } else {
-                crate::output::print_success("Invitation accepted");
+                crate::output::print_success(
+                    "Invitation verified — access is active once the owner pushes",
+                );
                 println!("  Invitation ID: {}", invite_file.id);
                 println!("  Vault:         {}", invite_file.vault_name);
                 println!(
@@ -629,282 +1071,13 @@ pub fn handle(
             fingerprints,
             cascade,
         } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
-            check_access(&ctx, AccessAction::ManageMembers, None)?;
-
-            let is_batch = fingerprints.len() > 1;
-            let mut revoked = 0usize;
-            let mut failed = 0usize;
-            let mut json_results: Vec<serde_json::Value> = Vec::new();
-
-            let home = sigyn_home();
-            let store = IdentityStore::new(home);
-            let identities = store
-                .list()
-                .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?;
-
-            // Mutable state that accumulates across iterations
-            let mut header: EnvelopeHeader = ctx.header.clone();
-            let mut policy = ctx.policy.clone();
-            let mut effective_vault_cipher_key = *ctx.vault_cipher.key_bytes();
-
-            for fingerprint in &fingerprints {
-                let target_fp = match KeyFingerprint::from_hex(fingerprint) {
-                    Ok(fp) => fp,
-                    Err(e) => {
-                        failed += 1;
-                        if json {
-                            json_results.push(serde_json::json!({
-                                "fingerprint": fingerprint,
-                                "status": "failed",
-                                "error": e.to_string(),
-                            }));
-                        } else {
-                            crate::output::print_error(&format!(
-                                "invalid fingerprint '{}': {}",
-                                fingerprint, e
-                            ));
-                        }
-                        continue;
-                    }
-                };
-
-                // Build remaining pubkeys from current policy state
-                let mut remaining_pubkeys: Vec<(
-                    KeyFingerprint,
-                    sigyn_engine::crypto::keys::X25519PublicKey,
-                )> = Vec::new();
-                remaining_pubkeys.push((
-                    ctx.fingerprint.clone(),
-                    ctx.loaded_identity.identity.encryption_pubkey.clone(),
-                ));
-                for member_policy in policy.members.values() {
-                    if let Some(id) = identities
-                        .iter()
-                        .find(|id| id.fingerprint == member_policy.fingerprint)
-                    {
-                        remaining_pubkeys
-                            .push((id.fingerprint.clone(), id.encryption_pubkey.clone()));
-                    }
-                }
-
-                // Build member_env_access map
-                let mut member_env_access = std::collections::BTreeMap::new();
-                member_env_access
-                    .insert(ctx.fingerprint.clone(), ctx.manifest.environments.clone());
-                for mp in policy.members.values() {
-                    let envs = if mp.allowed_envs.iter().any(|e| e == "*") {
-                        ctx.manifest.environments.clone()
-                    } else {
-                        mp.allowed_envs.clone()
-                    };
-                    member_env_access.insert(mp.fingerprint.clone(), envs);
-                }
-
-                let result_v2 = match sigyn_engine::delegation::revoke::revoke_member(
-                    &target_fp,
-                    cascade,
-                    &mut policy,
-                    &mut header,
-                    ctx.manifest.vault_id,
-                    &remaining_pubkeys,
-                    &member_env_access,
-                ) {
-                    Ok((r,)) => r,
-                    Err(e) => {
-                        failed += 1;
-                        if json {
-                            json_results.push(serde_json::json!({
-                                "fingerprint": fingerprint,
-                                "status": "failed",
-                                "error": e.to_string(),
-                            }));
-                        } else {
-                            crate::output::print_error(&format!(
-                                "revocation failed for '{}': {}",
-                                &fingerprint[..12.min(fingerprint.len())],
-                                e
-                            ));
-                        }
-                        continue;
-                    }
-                };
-
-                // Re-encrypt affected env files
-                for (env_name, new_cipher) in &result_v2.rotated_env_ciphers {
-                    let env_path = ctx.paths.env_path(&ctx.vault_name, env_name);
-                    if env_path.exists() {
-                        let old_cipher = ctx.cipher_for_env(env_name).ok_or_else(|| {
-                            anyhow::anyhow!("no access to env '{}' for re-encryption", env_name)
-                        })?;
-                        let encrypted = env_file::read_encrypted_env(&env_path)?;
-                        let plaintext = env_file::decrypt_env(&encrypted, old_cipher)?;
-                        let re_encrypted = env_file::encrypt_env(&plaintext, new_cipher, env_name)?;
-                        env_file::write_encrypted_env(&env_path, &re_encrypted)?;
-                    }
-                }
-
-                // Re-encrypt manifest, audit log, and policy with new vault cipher if rotated
-                if let Some(ref new_vc) = result_v2.new_vault_cipher {
-                    // Re-encrypt manifest with new vault key
-                    let manifest_path = ctx.paths.manifest_path(&ctx.vault_name);
-                    let manifest_data = std::fs::read(&manifest_path)?;
-                    let manifest = sigyn_engine::vault::VaultManifest::from_sealed_bytes(
-                        &ctx.vault_cipher,
-                        &manifest_data,
-                        ctx.manifest.vault_id,
-                    )?;
-                    let resealed = manifest.to_sealed_bytes(new_vc)?;
-                    crate::config::secure_write(&manifest_path, &resealed)?;
-
-                    // Re-encrypt audit log with new vault cipher
-                    let audit_path = ctx.paths.audit_path(&ctx.vault_name);
-                    if audit_path.exists() {
-                        let old_audit_cipher =
-                            sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                                ctx.vault_cipher.key_bytes(),
-                                b"sigyn-audit-v1",
-                                &ctx.manifest.vault_id,
-                            )?;
-                        let new_audit_cipher =
-                            sigyn_engine::crypto::sealed::derive_file_cipher_with_salt(
-                                new_vc.key_bytes(),
-                                b"sigyn-audit-v1",
-                                &ctx.manifest.vault_id,
-                            )?;
-                        AuditLog::rekey(&audit_path, old_audit_cipher, new_audit_cipher)
-                            .map_err(|e| anyhow::anyhow!("failed to rekey audit log: {}", e))?;
-                    }
-
-                    // Update the effective vault cipher key for saving policy below
-                    effective_vault_cipher_key = *new_vc.key_bytes();
-                }
-
-                // Audit
-                audit_log(
-                    &ctx,
-                    AuditAction::MemberRevoked {
-                        fingerprint: target_fp.clone(),
-                    },
-                )?;
-                for cascade_fp in &result_v2.cascade_revoked {
-                    audit_log(
-                        &ctx,
-                        AuditAction::MemberRevoked {
-                            fingerprint: cascade_fp.clone(),
-                        },
-                    )?;
-                }
-
-                crate::notifications::try_notify(
-                    &ctx.vault_name,
-                    None,
-                    None,
-                    &ctx.fingerprint.to_hex(),
-                    "member.revoked",
-                    &format!(
-                        "Member {} revoked{}",
-                        &fingerprint[..12.min(fingerprint.len())],
-                        if cascade { " (cascade)" } else { "" }
-                    ),
-                );
-
-                revoked += 1;
-
-                if json {
-                    let cascade_hex: Vec<String> = result_v2
-                        .cascade_revoked
-                        .iter()
-                        .map(|fp| fp.to_hex())
-                        .collect();
-                    json_results.push(serde_json::json!({
-                        "action": "revoked",
-                        "fingerprint": fingerprint,
-                        "cascade": cascade,
-                        "cascade_revoked": cascade_hex,
-                        "affected_envs": result_v2.affected_envs,
-                        "env_keys_rotated": result_v2.rotated_env_ciphers.len(),
-                    }));
-                } else if !is_batch {
-                    crate::output::print_success(&format!(
-                        "Revoked access for {}{}",
-                        &fingerprint[..12.min(fingerprint.len())],
-                        if cascade { " (cascade)" } else { "" }
-                    ));
-                    if !result_v2.cascade_revoked.is_empty() {
-                        println!(
-                            "  Cascade revoked {} additional member(s)",
-                            result_v2.cascade_revoked.len()
-                        );
-                    }
-                    if !result_v2.affected_envs.is_empty() {
-                        crate::output::print_info(&format!(
-                            "Env keys rotated for: {}",
-                            result_v2.affected_envs.join(", ")
-                        ));
-                    }
-                } else {
-                    crate::output::print_success(&format!(
-                        "Revoked {}{}",
-                        &fingerprint[..12.min(fingerprint.len())],
-                        if cascade { " (cascade)" } else { "" }
-                    ));
-                }
-            }
-
-            // Save policy and header once after all revocations
-            // Use effective vault cipher which may have been rotated during revocation
-            let save_cipher =
-                sigyn_engine::crypto::vault_cipher::VaultCipher::new(effective_vault_cipher_key);
-            policy
-                .save_signed(
-                    &ctx.paths.policy_path(&ctx.vault_name),
-                    &save_cipher,
-                    ctx.loaded_identity.signing_key(),
-                    &ctx.manifest.vault_id,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to save policy: {}", e))?;
-            save_header(
-                &header,
-                &ctx.paths,
-                &ctx.vault_name,
-                ctx.loaded_identity.signing_key(),
-                ctx.manifest.vault_id,
-            )?;
-
-            if json {
-                if is_batch {
-                    crate::output::print_json(&json_results)?;
-                } else if let Some(result) = json_results.into_iter().next() {
-                    crate::output::print_json(&result)?;
-                }
-            } else if is_batch {
-                println!(
-                    "\n{} revoked, {} failed",
-                    style(revoked).green().bold(),
-                    if failed > 0 {
-                        style(failed).red().bold()
-                    } else {
-                        style(failed).dim()
-                    }
-                );
-            }
-
-            if failed > 0 && !is_batch {
-                anyhow::bail!("revocation failed");
-            }
-
-            // Auto-sync after revoke
-            if crate::config::load_config().auto_sync {
-                eprintln!("{} auto-syncing...", style("note:").cyan().bold());
-                if let Err(e) = crate::commands::sync::auto_push(vault_name) {
-                    eprintln!(
-                        "{} auto-sync failed: {}",
-                        style("warning:").yellow().bold(),
-                        e
-                    );
-                }
-            }
+            let ctx = unlock_vault(identity, vault, None)?;
+            // Crash-safe batch revocation: all rotations are computed in
+            // memory and threaded through, then persisted from one consistent
+            // state. Prevents the header/data key mismatch that used to brick
+            // the vault on a multi-fingerprint revoke (finding C2).
+            let fps: Vec<String> = fingerprints.clone();
+            revoke_members(&ctx, &fps, cascade, json)?;
         }
         DelegationCommands::Pending => {
             let home = sigyn_home();
@@ -960,7 +1133,7 @@ pub fn handle(
             }
         }
         DelegationCommands::BulkInvite { file, force } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             // Parse JSON file: [{"fingerprint": "...", "role": "contributor", "envs": "dev,staging"}, ...]
@@ -1178,7 +1351,7 @@ pub fn handle(
             cascade,
             force,
         } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             // Parse JSON file: ["fingerprint1", "fingerprint2", ...]
@@ -1219,22 +1392,14 @@ pub fn handle(
                 }
             }
 
-            // Reuse the existing revoke logic by converting to hex strings and delegating
+            // Reuse the crash-safe revoke path directly on the already-unlocked
+            // context — no second unlock / passphrase prompt (was: recursive
+            // re-invocation of handle()).
             let hex_strings: Vec<String> = fps.iter().map(|fp| fp.to_hex()).collect();
-            // We can just delegate to the Revoke handler — but to avoid code duplication
-            // we'll inline the same pattern
-            return super::delegation::handle(
-                DelegationCommands::Revoke {
-                    fingerprints: hex_strings,
-                    cascade,
-                },
-                vault,
-                identity,
-                json,
-            );
+            revoke_members(&ctx, &hex_strings, cascade, json)?;
         }
         DelegationCommands::GrantEnv { fingerprints, env } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             // Verify env exists
@@ -1388,7 +1553,7 @@ pub fn handle(
                 println!(
                     "\n{} granted env '{}', {} failed",
                     style(granted).green().bold(),
-                    &env,
+                    env,
                     if failed > 0 {
                         style(failed).red().bold()
                     } else {
@@ -1398,7 +1563,7 @@ pub fn handle(
             }
         }
         DelegationCommands::RevokeEnv { fingerprints, env } => {
-            let ctx = unlock_vault(identity, Some(vault_name), None)?;
+            let ctx = unlock_vault(identity, vault, None)?;
             check_access(&ctx, AccessAction::ManageMembers, None)?;
 
             let home = sigyn_home();

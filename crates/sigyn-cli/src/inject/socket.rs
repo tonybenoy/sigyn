@@ -1,8 +1,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use sigyn_engine::vault::PlaintextEnv;
+
+/// Serializes the process-global umask get/set/restore around socket bind.
+/// `libc::umask` is process-wide, so two threads binding sockets concurrently
+/// could otherwise interleave and leave the umask at the restrictive value.
+static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serve secrets over a Unix domain socket.
 /// Clients connect and send a key name; server responds with the value.
@@ -15,26 +21,41 @@ use sigyn_engine::vault::PlaintextEnv;
 ///     - `QUIT` / `EXIT` — shuts down the server
 pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     // Bind the socket in a secure directory (typically under ~/.sigyn/).
-    // Try to bind first; if EADDRINUSE, verify the socket is stale before removing.
-    let listener = match UnixListener::bind(socket_path) {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // Check if the existing socket is actively in use
-            match std::os::unix::net::UnixStream::connect(socket_path) {
-                Ok(_) => {
-                    anyhow::bail!(
+    // Set a restrictive umask around bind() so the socket file is created
+    // owner-only (0600) atomically — otherwise there is a brief window under a
+    // lax umask where the socket is world-accessible before we chmod it.
+    let listener = {
+        // Hold the process-global umask across the whole bind so a concurrent
+        // binder can't corrupt the saved value (poisoned lock is fine — the
+        // guard is only held for these few lines).
+        let _umask_guard = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: umask is a simple process-global getter/setter; we restore it
+        // immediately after binding, under the lock above. Use 0o077 (strip all
+        // group/other access) rather than 0o177: umask is process-wide, so a
+        // concurrent directory creation on another thread would otherwise lose
+        // its owner-execute bit and become non-traversable. 0o077 still makes
+        // the socket owner-only, which is the security goal.
+        let prev_umask = unsafe { libc::umask(0o077) };
+        let result = match UnixListener::bind(socket_path) {
+            Ok(l) => Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // Check if the existing socket is actively in use
+                match std::os::unix::net::UnixStream::connect(socket_path) {
+                    Ok(_) => Err(anyhow::anyhow!(
                         "socket {} is already in use by another process",
                         socket_path
-                    );
-                }
-                Err(_) => {
-                    // Stale socket — safe to remove and rebind
-                    std::fs::remove_file(socket_path)?;
-                    UnixListener::bind(socket_path)?
+                    )),
+                    Err(_) => {
+                        // Stale socket — safe to remove and rebind
+                        std::fs::remove_file(socket_path)?;
+                        UnixListener::bind(socket_path).map_err(anyhow::Error::from)
+                    }
                 }
             }
-        }
-        Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
+        };
+        unsafe { libc::umask(prev_umask) };
+        result?
     };
 
     // Restrict socket permissions to owner only (rw-------)

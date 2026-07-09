@@ -55,7 +55,32 @@ pub enum IdentityCommands {
     RotateKeys {
         /// Identity name or fingerprint (uses default if omitted)
         identity: Option<String>,
+        /// Force rotation even if the identity is a member of local vaults,
+        /// and skip the interactive confirmation. DANGEROUS: vault headers are
+        /// NOT re-encrypted, so the new key cannot decrypt existing vaults.
+        #[arg(long)]
+        force: bool,
     },
+}
+
+/// List local vaults whose envelope headers contain a key slot for `fp`
+/// (i.e. vaults this identity can decrypt — as owner or member).
+fn local_vault_memberships(fp: &sigyn_engine::crypto::KeyFingerprint) -> Vec<String> {
+    let home = sigyn_home();
+    let paths = sigyn_engine::vault::VaultPaths::new(home);
+    let vaults = paths.list_vaults().unwrap_or_default();
+    let mut member_of = Vec::new();
+    for vault_name in &vaults {
+        let members_path = paths.members_path(vault_name);
+        if let Ok(data) = std::fs::read(&members_path) {
+            if let Ok(header) = sigyn_engine::crypto::envelope::extract_header_unverified(&data) {
+                if sigyn_engine::crypto::envelope::has_recipient(&header, fp) {
+                    member_of.push(vault_name.clone());
+                }
+            }
+        }
+    }
+    member_of
 }
 
 pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
@@ -229,25 +254,7 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
 
             // Check if identity is a member of any local vault
             if !force {
-                let home = sigyn_home();
-                let paths = sigyn_engine::vault::VaultPaths::new(home);
-                let vaults = paths.list_vaults().unwrap_or_default();
-                let mut member_of = Vec::new();
-                for vault_name in &vaults {
-                    let members_path = paths.members_path(vault_name);
-                    if let Ok(data) = std::fs::read(&members_path) {
-                        if let Ok(header) =
-                            sigyn_engine::crypto::envelope::extract_header_unverified(&data)
-                        {
-                            if sigyn_engine::crypto::envelope::has_recipient(
-                                &header,
-                                &id.fingerprint,
-                            ) {
-                                member_of.push(vault_name.clone());
-                            }
-                        }
-                    }
-                }
+                let member_of = local_vault_memberships(&id.fingerprint);
                 if !member_of.is_empty() {
                     anyhow::bail!(
                         "identity '{}' is a member of vault(s): {}. \
@@ -291,9 +298,27 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                 crate::output::print_success(&format!("Identity '{}' deleted", id.profile.name));
             }
         }
-        IdentityCommands::RotateKeys { identity } => {
+        IdentityCommands::RotateKeys { identity, force } => {
             let id = resolve_identity(&store, identity.as_deref())?;
             let old_fp_hex = id.fingerprint.to_hex();
+
+            // Rotation does NOT re-encrypt vault headers: the new key cannot
+            // decrypt any existing vault. For vaults owned by this identity
+            // there is no one left who could re-invite the new key, so the
+            // vault data would become permanently unrecoverable.
+            let member_of = local_vault_memberships(&id.fingerprint);
+            if !member_of.is_empty() && !force {
+                anyhow::bail!(
+                    "identity '{}' is a member or owner of local vault(s): {}.\n\
+                     Rotating keys creates a NEW fingerprint without re-encrypting vault headers, so the new key cannot decrypt these vaults:\n\
+                       - for vaults owned by someone else: ask the owner to run `sigyn delegation revoke {}` and re-invite your new fingerprint\n\
+                       - for vaults YOU own: no one can re-invite you — the vault would become permanently unreadable\n\
+                     Transfer ownership or migrate your vaults first, or pass --force to rotate anyway (DANGEROUS).",
+                    id.profile.name,
+                    member_of.join(", "),
+                    old_fp_hex
+                );
+            }
 
             eprintln!(
                 "{} Key rotation creates a NEW fingerprint. You must be re-invited to all vaults.",
@@ -309,6 +334,12 @@ pub fn handle(cmd: IdentityCommands, json: bool) -> Result<()> {
                     println!("Aborted.");
                     return Ok(());
                 }
+            } else if !force {
+                anyhow::bail!(
+                    "refusing to rotate keys non-interactively without --force \
+                     (key rotation is irreversible: the old key is deleted and \
+                     vault headers are not re-encrypted)"
+                );
             }
 
             let mut passphrase =

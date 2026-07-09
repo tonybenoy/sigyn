@@ -213,17 +213,25 @@ pub fn unlock_and_cache_vault(
             WebError::Forbidden("header signature verification failed: no known signer".into())
         })?;
 
-    // Load and verify policy
-    let policy_candidates: Vec<sigyn_engine::crypto::keys::VerifyingKeyWrapper> = {
+    // Load and verify policy, recording WHICH key verified it. The signer's
+    // authority is checked against the device-pinned trust anchor below —
+    // never against the freshly loaded policy itself (finding C1).
+    let policy_candidates: Vec<(
+        KeyFingerprint,
+        sigyn_engine::crypto::keys::VerifyingKeyWrapper,
+    )> = {
         let mut pc = Vec::new();
         // Header signer first
         if let Some(signer) = identities
             .iter()
             .find(|id| id.fingerprint == header_signer_fp)
         {
-            pc.push(signer.signing_pubkey.clone());
+            pc.push((signer.fingerprint.clone(), signer.signing_pubkey.clone()));
         } else if loaded_identity_fingerprint == header_signer_fp {
-            pc.push(loaded_identity_signing_pubkey.clone());
+            pc.push((
+                loaded_identity_fingerprint.clone(),
+                loaded_identity_signing_pubkey.clone(),
+            ));
         }
         // Owner if different
         if header_signer_fp != manifest.owner {
@@ -231,30 +239,27 @@ pub fn unlock_and_cache_vault(
                 .iter()
                 .find(|id| id.fingerprint == manifest.owner)
             {
-                pc.push(owner.signing_pubkey.clone());
+                pc.push((owner.fingerprint.clone(), owner.signing_pubkey.clone()));
             }
         }
         // All others
         for id in &identities {
-            if !pc
-                .iter()
-                .any(|k| k.to_bytes() == id.signing_pubkey.to_bytes())
-            {
-                pc.push(id.signing_pubkey.clone());
+            if !pc.iter().any(|(fp, _)| *fp == id.fingerprint) {
+                pc.push((id.fingerprint.clone(), id.signing_pubkey.clone()));
             }
         }
-        if !pc
-            .iter()
-            .any(|k| k.to_bytes() == loaded_identity_signing_pubkey.to_bytes())
-        {
-            pc.push(loaded_identity_signing_pubkey);
+        if !pc.iter().any(|(fp, _)| *fp == loaded_identity_fingerprint) {
+            pc.push((
+                loaded_identity_fingerprint.clone(),
+                loaded_identity_signing_pubkey,
+            ));
         }
         pc
     };
 
-    let policy = policy_candidates
+    let (policy, policy_signer_fp) = policy_candidates
         .iter()
-        .find_map(|key| {
+        .find_map(|(fp, key)| {
             VaultPolicy::load_signed(
                 &paths.policy_path(vault_name),
                 &vault_cipher,
@@ -262,10 +267,25 @@ pub fn unlock_and_cache_vault(
                 &manifest.vault_id,
             )
             .ok()
+            .map(|p| (p, fp.clone()))
         })
         .ok_or_else(|| WebError::Forbidden("policy signature verification failed".into()))?;
 
-    // Verify header signer is authorized (owner or admin+)
+    // --- Policy-signer trust anchor (finding C1) ---
+    // Shared with the CLI unlock path via sigyn-engine so the two surfaces
+    // cannot diverge. A policy may not vouch for its own signer; a non-owner
+    // policy is trusted only if its signer was an admin in the last policy
+    // accepted on this device (AccessDenied maps to a 403 via WebError::from).
+    sigyn_engine::vault::trust::enforce_policy_trust_anchor(
+        &state.sigyn_home,
+        vault_name,
+        &manifest.owner,
+        &policy,
+        &policy_signer_fp,
+    )?;
+
+    // Verify header signer is authorized (owner or admin+). The policy consulted
+    // here has itself been anchored above.
     if header_signer_fp != manifest.owner {
         match policy.get_member(&header_signer_fp) {
             Some(member) if member.role.can_manage_policy() => {}

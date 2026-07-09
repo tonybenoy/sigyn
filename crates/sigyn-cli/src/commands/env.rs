@@ -3,11 +3,12 @@ use clap::Subcommand;
 use console::style;
 use sigyn_engine::audit::entry::AuditOutcome;
 use sigyn_engine::audit::{AuditAction, AuditLog};
+use sigyn_engine::environment::policy::EnvironmentPolicy;
 use sigyn_engine::environment::promotion::promote_env;
 use sigyn_engine::policy::engine::AccessAction;
 use sigyn_engine::vault::{env_file, PlaintextEnv, VaultPaths};
 
-use super::secret::{check_access, unlock_vault};
+use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
 use crate::config::sigyn_home;
 
 #[derive(Subcommand)]
@@ -57,6 +58,24 @@ pub enum EnvCommands {
         #[arg(long, value_delimiter = ',')]
         keys: Option<Vec<String>>,
     },
+}
+
+/// Evaluate a single environment-scoped access decision against `env`.
+///
+/// Unlike [`secret::check_access`], which always evaluates against the vault
+/// context's *current* env (`ctx.env_name`), this lets the caller target an
+/// arbitrary environment. `env promote` needs this to authorize the SOURCE
+/// (Read) and TARGET (Write) environments independently — a promotion moves
+/// secret values out of the source and into the target, so the actor must be
+/// able to both read the source and write the target.
+///
+/// Delegates to [`secret::check_access_for_env`], which runs the same
+/// hierarchy-aware evaluation as every other access check (so org-level
+/// constraints on org-linked vaults are applied here too) and handles the MFA
+/// re-prompt. Promotion is a bulk env-to-env copy, so this is a keyless
+/// (all-keys) request — a pattern-restricted member is correctly denied.
+fn authorize_env_action(ctx: &UnlockedVaultContext, action: AccessAction, env: &str) -> Result<()> {
+    super::secret::check_access_for_env(ctx, action, None, env)
 }
 
 pub fn handle(
@@ -592,6 +611,30 @@ pub fn handle(
             let mut json_results: Vec<serde_json::Value> = Vec::new();
 
             for target in &to {
+                // Authorize BOTH environments for this step: the actor must be
+                // able to Read the source and Write the target. Previously only
+                // the source (`from`) was checked via check_access(Promote),
+                // which let a member with no write access to the target env push
+                // secrets into it. The source changes each iteration in a chain
+                // (staging,prod), so re-check per step.
+                authorize_env_action(&ctx, AccessAction::Read, &current_source)?;
+                authorize_env_action(&ctx, AccessAction::Write, target)?;
+
+                // Enforce any promotion-approval policy configured for the
+                // TARGET env (min_approvals / allowed_promoters). No approvals
+                // are collected on the CLI path today, so this blocks promotion
+                // into an approval-gated env until an approval workflow supplies
+                // them. `configured_for` returns None until a signed per-env
+                // policy store is wired in, so this is a no-op for now (see the
+                // security report and EnvironmentPolicy docs).
+                if let Some(env_policy) = EnvironmentPolicy::configured_for(target) {
+                    env_policy
+                        .check_approvals(&[], &ctx.fingerprint)
+                        .map_err(|e| {
+                            anyhow::anyhow!("promotion to '{}' not authorized: {}", target, e)
+                        })?;
+                }
+
                 // Read source environment
                 let source_cipher = ctx
                     .cipher_for_env(&current_source)

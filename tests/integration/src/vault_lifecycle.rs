@@ -50,7 +50,7 @@ fn test_full_vault_lifecycle() {
     let header = seal_v2(
         &vault_key,
         &env_keys,
-        &[loaded.identity.encryption_pubkey.clone()],
+        std::slice::from_ref(&loaded.identity.encryption_pubkey),
         &env_recipients,
         vault_id,
     )

@@ -135,11 +135,78 @@ pub fn save_config(config: &CliConfig) -> anyhow::Result<()> {
 
 /// Returns true if the terminal is interactive (safe to show prompts).
 ///
-/// Returns false when stderr is not a terminal, or when running in CI
-/// or with `SIGYN_NON_INTERACTIVE` set.
+/// Requires both stdin and stderr to be terminals: interactive prompts
+/// (e.g. `dialoguer::Confirm`) read their answer from stdin, so a piped
+/// stdin (`echo | sigyn run ...`) must be treated as non-interactive even
+/// when stderr is a TTY — otherwise piped data silently answers the prompt.
+/// Also returns false when running in CI or with `SIGYN_NON_INTERACTIVE` set.
 pub fn is_interactive() -> bool {
     use std::io::IsTerminal;
-    std::io::stderr().is_terminal()
+    std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
         && std::env::var("CI").is_err()
         && std::env::var("SIGYN_NON_INTERACTIVE").is_err()
+}
+
+/// One-time MFA code supplied via the environment, if any.
+///
+/// Only `SIGYN_MFA_CODE` is consulted — never `SIGYN_PASSPHRASE`. A
+/// passphrase is not a one-time code: falling back to it would silently
+/// feed the passphrase into TOTP/backup-code prompts and make MFA
+/// impossible to complete in any script or CI job that sets
+/// `SIGYN_PASSPHRASE`.
+fn mfa_code_from_env() -> Option<String> {
+    // Delegates to a pure helper so tests can exercise the lookup rule without
+    // mutating the process environment (which is a data race — and UB — against
+    // every other thread reading the environment in a parallel test run).
+    mfa_code_from(|k| std::env::var(k).ok())
+}
+
+/// The env-lookup rule for one-time MFA codes, parameterized over the getter so
+/// it is testable in isolation: consult `SIGYN_MFA_CODE` only, never
+/// `SIGYN_PASSPHRASE`.
+fn mfa_code_from(getenv: impl Fn(&str) -> Option<String>) -> Option<String> {
+    getenv("SIGYN_MFA_CODE")
+}
+
+/// Read a one-time MFA code (TOTP or backup code).
+///
+/// Unlike `read_passphrase`, this never falls back to `SIGYN_PASSPHRASE`.
+/// For scripted/non-interactive use, supply the code via `SIGYN_MFA_CODE`.
+pub fn read_code(prompt: &str) -> anyhow::Result<String> {
+    if let Some(code) = mfa_code_from_env() {
+        return Ok(code);
+    }
+    rpassword::prompt_password(prompt).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read MFA code (set SIGYN_MFA_CODE for non-interactive use): {}",
+            e
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pure test of the env-lookup rule — no process-environment mutation, so it
+    // cannot race with (or corrupt) other tests running in parallel.
+    #[test]
+    fn mfa_code_reads_only_sigyn_mfa_code_never_passphrase() {
+        // Env where SIGYN_PASSPHRASE is set but SIGYN_MFA_CODE is not: the code
+        // lookup must yield nothing — it must never fall back to the passphrase.
+        let only_passphrase = |k: &str| match k {
+            "SIGYN_PASSPHRASE" => Some("super-secret-passphrase".to_string()),
+            _ => None,
+        };
+        assert_eq!(mfa_code_from(only_passphrase), None);
+
+        // With SIGYN_MFA_CODE present, it returns exactly that code.
+        let with_code = |k: &str| match k {
+            "SIGYN_MFA_CODE" => Some("123456".to_string()),
+            "SIGYN_PASSPHRASE" => Some("super-secret-passphrase".to_string()),
+            _ => None,
+        };
+        assert_eq!(mfa_code_from(with_code), Some("123456".to_string()));
+    }
 }

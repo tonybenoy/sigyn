@@ -168,6 +168,9 @@ pub enum SecretCommands {
         /// Destination environment
         #[arg(long, default_value = "dev")]
         to_env: String,
+        /// Overwrite existing destination secrets without asking
+        #[arg(long)]
+        force: bool,
     },
     /// Generate a random secret
     Generate {
@@ -185,6 +188,9 @@ pub enum SecretCommands {
         /// Print the generated value to stdout
         #[arg(long)]
         reveal: bool,
+        /// Overwrite an existing secret without asking
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -538,19 +544,29 @@ pub fn unlock_vault(
 
     // Load policy — try the header signer's key first (may be owner or admin),
     // then fall back to other known identities. The policy may have been signed
-    // by the same admin who last modified the header.
-    let policy = {
+    // by the same admin who last modified the header. We record WHICH key
+    // verified it: the signer's authority is checked against the device-pinned
+    // trust anchor below, never against the freshly loaded policy itself.
+    let (policy, policy_signer_fp) = {
         // Build candidate keys for policy verification: header signer first, then others
-        let mut policy_candidates: Vec<sigyn_engine::crypto::keys::VerifyingKeyWrapper> =
-            Vec::new();
+        let mut policy_candidates: Vec<(
+            sigyn_engine::crypto::keys::KeyFingerprint,
+            sigyn_engine::crypto::keys::VerifyingKeyWrapper,
+        )> = Vec::new();
         // Header signer's key first (most likely also signed the policy)
         if let Some(signer_id) = identities
             .iter()
             .find(|id| id.fingerprint == header_signer_fp)
         {
-            policy_candidates.push(signer_id.signing_pubkey.clone());
+            policy_candidates.push((
+                signer_id.fingerprint.clone(),
+                signer_id.signing_pubkey.clone(),
+            ));
         } else if loaded.identity.fingerprint == header_signer_fp {
-            policy_candidates.push(loaded.identity.signing_pubkey.clone());
+            policy_candidates.push((
+                loaded.identity.fingerprint.clone(),
+                loaded.identity.signing_pubkey.clone(),
+            ));
         }
         // Owner's key (if different from header signer)
         if header_signer_fp != manifest.owner {
@@ -558,29 +574,38 @@ pub fn unlock_vault(
                 .iter()
                 .find(|id| id.fingerprint == manifest.owner)
             {
-                policy_candidates.push(owner_id.signing_pubkey.clone());
+                policy_candidates.push((
+                    owner_id.fingerprint.clone(),
+                    owner_id.signing_pubkey.clone(),
+                ));
             } else if loaded.identity.fingerprint == manifest.owner {
-                policy_candidates.push(loaded.identity.signing_pubkey.clone());
+                policy_candidates.push((
+                    loaded.identity.fingerprint.clone(),
+                    loaded.identity.signing_pubkey.clone(),
+                ));
             }
         }
         // All other known identities
         for id in &identities {
             if !policy_candidates
                 .iter()
-                .any(|k| k.to_bytes() == id.signing_pubkey.to_bytes())
+                .any(|(fp, _)| *fp == id.fingerprint)
             {
-                policy_candidates.push(id.signing_pubkey.clone());
+                policy_candidates.push((id.fingerprint.clone(), id.signing_pubkey.clone()));
             }
         }
         if !policy_candidates
             .iter()
-            .any(|k| k.to_bytes() == loaded.identity.signing_pubkey.to_bytes())
+            .any(|(fp, _)| *fp == loaded.identity.fingerprint)
         {
-            policy_candidates.push(loaded.identity.signing_pubkey.clone());
+            policy_candidates.push((
+                loaded.identity.fingerprint.clone(),
+                loaded.identity.signing_pubkey.clone(),
+            ));
         }
 
         let mut loaded_policy = None;
-        for key in &policy_candidates {
+        for (fp, key) in &policy_candidates {
             match VaultPolicy::load_signed(
                 &paths.policy_path(&vault_name),
                 &vault_cipher,
@@ -588,7 +613,7 @@ pub fn unlock_vault(
                 &manifest.vault_id,
             ) {
                 Ok(p) => {
-                    loaded_policy = Some(p);
+                    loaded_policy = Some((p, fp.clone()));
                     break;
                 }
                 Err(_) => continue,
@@ -602,8 +627,23 @@ pub fn unlock_vault(
         ))?
     };
 
+    // --- Policy-signer trust anchor (finding C1) ---
+    // A policy must never vouch for its own signer: any member holds the vault
+    // key and could re-seal a crafted policy granting themselves admin. The
+    // shared engine routine checks a non-owner signer against the device-pinned
+    // admin set from the last accepted policy (and refreshes it on owner-signed
+    // policies). Shared with the web unlock path so the two cannot diverge.
+    sigyn_engine::vault::trust::enforce_policy_trust_anchor(
+        &home,
+        &vault_name,
+        &manifest.owner,
+        &policy,
+        &policy_signer_fp,
+    )?;
+
     // Verify the header signer is authorized (owner or admin+).
     // This prevents a low-privilege member from signing a crafted header.
+    // The policy consulted here has itself been anchored above.
     if header_signer_fp != manifest.owner {
         match policy.get_member(&header_signer_fp) {
             Some(member) if member.role.can_manage_policy() => {
@@ -653,93 +693,128 @@ pub fn check_access(
     action: AccessAction,
     key: Option<&str>,
 ) -> Result<()> {
+    let env = ctx.env_name.clone();
+    check_access_for_env(ctx, action, key, &env)
+}
+
+/// Like [`check_access`], but evaluates against an explicit environment rather
+/// than the context's current env. Used by `env promote` to authorize the
+/// source (Read) and target (Write) environments through the same
+/// hierarchy-aware evaluation as every other access check.
+pub fn check_access_for_env(
+    ctx: &UnlockedVaultContext,
+    action: AccessAction,
+    key: Option<&str>,
+    env: &str,
+) -> Result<()> {
     let request = AccessRequest {
         actor: ctx.fingerprint.clone(),
         action,
-        env: ctx.env_name.clone(),
+        env: env.to_string(),
         key: key.map(String::from),
         mfa_verified: false,
     };
 
     let decision = if let Some(ref org_path_str) = ctx.manifest.org_path {
-        // Hierarchical evaluation: build policy chain from vault → root org
+        // Hierarchical evaluation: build policy chain from vault → root org.
+        // Org levels can carry RESTRICTIONS (MFA requirements, time windows,
+        // global constraints), so every level named by org_path must load —
+        // silently skipping a level would let a member escape org-level
+        // controls by deleting or corrupting their local copy of it.
         let home = crate::config::sigyn_home();
         let hierarchy_paths = sigyn_engine::hierarchy::path::HierarchyPaths::new(home.clone());
 
-        if let Ok(org_path) = sigyn_engine::hierarchy::path::OrgPath::parse(org_path_str) {
-            let mut chain = Vec::new();
+        let org_path =
+            sigyn_engine::hierarchy::path::OrgPath::parse(org_path_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "vault is linked to org '{}' but the path is invalid: {}",
+                    org_path_str,
+                    e
+                )
+            })?;
+        let mut chain = Vec::new();
 
-            // First level: vault's own policy
-            chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
-                owner: ctx.manifest.owner.clone(),
-                policy: ctx.policy.clone(),
-            });
+        // First level: vault's own policy
+        chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
+            owner: ctx.manifest.owner.clone(),
+            policy: ctx.policy.clone(),
+        });
 
-            // Then walk up from the org node to root, collecting policies
-            let mut paths_to_check = vec![org_path.clone()];
-            paths_to_check.extend(org_path.ancestors().into_iter().rev());
+        // Then walk up from the org node to root, collecting policies
+        let mut paths_to_check = vec![org_path.clone()];
+        paths_to_check.extend(org_path.ancestors().into_iter().rev());
 
-            for cp in &paths_to_check {
-                let mp = hierarchy_paths.manifest_path(cp);
-                if !mp.exists() {
-                    continue;
-                }
-                if let Ok(manifest) = super::org::load_org_manifest_path(&mp) {
-                    // Look up the org node owner's verifying key
-                    let org_owner_vk = if ctx.loaded_identity.identity.fingerprint == manifest.owner
-                    {
-                        ctx.loaded_identity.identity.signing_pubkey.clone()
-                    } else {
-                        let store2 =
-                            sigyn_engine::identity::keygen::IdentityStore::new(home.clone());
-                        store2
-                            .list()
-                            .ok()
-                            .and_then(|ids| {
-                                ids.into_iter().find(|id| id.fingerprint == manifest.owner)
-                            })
-                            .map(|id| id.signing_pubkey)
-                            .unwrap_or_else(|| ctx.loaded_identity.identity.signing_pubkey.clone())
-                    };
-                    let members_p = hierarchy_paths.members_path(cp);
-                    if members_p.exists() {
-                        if let Ok(hdr_bytes) = std::fs::read(&members_p) {
-                            if let Ok(header) = envelope::verify_and_load_header(
-                                &hdr_bytes,
-                                manifest.node_id,
-                                &org_owner_vk,
-                            ) {
-                                if let Ok(mk) = envelope::unseal_vault_key(
-                                    &header,
-                                    ctx.loaded_identity.encryption_key(),
-                                    manifest.node_id,
-                                ) {
-                                    let cipher =
-                                        sigyn_engine::crypto::vault_cipher::VaultCipher::new(mk);
-                                    if let Ok(policy) = VaultPolicy::load_signed(
-                                        &hierarchy_paths.policy_path(cp),
-                                        &cipher,
-                                        &org_owner_vk,
-                                        &manifest.node_id,
-                                    ) {
-                                        chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
-                                            owner: manifest.owner.clone(),
-                                            policy,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        for cp in &paths_to_check {
+            let mp = hierarchy_paths.manifest_path(cp);
+            if !mp.exists() {
+                anyhow::bail!(
+                    "vault is linked to org '{}' but org level '{}' is missing locally.\n  \
+                     Restore the org metadata (sigyn sync pull) or ask an org admin, \
+                     or unlink the vault from the org.",
+                    org_path_str,
+                    cp
+                );
             }
-
-            sigyn_engine::hierarchy::engine::HierarchicalPolicyEngine::evaluate(&chain, &request)?
-        } else {
-            // Invalid org path, fall back to standard evaluation
-            let engine = PolicyEngine::new(&ctx.policy, &ctx.manifest.owner);
-            engine.evaluate(&request)?
+            let manifest = super::org::load_org_manifest_path(&mp)
+                .with_context(|| format!("failed to load manifest for org level '{}'", cp))?;
+            // Look up the org node owner's verifying key. If it cannot be
+            // resolved from the local identity store, fail closed — falling
+            // back to any other key would let a requester satisfy the org
+            // policy signature check with a policy they signed themselves.
+            let org_owner_vk = if ctx.loaded_identity.identity.fingerprint == manifest.owner {
+                ctx.loaded_identity.identity.signing_pubkey.clone()
+            } else {
+                let store2 = sigyn_engine::identity::keygen::IdentityStore::new(home.clone());
+                store2
+                    .list()
+                    .map_err(|e| anyhow::anyhow!("failed to list identities: {}", e))?
+                    .into_iter()
+                    .find(|id| id.fingerprint == manifest.owner)
+                    .map(|id| id.signing_pubkey)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot verify org level '{}': owner identity {} is not known \
+                             locally.\n  Obtain the org owner's identity (e.g. via a \
+                             delegation invitation) before using this vault.",
+                            cp,
+                            manifest.owner.to_hex()
+                        )
+                    })?
+            };
+            let members_p = hierarchy_paths.members_path(cp);
+            let hdr_bytes = std::fs::read(&members_p)
+                .with_context(|| format!("failed to read members file for org level '{}'", cp))?;
+            let header =
+                envelope::verify_and_load_header(&hdr_bytes, manifest.node_id, &org_owner_vk)
+                    .with_context(|| {
+                        format!("failed to verify members header for org level '{}'", cp)
+                    })?;
+            let mk = envelope::unseal_vault_key(
+                &header,
+                ctx.loaded_identity.encryption_key(),
+                manifest.node_id,
+            )
+            .with_context(|| {
+                format!(
+                    "cannot unseal org level '{}' (not a member of the org node?)",
+                    cp
+                )
+            })?;
+            let cipher = sigyn_engine::crypto::vault_cipher::VaultCipher::new(mk);
+            let policy = VaultPolicy::load_signed(
+                &hierarchy_paths.policy_path(cp),
+                &cipher,
+                &org_owner_vk,
+                &manifest.node_id,
+            )
+            .with_context(|| format!("failed to verify policy for org level '{}'", cp))?;
+            chain.push(sigyn_engine::hierarchy::engine::PolicyLevel {
+                owner: manifest.owner.clone(),
+                policy,
+            });
         }
+
+        sigyn_engine::hierarchy::engine::HierarchicalPolicyEngine::evaluate(&chain, &request)?
     } else {
         // Standard single-vault evaluation
         let engine = PolicyEngine::new(&ctx.policy, &ctx.manifest.owner);
@@ -830,18 +905,30 @@ fn audit(ctx: &UnlockedVaultContext, action: AuditAction, outcome: AuditOutcome)
     };
     match AuditLog::open(&audit_path, audit_cipher) {
         Ok(mut log) => {
-            if let Err(e) = log.append(
+            match log.append(
                 &ctx.fingerprint,
                 action.clone(),
                 Some(ctx.env_name.clone()),
                 outcome,
                 ctx.loaded_identity.signing_key(),
             ) {
-                eprintln!(
-                    "{} failed to write audit entry: {}",
-                    style("warning:").yellow().bold(),
-                    e
-                );
+                Ok(entry) => {
+                    // Record the device-local audit tip so a later truncation of
+                    // this entry (or anything after it) is detectable (H8).
+                    let _ = sigyn_engine::audit::checkpoint::record_local_tip(
+                        &sigyn_home(),
+                        &ctx.vault_name,
+                        entry.sequence,
+                        entry.entry_hash,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} failed to write audit entry: {}",
+                        style("warning:").yellow().bold(),
+                        e
+                    );
+                }
             }
         }
         Err(e) => {
@@ -920,6 +1007,11 @@ pub fn handle(
             };
 
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            // Serialize the read-modify-write of the env file against other
+            // sigyn processes so concurrent `secret set`s can't lose updates (H9).
+            let _vault_lock = sigyn_engine::vault::lock::VaultLock::acquire(
+                &ctx.paths.lock_path(&ctx.vault_name),
+            )?;
             let is_batch = pairs.len() > 1;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
@@ -995,6 +1087,9 @@ pub fn handle(
             }
 
             if dry_run {
+                if failed > 0 {
+                    anyhow::bail!("{} of {} secret(s) failed", failed, pairs.len());
+                }
                 return Ok(());
             }
 
@@ -1023,6 +1118,11 @@ pub fn handle(
             }
 
             maybe_auto_sync(&ctx.vault_name);
+
+            // Exit non-zero on any failed key so scripts/CI can detect it.
+            if failed > 0 {
+                anyhow::bail!("{} of {} secret(s) failed", failed, pairs.len());
+            }
         }
         SecretCommands::Get { key, env, copy } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
@@ -1155,6 +1255,9 @@ pub fn handle(
         }
         SecretCommands::Remove { keys, env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            let _vault_lock = sigyn_engine::vault::lock::VaultLock::acquire(
+                &ctx.paths.lock_path(&ctx.vault_name),
+            )?;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
             if !env_path.exists() {
@@ -1219,6 +1322,9 @@ pub fn handle(
             }
 
             if dry_run {
+                if failed > 0 {
+                    anyhow::bail!("{} of {} secret(s) failed", failed, keys.len());
+                }
                 return Ok(());
             }
 
@@ -1241,9 +1347,17 @@ pub fn handle(
             }
 
             maybe_auto_sync(&ctx.vault_name);
+
+            // Exit non-zero on any failed key so scripts/CI can detect it.
+            if failed > 0 {
+                anyhow::bail!("{} of {} secret(s) failed", failed, keys.len());
+            }
         }
         SecretCommands::Edit { env } => {
             let ctx = unlock_vault(identity, vault, env.as_deref())?;
+            let _vault_lock = sigyn_engine::vault::lock::VaultLock::acquire(
+                &ctx.paths.lock_path(&ctx.vault_name),
+            )?;
             check_access(&ctx, AccessAction::Write, None)?;
 
             let env_path = ctx.paths.env_path(&ctx.vault_name, &ctx.env_name);
@@ -1302,23 +1416,28 @@ pub fn handle(
                 }
             }
 
-            let status = std::process::Command::new(&editor)
-                .arg(&tmp_path)
-                .status()
-                .with_context(|| format!("failed to launch editor '{}'", editor))?;
+            // Run the editor and read the result inside a closure so the temp
+            // file (which holds decrypted secrets) is shredded on EVERY exit
+            // path, including editor-launch and read failures.
+            let edit_result = (|| -> Result<String> {
+                let status = std::process::Command::new(&editor)
+                    .arg(&tmp_path)
+                    .status()
+                    .with_context(|| format!("failed to launch editor '{}'", editor))?;
+                if !status.success() {
+                    anyhow::bail!("editor exited with non-zero status");
+                }
+                Ok(std::fs::read_to_string(&tmp_path)?)
+            })();
 
-            if !status.success() {
-                // Clean up temp file
-                let _ = std::fs::remove_file(&tmp_path);
-                anyhow::bail!("editor exited with non-zero status");
+            // Securely overwrite and remove the temp file before propagating
+            // any error from the closure above.
+            if let Ok(len) = std::fs::metadata(&tmp_path).map(|m| m.len()) {
+                let _ = std::fs::write(&tmp_path, vec![0u8; len as usize]);
             }
-
-            // Parse edited file
-            let edited_content = std::fs::read_to_string(&tmp_path)?;
-            // Securely overwrite temp file
-            let zeros = vec![0u8; edited_content.len()];
-            let _ = std::fs::write(&tmp_path, &zeros);
             let _ = std::fs::remove_file(&tmp_path);
+
+            let edited_content = edit_result?;
 
             let mut new_entries: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
             for line in edited_content.lines() {
@@ -1492,6 +1611,7 @@ pub fn handle(
             to_vault,
             from_env,
             to_env,
+            force,
         } => {
             // Unlock source vault
             let src_ctx = unlock_vault(identity, Some(&from_vault), Some(&from_env))?;
@@ -1551,6 +1671,33 @@ pub fn handle(
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
+
+            // Refuse to silently overwrite existing destination keys.
+            if !force {
+                let clobbered: Vec<&String> = resolved_keys
+                    .iter()
+                    .filter(|k| dst_env.get(k).is_some())
+                    .collect();
+                if !clobbered.is_empty() {
+                    let names: Vec<&str> = clobbered.iter().map(|k| k.as_str()).collect();
+                    let proceed = crate::config::is_interactive()
+                        && dialoguer::Confirm::new()
+                            .with_prompt(format!(
+                                "{} destination key(s) already exist ({}). Overwrite?",
+                                clobbered.len(),
+                                names.join(", ")
+                            ))
+                            .default(false)
+                            .interact()?;
+                    if !proceed {
+                        anyhow::bail!(
+                            "aborted: {} destination key(s) already exist ({}) — pass --force to overwrite",
+                            clobbered.len(),
+                            names.join(", ")
+                        );
+                    }
+                }
+            }
 
             // Copy secrets
             let mut copied = Vec::new();
@@ -1637,6 +1784,7 @@ pub fn handle(
             r#type,
             env,
             reveal,
+            force,
         } => {
             sigyn_engine::secrets::validate_key_name(&key)?;
 
@@ -1668,6 +1816,31 @@ pub fn handle(
             } else {
                 sigyn_engine::vault::PlaintextEnv::new()
             };
+
+            // Don't silently clobber an existing secret.
+            if plaintext.get(&key).is_some() && !force {
+                if crate::config::is_interactive() {
+                    let ok = dialoguer::Confirm::new()
+                        .with_prompt(format!(
+                            "'{}' already exists in env '{}'. Overwrite?",
+                            key, ctx.env_name
+                        ))
+                        .default(false)
+                        .interact()?;
+                    if !ok {
+                        anyhow::bail!(
+                            "aborted: '{}' already exists (use --force to overwrite)",
+                            key
+                        );
+                    }
+                } else {
+                    anyhow::bail!(
+                        "'{}' already exists in env '{}' — pass --force to overwrite",
+                        key,
+                        ctx.env_name
+                    );
+                }
+            }
 
             plaintext.set(
                 key.clone(),
@@ -1743,10 +1916,12 @@ pub fn handle(
                 let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
                 if let Some((k, v)) = trimmed.split_once('=') {
                     let key = k.trim().to_string();
-                    // Strip surrounding quotes from value
+                    // Strip surrounding quotes from value (len >= 2 so a lone
+                    // quote is not sliced out of bounds)
                     let val = v.trim();
-                    let val = if (val.starts_with('"') && val.ends_with('"'))
-                        || (val.starts_with('\'') && val.ends_with('\''))
+                    let val = if val.len() >= 2
+                        && ((val.starts_with('"') && val.ends_with('"'))
+                            || (val.starts_with('\'') && val.ends_with('\'')))
                     {
                         val[1..val.len() - 1].to_string()
                     } else {

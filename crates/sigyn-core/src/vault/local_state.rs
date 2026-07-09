@@ -30,11 +30,29 @@ pub struct VaultSyncCheckpoint {
     pub audit_tip_hash: Option<[u8; 32]>,
 }
 
+/// Device-pinned trust anchor for policy signatures.
+///
+/// Records which members held policy-signing authority (Admin+) in the last
+/// policy accepted on this device. A policy signed by a non-owner is only
+/// trusted if its signer appears here — the freshly loaded policy itself must
+/// never vouch for its own signer, otherwise any member holding the vault key
+/// could re-sign a crafted policy granting themselves admin.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyTrustAnchor {
+    /// Fingerprint hex → `Role::level()` for every Admin+ member of the last
+    /// accepted policy. The owner is anchored separately via [`VaultPin`].
+    pub admin_signers: HashMap<String, u8>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Per-vault local state that is **never synced** — device-only.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalVaultState {
     pub pin: Option<VaultPin>,
     pub checkpoint: Option<VaultSyncCheckpoint>,
+    /// Trusted policy-signer set from the last accepted policy.
+    #[serde(default)]
+    pub policy_anchor: Option<PolicyTrustAnchor>,
 }
 
 /// Device-key-encrypted store of per-vault local state.

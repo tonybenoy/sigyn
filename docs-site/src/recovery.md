@@ -24,7 +24,19 @@ This outputs shard data that can be:
 sigyn-recovery restore --shards shard1.json,shard2.json,shard3.json
 ```
 
-The standalone `sigyn-recovery` binary can reconstruct the master key from K shards without needing an unlocked identity.
+The standalone `sigyn-recovery` binary reconstructs the identity from K shards
+without needing an unlocked identity. On success it prompts for a **new
+passphrase** and installs the recovered identity directly into the identity store
+at `~/.sigyn/identities/<fingerprint>.identity` (honoring `SIGYN_HOME`), so it is
+immediately usable by the `sigyn` CLI — no separate import step. It refuses to
+overwrite an existing identity file unless `--force` is given.
+
+To write the recovered identity somewhere else instead of installing it, pass
+`--output <path>` (also guarded against overwriting).
+
+Reconstruction is verified: duplicate or zero shard indices, an inconsistent
+threshold, and a mismatched authenticator are all rejected rather than silently
+producing a wrong key.
 
 ## Vault Snapshots
 

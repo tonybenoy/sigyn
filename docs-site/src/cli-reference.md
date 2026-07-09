@@ -185,25 +185,17 @@ is deleted only after the new one is successfully created.
 ```bash
 sigyn identity rotate-keys
 sigyn identity rotate-keys alice
+sigyn identity rotate-keys alice --force   # required non-interactively
 ```
 
-**Warning:** This creates a new fingerprint. You must be re-invited to all vaults after rotation. There is no automatic migration.
+**Warning:** This creates a new fingerprint. You must be re-invited to all vaults after rotation. There is no automatic migration — vault headers are **not** re-encrypted with the new key.
 
-### identity export
+To prevent silently locking yourself out, rotation now **refuses** if the identity is a member or owner of any local vault (for a vault you own, no one else can re-invite you). Move or drop those vault memberships first, or pass `--force` to override. `--force` is also required to rotate non-interactively (e.g. with `SIGYN_PASSPHRASE` set).
 
-Export the public key portion of an identity for sharing with team members.
-
-```bash
-sigyn identity export --name alice > alice.pub
-```
-
-### identity import
-
-Import a teammate's public key.
-
-```bash
-sigyn identity import alice.pub
-```
+> **Sharing identities.** There is no `identity export` / `identity import`
+> command. Public keys are exchanged through delegation: the owner runs
+> `sigyn delegation invite --pubkey <fingerprint> …` and the invitee accepts with
+> `sigyn delegation accept <invitation>`. See [Team Collaboration](./delegation.md).
 
 ## vault (alias: v)
 
@@ -904,7 +896,12 @@ sigyn audit query --actor a1b2c3d4... --env dev
 ### audit verify
 
 Verify the integrity of the hash chain. Reports the first broken entry if tampering
-is detected.
+is detected, and also checks for tail truncation against a device-local audit tip.
+
+**Exit status:** returns non-zero when the chain is broken, a signature is invalid,
+or the log has been truncated — so it is safe to gate on, e.g. `sigyn audit verify &&
+deploy`. Entries whose signing key is not available locally are reported as a warning
+and do not cause a non-zero exit.
 
 ```bash
 sigyn audit verify

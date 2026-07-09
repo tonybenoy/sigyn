@@ -89,6 +89,54 @@ pub fn verify_completeness(audit_path: &Path, cipher: &VaultCipher) -> Result<u6
     Ok(*sequences.last().unwrap())
 }
 
+/// Outcome of a full chain verification (see [`AuditLog::verify_chain_with_keys`]).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ChainVerification {
+    /// Total entries whose hash linkage and integrity verified.
+    pub total: u64,
+    /// Entries whose Ed25519 signature verified against a known key.
+    pub signatures_verified: u64,
+    /// Sequences of entries whose actor's signing key is not available
+    /// locally. Not tampering — but authorship could not be confirmed.
+    pub unverifiable: Vec<u64>,
+}
+
+/// Return the `(sequence, entry_hash)` of the highest-sequence entry in the
+/// audit log, or `None` if the log is missing or empty. Like [`AuditLog::open`],
+/// a single trailing corrupt line is tolerated (crash recovery).
+pub fn chain_tip(audit_path: &Path, cipher: &VaultCipher) -> Result<Option<(u64, [u8; 32])>> {
+    if !audit_path.exists() {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(audit_path)?;
+    let reader = std::io::BufReader::new(file);
+    let lines: Vec<String> = reader.lines().collect::<std::result::Result<Vec<_>, _>>()?;
+    let non_empty: Vec<&str> = lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut tip: Option<(u64, [u8; 32])> = None;
+    for (i, line) in non_empty.iter().enumerate() {
+        match decode_audit_line(line, cipher) {
+            Ok(entry) => {
+                if tip.is_none_or(|(seq, _)| entry.sequence >= seq) {
+                    tip = Some((entry.sequence, entry.entry_hash));
+                }
+            }
+            Err(e) => {
+                if i == non_empty.len() - 1 {
+                    // Tolerate a single trailing corrupt/partial line.
+                    break;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(tip)
+}
+
 pub struct AuditLog {
     path: std::path::PathBuf,
     last_hash: Option<[u8; 32]>,
@@ -275,17 +323,26 @@ impl AuditLog {
     ///
     /// `lookup_key` resolves an actor fingerprint to their signing public key.
     /// If no key lookup is provided, signature verification is skipped (hash-only mode).
-    pub fn verify_chain_with_keys<F>(&self, lookup_key: Option<F>) -> Result<u64>
+    ///
+    /// Errors distinguish tampering:
+    /// - hash/linkage mismatch -> `SigynError::AuditChainBroken`
+    /// - signature that fails verification -> `SigynError::AuditSignatureInvalid`
+    ///
+    /// An actor whose signing key is *unavailable locally* (e.g. another vault
+    /// member whose identity file isn't on this device) is NOT tampering: the
+    /// entry is still covered by the hash chain. Such entries are reported in
+    /// [`ChainVerification::unverifiable`] instead of failing verification.
+    pub fn verify_chain_with_keys<F>(&self, lookup_key: Option<F>) -> Result<ChainVerification>
     where
         F: Fn(&KeyFingerprint) -> Option<crate::crypto::keys::VerifyingKeyWrapper>,
     {
+        let mut result = ChainVerification::default();
         if !self.path.exists() {
-            return Ok(0);
+            return Ok(result);
         }
         let file = std::fs::File::open(&self.path)?;
         let reader = std::io::BufReader::new(file);
         let mut prev_hash: Option<[u8; 32]> = None;
-        let mut count = 0u64;
 
         for line in reader.lines() {
             let line = line?;
@@ -323,22 +380,24 @@ impl AuditLog {
                             .verify(&entry.entry_hash, &entry.signature)
                             .is_err()
                         {
-                            return Err(SigynError::AuditChainBroken(entry.sequence));
+                            return Err(SigynError::AuditSignatureInvalid(entry.sequence));
                         }
+                        result.signatures_verified += 1;
                     }
                     None => {
-                        // Unknown actor = potentially tampered entry.
-                        // Fail verification for entries by actors not in the policy.
-                        return Err(SigynError::AuditChainBroken(entry.sequence));
+                        // Signing key not available on this device. The hash
+                        // chain still covers this entry; report it as
+                        // unverifiable rather than treating it as tampering.
+                        result.unverifiable.push(entry.sequence);
                     }
                 }
             }
 
             prev_hash = Some(entry.entry_hash);
-            count += 1;
+            result.total += 1;
         }
 
-        Ok(count)
+        Ok(result)
     }
 
     /// Verify the audit chain (hash linkage and integrity only, no signature verification).
@@ -346,6 +405,7 @@ impl AuditLog {
         self.verify_chain_with_keys(
             None::<fn(&KeyFingerprint) -> Option<crate::crypto::keys::VerifyingKeyWrapper>>,
         )
+        .map(|v| v.total)
     }
 
     pub fn tail(&self, n: usize) -> Result<Vec<AuditEntry>> {
@@ -367,5 +427,97 @@ impl AuditLog {
 
         let start = entries.len().saturating_sub(n);
         Ok(entries[start..].to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::VerifyingKeyWrapper;
+
+    const TEST_KEY: [u8; 32] = [0x42u8; 32];
+
+    fn make_cipher() -> VaultCipher {
+        VaultCipher::new(TEST_KEY)
+    }
+
+    fn build_log(path: &Path, signer: &SigningKeyPair, actor: &KeyFingerprint, n: usize) {
+        let mut log = AuditLog::open(path, make_cipher()).unwrap();
+        for _ in 0..n {
+            log.append(
+                actor,
+                AuditAction::PolicyChanged,
+                None,
+                AuditOutcome::Success,
+                signer,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_unknown_key_is_unverifiable_not_tampering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+        let signer = SigningKeyPair::generate();
+        let actor = KeyFingerprint([0xAAu8; 16]);
+        build_log(&path, &signer, &actor, 3);
+
+        let log = AuditLog::open(&path, make_cipher()).unwrap();
+        // No key available for the actor: entries are unverifiable, not broken.
+        let result = log
+            .verify_chain_with_keys(Some(|_: &KeyFingerprint| -> Option<VerifyingKeyWrapper> {
+                None
+            }))
+            .expect("unavailable signing key must not fail verification");
+        assert_eq!(result.total, 3);
+        assert_eq!(result.signatures_verified, 0);
+        assert_eq!(result.unverifiable, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_bad_signature_is_tampering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+        let signer = SigningKeyPair::generate();
+        let actor = KeyFingerprint([0xAAu8; 16]);
+        build_log(&path, &signer, &actor, 3);
+
+        let log = AuditLog::open(&path, make_cipher()).unwrap();
+        // The lookup returns a *different* key: signatures must fail hard.
+        let wrong_key = SigningKeyPair::generate().verifying_key();
+        let err = log
+            .verify_chain_with_keys(Some(move |_: &KeyFingerprint| Some(wrong_key.clone())))
+            .expect_err("invalid signature must fail verification");
+        assert!(
+            matches!(err, SigynError::AuditSignatureInvalid(0)),
+            "expected AuditSignatureInvalid(0), got: {err:?}"
+        );
+
+        // And with the correct key everything verifies.
+        let good_key = signer.verifying_key();
+        let result = log
+            .verify_chain_with_keys(Some(move |_: &KeyFingerprint| Some(good_key.clone())))
+            .unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.signatures_verified, 3);
+        assert!(result.unverifiable.is_empty());
+    }
+
+    #[test]
+    fn test_chain_tip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.jsonl");
+        assert_eq!(chain_tip(&path, &make_cipher()).unwrap(), None);
+
+        let signer = SigningKeyPair::generate();
+        let actor = KeyFingerprint([0xAAu8; 16]);
+        build_log(&path, &signer, &actor, 4);
+
+        let log = AuditLog::open(&path, make_cipher()).unwrap();
+        let last = log.tail(1).unwrap().pop().unwrap();
+        let tip = chain_tip(&path, &make_cipher()).unwrap().unwrap();
+        assert_eq!(tip.0, 3);
+        assert_eq!(tip.1, last.entry_hash);
     }
 }

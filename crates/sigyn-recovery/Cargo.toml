@@ -12,7 +12,7 @@ path = "src/main.rs"
 vendored-openssl = ["sigyn-engine/vendored-openssl"]
 
 [dependencies]
-sigyn-engine = { path = "../sigyn-engine", version = "0.14.1" }
+sigyn-engine = { path = "../sigyn-engine", version = "0.15.0" }
 
 # CLI
 clap.workspace = true
@@ -27,6 +27,10 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+# Needed to write `.identity` files in the exact format the CLI's identity
+# store reads (CBOR body + BLAKE3 keyed MAC) — must match sigyn-engine.
+ciborium.workspace = true
+blake3.workspace = true
 
 # Other
 chrono.workspace = true

@@ -92,7 +92,7 @@ fn init_project(
             let selection = dialoguer::Select::new()
                 .with_prompt(format!(
                     "Select vault for this project (detected: {})",
-                    &detection.suggested_vault_name
+                    detection.suggested_vault_name
                 ))
                 .items(&vaults)
                 .default(default_idx)

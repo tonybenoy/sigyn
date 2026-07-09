@@ -100,13 +100,25 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
+    // Durability: flush the temp file's contents to disk BEFORE the rename,
+    // so a power loss cannot leave a zero-length or partially-written file
+    // at the destination.
+    tmp.as_file().sync_all()?;
     let file = tmp.persist(path).map_err(|e| SigynError::Io(e.error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    let _ = file;
+    drop(file);
+    // Durability: fsync the parent directory so the rename itself survives a
+    // crash (otherwise the old content can reappear). Opening/syncing a
+    // directory is unsupported on some platforms and filesystems (e.g.
+    // Windows), so errors here are deliberately ignored — matching common
+    // Rust atomic-write implementations.
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
     Ok(())
 }
 
@@ -120,6 +132,26 @@ mod tests {
         let path = dir.path().join("test.bin");
         atomic_write(&path, b"hello").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_atomic_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.bin");
+        std::fs::write(&path, b"old-content").unwrap();
+        atomic_write(&path, b"new-content").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new-content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_sets_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.bin");
+        atomic_write(&path, b"sealed").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "sealed files must be owner-only");
     }
 
     #[test]

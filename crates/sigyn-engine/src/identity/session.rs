@@ -47,8 +47,11 @@ impl MfaSessionStore {
             return false;
         };
 
-        // Verify HMAC using constant-time comparison to prevent timing attacks
-        let expected_hmac = compute_hmac(&session.verified_at, &self.hmac_key);
+        // Verify HMAC using constant-time comparison to prevent timing attacks.
+        // The fingerprint passed by the caller (never one read from the session
+        // file) is bound into the tag, so a session created for a different
+        // identity fails validation even if copied to this identity's path.
+        let expected_hmac = compute_hmac(fingerprint, &session.verified_at, &self.hmac_key);
         if !constant_time_eq(session.hmac.as_bytes(), expected_hmac.as_bytes()) {
             return false;
         }
@@ -72,7 +75,7 @@ impl MfaSessionStore {
         }
 
         let now = Utc::now();
-        let hmac = compute_hmac(&now, &self.hmac_key);
+        let hmac = compute_hmac(fingerprint, &now, &self.hmac_key);
         let session = MfaSession {
             verified_at: now,
             hmac,
@@ -144,6 +147,26 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
 
         assert!(!store.is_valid(&fp, DEFAULT_GRACE_PERIOD_SECS));
+    }
+
+    #[test]
+    fn test_session_not_valid_for_other_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let hmac_key = [0x42u8; 32];
+        let store = MfaSessionStore::new(dir.path().to_path_buf(), hmac_key);
+        let alice = KeyFingerprint([0xAAu8; 16]);
+        let bob = KeyFingerprint([0xBBu8; 16]);
+
+        store.create(&alice).unwrap();
+        assert!(store.is_valid(&alice, DEFAULT_GRACE_PERIOD_SECS));
+
+        // Simulate the cross-identity bypass: copy alice.session -> bob.session.
+        // Bob never completed TOTP, so his session must not validate.
+        std::fs::copy(store.session_path(&alice), store.session_path(&bob)).unwrap();
+        assert!(!store.is_valid(&bob, DEFAULT_GRACE_PERIOD_SECS));
+
+        // Alice's own session is unaffected.
+        assert!(store.is_valid(&alice, DEFAULT_GRACE_PERIOD_SECS));
     }
 
     #[test]

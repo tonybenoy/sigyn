@@ -54,13 +54,14 @@ pub fn create_leashed_fork(
         fork_vault_id,
     )?;
 
-    // Write sealed manifest and signed header
+    // Write sealed manifest and signed header atomically with restrictive
+    // permissions (temp file + fsync + rename, 0o600, symlink checks).
     let sealed_manifest = fork_manifest
         .to_sealed_bytes(&fork_vault_cipher)
         .map_err(|e| SigynError::Serialization(e.to_string()))?;
-    std::fs::write(fork_paths.manifest_path(fork_name), sealed_manifest)?;
+    crate::io::atomic_write(&fork_paths.manifest_path(fork_name), &sealed_manifest)?;
     let signed_header = envelope::sign_header(&header, signing_key, fork_vault_id)?;
-    std::fs::write(fork_paths.members_path(fork_name), signed_header)?;
+    crate::io::atomic_write(&fork_paths.members_path(fork_name), &signed_header)?;
 
     // Copy encrypted envs, re-encrypting with fork's per-env keys
     for env_name in &parent_manifest.environments {
@@ -154,12 +155,13 @@ pub fn create_unleashed_fork(
         fork_vault_id,
     )?;
 
+    // Atomic + owner-only writes, same as the leashed path above.
     let sealed_manifest = fork_manifest
         .to_sealed_bytes(&fork_vault_cipher)
         .map_err(|e| SigynError::Serialization(e.to_string()))?;
-    std::fs::write(fork_paths.manifest_path(fork_name), sealed_manifest)?;
+    crate::io::atomic_write(&fork_paths.manifest_path(fork_name), &sealed_manifest)?;
     let signed_header = envelope::sign_header(&header, signing_key, fork_vault_id)?;
-    std::fs::write(fork_paths.members_path(fork_name), signed_header)?;
+    crate::io::atomic_write(&fork_paths.members_path(fork_name), &signed_header)?;
 
     for env_name in &parent_manifest.environments {
         let parent_env_path = parent_paths.env_path(parent_name, env_name);

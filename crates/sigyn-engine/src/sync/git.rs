@@ -71,6 +71,23 @@ fn make_callbacks() -> git2::RemoteCallbacks<'static> {
     cb
 }
 
+/// Return an actionable hint for common libgit2 auth failures, or "" when the
+/// error doesn't look auth-related. Appended to error messages so users aren't
+/// left with only the raw libgit2 text.
+fn auth_hint(e: &git2::Error) -> &'static str {
+    let msg = e.message();
+    if e.class() == git2::ErrorClass::Ssh
+        || msg.contains("authenticat")
+        || msg.contains("credential")
+        || msg.contains("no suitable credential type")
+    {
+        "\nhint: git authentication failed — is your SSH key loaded? Try `ssh-add`, \
+         or configure a deploy key with `sigyn sync deploy-key generate`."
+    } else {
+        ""
+    }
+}
+
 pub struct GitSyncEngine {
     vault_path: PathBuf,
 }
@@ -91,7 +108,7 @@ impl GitSyncEngine {
 
         builder
             .clone(url, target_path)
-            .map_err(|e| SigynError::GitError(format!("clone failed: {}", e)))?;
+            .map_err(|e| SigynError::GitError(format!("clone failed: {}{}", e, auth_hint(&e))))?;
         Ok(())
     }
 
@@ -133,8 +150,14 @@ impl GitSyncEngine {
         let status = if remote_url.is_none() {
             SyncStatus::NeverSynced
         } else {
-            self.compute_sync_status(&repo)
-                .unwrap_or(SyncStatus::NeverSynced)
+            self.compute_sync_status(&repo).unwrap_or_else(|e| {
+                eprintln!(
+                    "warning: failed to compute sync status for {}: {}",
+                    self.vault_path.display(),
+                    e
+                );
+                SyncStatus::NeverSynced
+            })
         };
 
         Ok(SyncState {
@@ -203,19 +226,31 @@ impl GitSyncEngine {
     }
 
     pub fn push_with_options(&self, remote_name: &str, branch: &str, force: bool) -> Result<()> {
-        self.push_with_callbacks(remote_name, branch, force, make_callbacks())
+        self.push_with_callbacks(
+            remote_name,
+            branch,
+            force,
+            make_callbacks(),
+            make_callbacks(),
+        )
     }
 
     /// Push using a sealed deploy key for SSH auth (no user SSH key needed).
-    /// The `_temp_dir` keeps the temporary key file alive until push completes.
+    /// The temp dirs keep the temporary key files alive until push completes.
     pub fn push_with_deploy_key(
         &self,
         remote_name: &str,
         branch: &str,
         deploy_key_bytes: &[u8],
     ) -> Result<()> {
-        let (cb, _temp_dir) = super::deploy_key::make_deploy_key_callbacks(deploy_key_bytes)?;
-        self.push_with_callbacks(remote_name, branch, false, cb)
+        // Two callback sets: one for the pre-push safety check, one for the
+        // push itself. Both must use the deploy key so the force-push guard
+        // is enforced on the deploy-key path too.
+        let (fetch_cb, _fetch_key_dir) =
+            super::deploy_key::make_deploy_key_callbacks(deploy_key_bytes)?;
+        let (push_cb, _push_key_dir) =
+            super::deploy_key::make_deploy_key_callbacks(deploy_key_bytes)?;
+        self.push_with_callbacks(remote_name, branch, false, fetch_cb, push_cb)
     }
 
     fn push_with_callbacks(
@@ -223,36 +258,63 @@ impl GitSyncEngine {
         remote_name: &str,
         branch: &str,
         force: bool,
-        callbacks: git2::RemoteCallbacks<'_>,
+        fetch_callbacks: git2::RemoteCallbacks<'_>,
+        push_callbacks: git2::RemoteCallbacks<'_>,
     ) -> Result<()> {
         let repo = self.open_repo()?;
 
-        // Force-push detection: fetch remote HEAD and verify we descend from it
+        // Force-push detection: look up the remote branch tip and verify our
+        // HEAD descends from it. Uses the same credentials as the push itself
+        // so the guard also covers deploy-key pushes. Fails closed: if the
+        // remote cannot be queried, refuse the push instead of risking a
+        // silent history overwrite.
         if !force {
             let mut remote = repo
                 .find_remote(remote_name)
                 .map_err(|e| SigynError::GitError(e.to_string()))?;
-            let mut fetch_opts = git2::FetchOptions::new();
-            fetch_opts.remote_callbacks(make_callbacks());
-            // Ignore fetch errors (remote may not exist yet)
-            if remote.fetch(&[branch], Some(&mut fetch_opts), None).is_ok() {
-                let remote_ref = format!("refs/remotes/{}/{}", remote_name, branch);
-                if let Ok(reference) = repo.find_reference(&remote_ref) {
-                    if let Some(remote_oid) = reference.target() {
-                        if let Ok(local_ref) = repo.head() {
-                            if let Some(local_oid) = local_ref.target() {
-                                let descends = repo
-                                    .graph_descendant_of(local_oid, remote_oid)
-                                    .unwrap_or(false);
-                                let is_same = local_oid == remote_oid;
-                                if !descends && !is_same {
-                                    return Err(SigynError::GitError(
-                                        "push rejected: local HEAD does not descend from remote HEAD. \
-                                         This would be a force-push. Use --force to override."
-                                            .into(),
-                                    ));
-                                }
-                            }
+            let remote_oid = {
+                let connection = remote
+                    .connect_auth(git2::Direction::Fetch, Some(fetch_callbacks), None)
+                    .map_err(|e| {
+                        SigynError::GitError(format!(
+                            "cannot verify remote '{}' before push: {}. Refusing to push \
+                             without the force-push safety check (use --force to override).{}",
+                            remote_name,
+                            e,
+                            auth_hint(&e)
+                        ))
+                    })?;
+                let branch_ref = format!("refs/heads/{}", branch);
+                connection
+                    .list()
+                    .map_err(|e| {
+                        SigynError::GitError(format!(
+                            "cannot list refs on remote '{}' before push: {}. Refusing to push \
+                             without the force-push safety check (use --force to override).",
+                            remote_name, e
+                        ))
+                    })?
+                    .iter()
+                    .find(|head| head.name() == branch_ref)
+                    .map(|head| head.oid())
+            };
+            // A missing remote branch means there is nothing to overwrite
+            // (initial push) — safe to proceed.
+            if let Some(remote_oid) = remote_oid {
+                if let Ok(local_ref) = repo.head() {
+                    if let Some(local_oid) = local_ref.target() {
+                        // If the remote commit is unknown locally (remote is
+                        // ahead), graph_descendant_of errs and we reject too.
+                        let descends = repo
+                            .graph_descendant_of(local_oid, remote_oid)
+                            .unwrap_or(false);
+                        let is_same = local_oid == remote_oid;
+                        if !descends && !is_same {
+                            return Err(SigynError::GitError(
+                                "push rejected: local HEAD does not descend from remote HEAD. \
+                                 This would be a force-push. Pull first, or use --force to override."
+                                    .into(),
+                            ));
                         }
                     }
                 }
@@ -268,10 +330,10 @@ impl GitSyncEngine {
             format!("refs/heads/{}:refs/heads/{}", branch, branch)
         };
         let mut push_opts = git2::PushOptions::new();
-        push_opts.remote_callbacks(callbacks);
+        push_opts.remote_callbacks(push_callbacks);
         remote
             .push(&[&refspec], Some(&mut push_opts))
-            .map_err(|e| SigynError::GitError(e.to_string()))?;
+            .map_err(|e| SigynError::GitError(format!("push failed: {}{}", e, auth_hint(&e))))?;
         Ok(())
     }
 
@@ -306,7 +368,7 @@ impl GitSyncEngine {
         fetch_opts.remote_callbacks(make_callbacks());
         remote
             .fetch(&[branch], Some(&mut fetch_opts), None)
-            .map_err(|e| SigynError::GitError(e.to_string()))?;
+            .map_err(|e| SigynError::GitError(format!("fetch failed: {}{}", e, auth_hint(&e))))?;
 
         let fetch_head = repo
             .find_reference("FETCH_HEAD")
@@ -340,6 +402,15 @@ impl GitSyncEngine {
         }
 
         if analysis.is_fast_forward() {
+            // A fast-forward uses a force checkout, which would silently
+            // discard uncommitted edits to tracked files. Refuse instead.
+            if self.has_uncommitted_tracked_changes(&repo)? {
+                return Err(SigynError::GitError(format!(
+                    "pull aborted: uncommitted local changes in {} would be overwritten. \
+                     Commit or discard them first, then pull again.",
+                    self.vault_path.display()
+                )));
+            }
             let refname = format!("refs/heads/{}", branch);
             if let Ok(mut reference) = repo.find_reference(&refname) {
                 reference
@@ -369,7 +440,7 @@ impl GitSyncEngine {
         fetch_opts.remote_callbacks(make_callbacks());
         remote
             .fetch(&[branch], Some(&mut fetch_opts), None)
-            .map_err(|e| SigynError::GitError(e.to_string()))?;
+            .map_err(|e| SigynError::GitError(format!("fetch failed: {}{}", e, auth_hint(&e))))?;
 
         let fetch_head = repo
             .find_reference("FETCH_HEAD")
@@ -387,6 +458,15 @@ impl GitSyncEngine {
         }
 
         if analysis.is_fast_forward() {
+            // A fast-forward uses a force checkout, which would silently
+            // discard uncommitted edits to tracked files. Refuse instead.
+            if self.has_uncommitted_tracked_changes(&repo)? {
+                return Err(SigynError::GitError(format!(
+                    "pull aborted: uncommitted local changes in {} would be overwritten. \
+                     Commit or discard them first, then pull again.",
+                    self.vault_path.display()
+                )));
+            }
             let refname = format!("refs/heads/{}", branch);
             if let Ok(mut reference) = repo.find_reference(&refname) {
                 reference
@@ -414,6 +494,18 @@ impl GitSyncEngine {
         Ok(!statuses.is_empty())
     }
 
+    /// True if tracked files have uncommitted (staged or unstaged) changes.
+    /// Untracked and ignored files are not counted — a fast-forward checkout
+    /// does not remove them.
+    fn has_uncommitted_tracked_changes(&self, repo: &git2::Repository) -> Result<bool> {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(false).include_ignored(false);
+        let statuses = repo
+            .statuses(Some(&mut opts))
+            .map_err(|e| SigynError::GitError(e.to_string()))?;
+        Ok(!statuses.is_empty())
+    }
+
     /// Check if a named remote (e.g. "origin") is configured with a URL.
     pub fn has_remote(&self, name: &str) -> bool {
         let repo = match self.open_repo() {
@@ -427,16 +519,17 @@ impl GitSyncEngine {
     }
 
     pub fn sync(&self, remote_name: &str, branch: &str, message: &str) -> Result<SyncResult> {
-        // Pull first
-        let pull_result = self.pull(remote_name, branch)?;
-        if matches!(pull_result, PullResult::Conflict) {
-            return Ok(SyncResult::Conflict);
-        }
-
-        // Stage and commit local changes
+        // Commit local changes first so nothing in the working tree can be
+        // clobbered (pull refuses to fast-forward over uncommitted changes).
         if self.has_changes()? {
             self.stage_all()?;
             self.commit(message)?;
+        }
+
+        // Pull (fast-forward only; diverged histories surface as Conflict)
+        let pull_result = self.pull(remote_name, branch)?;
+        if matches!(pull_result, PullResult::Conflict) {
+            return Ok(SyncResult::Conflict);
         }
 
         // Push

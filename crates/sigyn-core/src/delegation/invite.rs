@@ -51,6 +51,12 @@ pub struct InvitationFile {
 
 impl InvitationFile {
     /// Build the canonical bytes that are signed by the inviter.
+    ///
+    /// Format v3: `created_at` and `expires_at` are part of the signed
+    /// payload so an invitee cannot extend (or remove) the expiry without
+    /// invalidating the signature. Verification fails closed: invitations
+    /// signed with the older v2 payload (which did not cover the timestamps)
+    /// no longer verify and must be re-issued.
     #[allow(clippy::too_many_arguments)]
     pub fn signing_payload(
         id: uuid::Uuid,
@@ -61,13 +67,15 @@ impl InvitationFile {
         allowed_envs: &[String],
         secret_patterns: &[String],
         max_delegation_depth: u32,
+        created_at: &chrono::DateTime<chrono::Utc>,
+        expires_at: &Option<chrono::DateTime<chrono::Utc>>,
     ) -> Vec<u8> {
         // Deterministic payload with length-prefixed fields to prevent
         // ambiguity from variable-length concatenation.
         // NOTE: The invitation ID (UUID v4) already makes each invitation unique,
         // preventing replay of the exact same signed payload.
         let mut payload = Vec::new();
-        payload.extend_from_slice(b"sigyn-invitation-v2:");
+        payload.extend_from_slice(b"sigyn-invitation-v3:");
         payload.extend_from_slice(id.as_bytes());
         // Length-prefix all variable-length fields
         let vault_name_bytes = vault_name.as_bytes();
@@ -92,6 +100,17 @@ impl InvitationFile {
             payload.extend_from_slice(pat_bytes);
         }
         payload.extend_from_slice(&max_delegation_depth.to_le_bytes());
+        // Include created_at so it can't be backdated/postdated
+        payload.extend_from_slice(&created_at.timestamp().to_le_bytes());
+        // Include expires_at (option-tagged, same pattern as vault::transfer)
+        // so the invitee cannot null-out or extend the expiry
+        match expires_at {
+            Some(ts) => {
+                payload.push(1);
+                payload.extend_from_slice(&ts.timestamp().to_le_bytes());
+            }
+            None => payload.push(0),
+        }
         payload
     }
 
@@ -109,6 +128,8 @@ impl InvitationFile {
             &self.allowed_envs,
             &self.secret_patterns,
             self.max_delegation_depth,
+            &self.created_at,
+            &self.expires_at,
         );
         verifying_key.verify(&payload, &self.signature)
     }
@@ -119,71 +140,12 @@ mod tests {
     use super::*;
     use crate::crypto::keys::SigningKeyPair;
 
-    #[test]
-    fn test_signing_payload_determinism() {
-        let id = uuid::Uuid::new_v4();
-        let vault_id = uuid::Uuid::new_v4();
-        let fp = KeyFingerprint([0xAA; 16]);
-        let envs = vec!["dev".to_string(), "prod".to_string()];
-        let patterns = vec!["*".to_string()];
-
-        let p1 = InvitationFile::signing_payload(
-            id,
-            "vault",
-            vault_id,
-            &fp,
-            Role::Contributor,
-            &envs,
-            &patterns,
-            2,
-        );
-        let p2 = InvitationFile::signing_payload(
-            id,
-            "vault",
-            vault_id,
-            &fp,
-            Role::Contributor,
-            &envs,
-            &patterns,
-            2,
-        );
-        assert_eq!(p1, p2);
-    }
-
-    #[test]
-    fn test_signing_payload_varies_with_input() {
-        let id = uuid::Uuid::new_v4();
-        let vault_id = uuid::Uuid::new_v4();
-        let fp = KeyFingerprint([0xAA; 16]);
-        let envs = vec!["dev".to_string()];
-        let patterns = vec![];
-
-        let p1 = InvitationFile::signing_payload(
-            id,
-            "vault-a",
-            vault_id,
-            &fp,
-            Role::Contributor,
-            &envs,
-            &patterns,
-            2,
-        );
-        let p2 = InvitationFile::signing_payload(
-            id,
-            "vault-b",
-            vault_id,
-            &fp,
-            Role::Contributor,
-            &envs,
-            &patterns,
-            2,
-        );
-        assert_ne!(p1, p2);
-    }
-
-    #[test]
-    fn test_sign_and_verify_roundtrip() {
-        let kp = SigningKeyPair::generate();
+    /// Helper: build a signed InvitationFile with the given expiry.
+    fn signed_invitation(
+        kp: &SigningKeyPair,
+        created_at: chrono::DateTime<chrono::Utc>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> InvitationFile {
         let id = uuid::Uuid::new_v4();
         let vault_id = uuid::Uuid::new_v4();
         let fp = KeyFingerprint([0xBB; 16]);
@@ -199,10 +161,12 @@ mod tests {
             &envs,
             &patterns,
             3,
+            &created_at,
+            &expires_at,
         );
         let signature = kp.sign(&payload);
 
-        let invite = InvitationFile {
+        InvitationFile {
             id,
             vault_name: "myvault".to_string(),
             vault_id,
@@ -212,10 +176,124 @@ mod tests {
             secret_patterns: patterns,
             max_delegation_depth: 3,
             signature,
-            created_at: chrono::Utc::now(),
-            expires_at: None,
-        };
+            created_at,
+            expires_at,
+        }
+    }
 
+    #[test]
+    fn test_signing_payload_determinism() {
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xAA; 16]);
+        let envs = vec!["dev".to_string(), "prod".to_string()];
+        let patterns = vec!["*".to_string()];
+        let created = chrono::Utc::now();
+        let expires = Some(created + chrono::Duration::days(7));
+
+        let p1 = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+            &created,
+            &expires,
+        );
+        let p2 = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+            &created,
+            &expires,
+        );
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn test_signing_payload_varies_with_input() {
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xAA; 16]);
+        let envs = vec!["dev".to_string()];
+        let patterns = vec![];
+        let created = chrono::Utc::now();
+
+        let p1 = InvitationFile::signing_payload(
+            id,
+            "vault-a",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+            &created,
+            &None,
+        );
+        let p2 = InvitationFile::signing_payload(
+            id,
+            "vault-b",
+            vault_id,
+            &fp,
+            Role::Contributor,
+            &envs,
+            &patterns,
+            2,
+            &created,
+            &None,
+        );
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_signing_payload_covers_expiry() {
+        let id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::new_v4();
+        let fp = KeyFingerprint([0xAA; 16]);
+        let created = chrono::Utc::now();
+        let expires = Some(created + chrono::Duration::days(7));
+
+        let with_expiry = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::ReadOnly,
+            &[],
+            &[],
+            0,
+            &created,
+            &expires,
+        );
+        let without_expiry = InvitationFile::signing_payload(
+            id,
+            "vault",
+            vault_id,
+            &fp,
+            Role::ReadOnly,
+            &[],
+            &[],
+            0,
+            &created,
+            &None,
+        );
+        assert_ne!(with_expiry, without_expiry);
+    }
+
+    #[test]
+    fn test_sign_and_verify_roundtrip() {
+        let kp = SigningKeyPair::generate();
+        let created = chrono::Utc::now();
+        let invite = signed_invitation(&kp, created, Some(created + chrono::Duration::days(7)));
         assert!(invite.verify(&kp.verifying_key()).is_ok());
     }
 
@@ -223,29 +301,41 @@ mod tests {
     fn test_verify_rejects_tampered_signature() {
         let kp = SigningKeyPair::generate();
         let other_kp = SigningKeyPair::generate();
-        let id = uuid::Uuid::new_v4();
-        let vault_id = uuid::Uuid::new_v4();
-        let fp = KeyFingerprint([0xCC; 16]);
-
-        let payload =
-            InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::ReadOnly, &[], &[], 0);
-        let signature = kp.sign(&payload);
-
-        let invite = InvitationFile {
-            id,
-            vault_name: "v".to_string(),
-            vault_id,
-            inviter_fingerprint: fp,
-            proposed_role: Role::ReadOnly,
-            allowed_envs: vec![],
-            secret_patterns: vec![],
-            max_delegation_depth: 0,
-            signature,
-            created_at: chrono::Utc::now(),
-            expires_at: None,
-        };
+        let invite = signed_invitation(&kp, chrono::Utc::now(), None);
 
         // Verify with wrong key should fail
         assert!(invite.verify(&other_kp.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_nulled_expiry() {
+        let kp = SigningKeyPair::generate();
+        let created = chrono::Utc::now();
+        let mut invite = signed_invitation(&kp, created, Some(created + chrono::Duration::days(7)));
+
+        // Invitee strips the expiry to make the invitation immortal
+        invite.expires_at = None;
+        assert!(invite.verify(&kp.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_extended_expiry() {
+        let kp = SigningKeyPair::generate();
+        let created = chrono::Utc::now();
+        let mut invite = signed_invitation(&kp, created, Some(created + chrono::Duration::days(7)));
+
+        // Invitee extends the expiry by 10 years
+        invite.expires_at = Some(created + chrono::Duration::days(3650));
+        assert!(invite.verify(&kp.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_tampered_created_at() {
+        let kp = SigningKeyPair::generate();
+        let created = chrono::Utc::now();
+        let mut invite = signed_invitation(&kp, created, Some(created + chrono::Duration::days(7)));
+
+        invite.created_at = created + chrono::Duration::days(30);
+        assert!(invite.verify(&kp.verifying_key()).is_err());
     }
 }

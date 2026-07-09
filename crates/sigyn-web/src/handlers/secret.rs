@@ -60,6 +60,13 @@ pub struct SecretResponse {
     pub message: String,
 }
 
+/// Validate an environment name from the URL path before it is used to build
+/// filesystem paths (defense against traversal via encoded path segments).
+fn validate_env_name(env_name: &str) -> Result<(), WebError> {
+    sigyn_engine::vault::validate_name(env_name, "env")
+        .map_err(|e| WebError::BadRequest(e.to_string()))
+}
+
 /// Ensure the vault is unlocked for this session, unlocking if needed.
 fn ensure_vault_unlocked(state: &AppState, token: &str, vault_name: &str) -> Result<(), WebError> {
     let has_cached = state
@@ -166,6 +173,7 @@ pub async fn list_secrets(
     let token =
         extract_session_token(&req).ok_or_else(|| WebError::Unauthorized("no session".into()))?;
 
+    validate_env_name(&env_name)?;
     ensure_vault_unlocked(&state, &token, &vault_name)?;
     check_access(
         &state,
@@ -217,14 +225,22 @@ pub async fn list_secrets(
         })
         .ok_or_else(|| WebError::Unauthorized("session expired".into()))??;
 
-    // Audit the list operation
-    let _ = audit_log(
+    // Audit the list operation. Reads are not failed on audit errors, but the
+    // failure must not be silently discarded.
+    if let Err(e) = audit_log(
         &state,
         &token,
         &vault_name,
         Some(env_name.clone()),
-        sigyn_engine::audit::entry::AuditAction::SecretsListed { env: env_name },
-    );
+        sigyn_engine::audit::entry::AuditAction::SecretsListed {
+            env: env_name.clone(),
+        },
+    ) {
+        eprintln!(
+            "sigyn-web: WARNING: failed to write audit entry for secrets list (vault '{}', env '{}'): {:?}",
+            vault_name, env_name, e
+        );
+    }
 
     Ok(Json(entries))
 }
@@ -237,6 +253,7 @@ pub async fn get_secret(
     let token =
         extract_session_token(&req).ok_or_else(|| WebError::Unauthorized("no session".into()))?;
 
+    validate_env_name(&env_name)?;
     ensure_vault_unlocked(&state, &token, &vault_name)?;
     check_access(
         &state,
@@ -286,14 +303,20 @@ pub async fn get_secret(
         })
         .ok_or_else(|| WebError::Unauthorized("session expired".into()))??;
 
-    // Audit
-    let _ = audit_log(
+    // Audit the read. Reads are not failed on audit errors, but the failure
+    // must not be silently discarded.
+    if let Err(e) = audit_log(
         &state,
         &token,
         &vault_name,
         Some(env_name.clone()),
-        sigyn_engine::audit::entry::AuditAction::SecretRead { key },
-    );
+        sigyn_engine::audit::entry::AuditAction::SecretRead { key: key.clone() },
+    ) {
+        eprintln!(
+            "sigyn-web: WARNING: failed to write audit entry for secret read (vault '{}', env '{}', key '{}'): {:?}",
+            vault_name, env_name, key, e
+        );
+    }
 
     Ok(Json(detail))
 }
@@ -313,6 +336,7 @@ pub async fn set_secret(
     let set_req: SetSecretRequest = serde_json::from_slice(&body)
         .map_err(|e| WebError::BadRequest(format!("invalid JSON: {}", e)))?;
 
+    validate_env_name(&env_name)?;
     ensure_vault_unlocked(&state, &token, &vault_name)?;
     check_access(
         &state,
@@ -327,6 +351,30 @@ pub async fn set_secret(
     let env_path = paths.env_path(&vault_name, &env_name);
 
     let key_clone = set_req.key.clone();
+
+    // Validate the value before auditing so a malformed request doesn't
+    // produce a spurious audit entry.
+    let value = match set_req.secret_type.as_str() {
+        "multiline" => SecretValue::Multiline(set_req.value),
+        "json" => {
+            let v: serde_json::Value = serde_json::from_str(&set_req.value)
+                .map_err(|e| WebError::BadRequest(format!("invalid JSON value: {}", e)))?;
+            SecretValue::Json(v)
+        }
+        _ => SecretValue::String(set_req.value),
+    };
+
+    // Audit before persisting the mutation (matches the CLI ordering). A
+    // failed audit append fails the whole operation: no unaudited writes.
+    audit_log(
+        &state,
+        &token,
+        &vault_name,
+        Some(env_name.clone()),
+        sigyn_engine::audit::entry::AuditAction::SecretWritten {
+            key: key_clone.clone(),
+        },
+    )?;
 
     state
         .sessions
@@ -350,16 +398,6 @@ pub async fn set_secret(
                 sigyn_engine::vault::PlaintextEnv::new()
             };
 
-            let value = match set_req.secret_type.as_str() {
-                "multiline" => SecretValue::Multiline(set_req.value),
-                "json" => {
-                    let v: serde_json::Value = serde_json::from_str(&set_req.value)
-                        .map_err(|e| WebError::BadRequest(format!("invalid JSON value: {}", e)))?;
-                    SecretValue::Json(v)
-                }
-                _ => SecretValue::String(set_req.value),
-            };
-
             plaintext.set(set_req.key, value, &session.fingerprint);
 
             let encrypted = encrypt_env(&plaintext, cipher, &env_name)
@@ -370,17 +408,6 @@ pub async fn set_secret(
             Ok::<_, WebError>(())
         })
         .ok_or_else(|| WebError::Unauthorized("session expired".into()))??;
-
-    // Audit
-    let _ = audit_log(
-        &state,
-        &token,
-        &vault_name,
-        Some(env_name),
-        sigyn_engine::audit::entry::AuditAction::SecretWritten {
-            key: key_clone.clone(),
-        },
-    );
 
     Ok(Json(SecretResponse {
         ok: true,
@@ -396,6 +423,7 @@ pub async fn delete_secret(
     let token =
         extract_session_token(&req).ok_or_else(|| WebError::Unauthorized("no session".into()))?;
 
+    validate_env_name(&env_name)?;
     ensure_vault_unlocked(&state, &token, &vault_name)?;
     check_access(
         &state,
@@ -412,6 +440,43 @@ pub async fn delete_secret(
     if !env_path.exists() {
         return Err(WebError::NotFound(format!("env '{}' not found", env_name)));
     }
+
+    // Check the secret exists before auditing so a miss doesn't produce a
+    // spurious audit entry.
+    let exists = state
+        .sessions
+        .with_session(&token, |session| {
+            let ctx = session
+                .vault_contexts
+                .get(&vault_name)
+                .ok_or_else(|| WebError::Internal("vault context missing".into()))?;
+            let cipher = ctx
+                .env_ciphers
+                .get(&env_name)
+                .ok_or_else(|| WebError::Forbidden(format!("no access to env '{}'", env_name)))?;
+
+            let encrypted = read_encrypted_env(&env_path)
+                .map_err(|e| WebError::Internal(format!("failed to read env: {}", e)))?;
+            let plaintext = decrypt_env(&encrypted, cipher)
+                .map_err(|e| WebError::Internal(format!("failed to decrypt env: {}", e)))?;
+
+            Ok::<_, WebError>(plaintext.get(&key).is_some())
+        })
+        .ok_or_else(|| WebError::Unauthorized("session expired".into()))??;
+
+    if !exists {
+        return Err(WebError::NotFound(format!("secret '{}' not found", key)));
+    }
+
+    // Audit before persisting the mutation (matches the CLI ordering). A
+    // failed audit append fails the whole operation: no unaudited deletes.
+    audit_log(
+        &state,
+        &token,
+        &vault_name,
+        Some(env_name.clone()),
+        sigyn_engine::audit::entry::AuditAction::SecretDeleted { key: key.clone() },
+    )?;
 
     let removed = state
         .sessions
@@ -445,15 +510,6 @@ pub async fn delete_secret(
     if !removed {
         return Err(WebError::NotFound(format!("secret '{}' not found", key)));
     }
-
-    // Audit
-    let _ = audit_log(
-        &state,
-        &token,
-        &vault_name,
-        Some(env_name),
-        sigyn_engine::audit::entry::AuditAction::SecretDeleted { key: key.clone() },
-    );
 
     Ok(Json(SecretResponse {
         ok: true,

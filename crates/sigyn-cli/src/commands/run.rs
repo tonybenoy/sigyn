@@ -151,10 +151,72 @@ fn resolve_named_command(args: &[String]) -> Option<Vec<String>> {
         args[0],
         cmd_str
     );
-    // Split the command string and append any extra args
-    let mut parts: Vec<String> = cmd_str.split_whitespace().map(String::from).collect();
+    // Split the command string with quote awareness so a `.sigyn.toml` command
+    // like `deploy --msg "hello world"` keeps the quoted argument intact.
+    let mut parts = split_shell_words(cmd_str);
     parts.extend_from_slice(&args[1..]);
     Some(parts)
+}
+
+/// Split a command string into arguments, honoring single and double quotes and
+/// backslash escapes (a minimal POSIX-ish word split). Unterminated quotes are
+/// treated as extending to end-of-string.
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    current.push(q);
+                }
+            }
+            '"' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    if q == '"' {
+                        break;
+                    }
+                    if q == '\\' {
+                        if let Some(&next) = chars.peek() {
+                            if next == '"' || next == '\\' {
+                                current.push(next);
+                                chars.next();
+                                continue;
+                            }
+                        }
+                    }
+                    current.push(q);
+                }
+            }
+            '\\' => {
+                in_word = true;
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
 }
 
 /// Check whether vault resolution would succeed, and offer interactive setup if not.
@@ -527,5 +589,37 @@ pub fn handle_watch(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_split_tests {
+    use super::split_shell_words;
+
+    #[test]
+    fn splits_plain_words() {
+        assert_eq!(
+            split_shell_words("deploy --env prod"),
+            ["deploy", "--env", "prod"]
+        );
+    }
+
+    #[test]
+    fn keeps_double_quoted_arg() {
+        assert_eq!(
+            split_shell_words("deploy --msg \"hello world\""),
+            ["deploy", "--msg", "hello world"]
+        );
+    }
+
+    #[test]
+    fn keeps_single_quoted_arg() {
+        assert_eq!(split_shell_words("run 'a b c' x"), ["run", "a b c", "x"]);
+    }
+
+    #[test]
+    fn handles_escapes_and_empty() {
+        assert_eq!(split_shell_words("a\\ b"), ["a b"]);
+        assert!(split_shell_words("   ").is_empty());
     }
 }
