@@ -627,102 +627,19 @@ pub fn unlock_vault(
         ))?
     };
 
-    // --- Policy-signer trust anchor ---
+    // --- Policy-signer trust anchor (finding C1) ---
     // A policy must never vouch for its own signer: any member holds the vault
-    // key and could re-seal a crafted policy granting themselves admin, signed
-    // with their own (locally known) key. Owner-signed policies are anchored by
-    // the TOFU owner pin above. Admin-signed policies must be signed by an
-    // admin recorded in the device-pinned anchor from a previously accepted
-    // policy, and may not add or elevate Admin+ members (only the owner can).
-    let policy_admin_signers: std::collections::HashMap<String, u8> = policy
-        .members
-        .iter()
-        .filter(|(_, m)| m.role.can_manage_policy())
-        .map(|(fp_hex, m)| (fp_hex.clone(), m.role.level()))
-        .collect();
-    if policy_signer_fp == manifest.owner {
-        // Owner-signed: refresh the anchor with the owner-approved admin set.
-        // Best-effort save, matching the owner-pin behavior above.
-        if let Ok(dk) = sigyn_engine::device::load_or_create_device_key(&home) {
-            if let Ok(mut pin_store) =
-                sigyn_engine::vault::local_state::load_pinned_store(&home, &dk)
-            {
-                pin_store.entry_mut(&vault_name).policy_anchor =
-                    Some(sigyn_engine::vault::PolicyTrustAnchor {
-                        admin_signers: policy_admin_signers,
-                        updated_at: chrono::Utc::now(),
-                    });
-                let _ = sigyn_engine::vault::local_state::save_pinned_store(&pin_store, &home, &dk);
-            }
-        }
-    } else {
-        // Admin-signed: fail closed if the anchor cannot be consulted.
-        let dk = sigyn_engine::device::load_or_create_device_key(&home).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot verify policy signer {}: device key unavailable: {}",
-                policy_signer_fp.to_hex(),
-                e
-            )
-        })?;
-        let mut pin_store = sigyn_engine::vault::local_state::load_pinned_store(&home, &dk)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "cannot verify policy signer {}: pinned local state unavailable: {}",
-                    policy_signer_fp.to_hex(),
-                    e
-                )
-            })?;
-        let local_state = pin_store.entry_mut(&vault_name);
-        match &local_state.policy_anchor {
-            Some(anchor) => {
-                let signer_hex = policy_signer_fp.to_hex();
-                if !anchor.admin_signers.contains_key(&signer_hex) {
-                    anyhow::bail!(
-                        "policy signed by {} who was not an admin in the last policy \
-                         accepted on this device — possible privilege escalation.\n  \
-                         If this admin was legitimately promoted, ask the vault owner \
-                         to re-sign the policy (any owner-signed change refreshes the \
-                         trusted admin set).",
-                        signer_hex
-                    );
-                }
-                for (fp_hex, level) in &policy_admin_signers {
-                    match anchor.admin_signers.get(fp_hex) {
-                        Some(anchored_level) if level <= anchored_level => {}
-                        _ => anyhow::bail!(
-                            "policy signed by admin {} adds or elevates privileged member {} — \
-                             only an owner-signed policy may change the admin set",
-                            signer_hex,
-                            fp_hex
-                        ),
-                    }
-                }
-            }
-            None => {
-                // First access with an admin-signed policy: TOFU-pin the admin
-                // set, mirroring the owner pin above.
-                eprintln!(
-                    "\n{} first access: pinning policy admins {}",
-                    style("pin:").yellow().bold(),
-                    policy_admin_signers
-                        .keys()
-                        .map(|fp| &fp[..12.min(fp.len())])
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                eprintln!(
-                    "  {} Verify with the vault owner that these members are admins.",
-                    style("!").red().bold()
-                );
-            }
-        }
-        // Anchor the (validated or first-seen) admin set for the next access.
-        local_state.policy_anchor = Some(sigyn_engine::vault::PolicyTrustAnchor {
-            admin_signers: policy_admin_signers,
-            updated_at: chrono::Utc::now(),
-        });
-        let _ = sigyn_engine::vault::local_state::save_pinned_store(&pin_store, &home, &dk);
-    }
+    // key and could re-seal a crafted policy granting themselves admin. The
+    // shared engine routine checks a non-owner signer against the device-pinned
+    // admin set from the last accepted policy (and refreshes it on owner-signed
+    // policies). Shared with the web unlock path so the two cannot diverge.
+    sigyn_engine::vault::trust::enforce_policy_trust_anchor(
+        &home,
+        &vault_name,
+        &manifest.owner,
+        &policy,
+        &policy_signer_fp,
+    )?;
 
     // Verify the header signer is authorized (owner or admin+).
     // This prevents a low-privilege member from signing a crafted header.
@@ -776,10 +693,24 @@ pub fn check_access(
     action: AccessAction,
     key: Option<&str>,
 ) -> Result<()> {
+    let env = ctx.env_name.clone();
+    check_access_for_env(ctx, action, key, &env)
+}
+
+/// Like [`check_access`], but evaluates against an explicit environment rather
+/// than the context's current env. Used by `env promote` to authorize the
+/// source (Read) and target (Write) environments through the same
+/// hierarchy-aware evaluation as every other access check.
+pub fn check_access_for_env(
+    ctx: &UnlockedVaultContext,
+    action: AccessAction,
+    key: Option<&str>,
+    env: &str,
+) -> Result<()> {
     let request = AccessRequest {
         actor: ctx.fingerprint.clone(),
         action,
-        env: ctx.env_name.clone(),
+        env: env.to_string(),
         key: key.map(String::from),
         mfa_verified: false,
     };

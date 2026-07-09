@@ -1,7 +1,8 @@
 use crate::crypto::keys::KeyFingerprint;
 use crate::error::Result;
-use crate::policy::acl::matches_secret_pattern;
-use crate::policy::engine::{format_expiry_warning, AccessAction, AccessRequest, PolicyDecision};
+use crate::policy::engine::{
+    evaluate_member_grant, format_expiry_warning, AccessRequest, PolicyDecision,
+};
 use crate::policy::member::MemberPolicy;
 use crate::policy::storage::VaultPolicy;
 
@@ -73,7 +74,7 @@ impl HierarchicalPolicyEngine {
         let mut first_denial: Option<String> = None;
         let mut granted = false;
         for m in &member_entries {
-            match Self::level_denial(m, request)? {
+            match evaluate_member_grant(m, request)? {
                 None => {
                     granted = true;
                     break;
@@ -141,78 +142,6 @@ impl HierarchicalPolicyEngine {
         }
 
         Ok(PolicyDecision::Allow)
-    }
-
-    /// Check whether a single level's member policy grants the request on
-    /// its own. Returns `None` when granted, or `Some(reason)` when denied.
-    fn level_denial(member: &MemberPolicy, request: &AccessRequest) -> Result<Option<String>> {
-        // Env scoping only applies to env-scoped actions; vault-wide
-        // administrative actions must not be blocked by the current env.
-        if !request.action.is_env_agnostic()
-            && !member
-                .allowed_envs
-                .iter()
-                .any(|e| e == "*" || e == &request.env)
-        {
-            return Ok(Some(format!("no access to env '{}'", request.env)));
-        }
-
-        match &request.action {
-            AccessAction::Read => {
-                if !member.role.can_read() {
-                    return Ok(Some("role cannot read".into()));
-                }
-            }
-            AccessAction::Write | AccessAction::Delete => {
-                if !member.role.can_write() {
-                    return Ok(Some("role cannot write".into()));
-                }
-            }
-            AccessAction::ManageMembers => {
-                if !member.role.can_manage_members() {
-                    return Ok(Some("role cannot manage members".into()));
-                }
-            }
-            AccessAction::ManagePolicy => {
-                if !member.role.can_manage_policy() {
-                    return Ok(Some("role cannot manage policy".into()));
-                }
-            }
-            AccessAction::CreateEnv | AccessAction::Promote => {
-                if !member.role.can_manage_members() {
-                    return Ok(Some(
-                        "role cannot create or promote environments (requires manager or higher)"
-                            .into(),
-                    ));
-                }
-            }
-            AccessAction::Audit => {
-                if !member.role.can_audit() {
-                    return Ok(Some("role cannot access audit logs".into()));
-                }
-            }
-        }
-
-        match &request.key {
-            Some(key) => {
-                if !matches_secret_pattern(key, &member.secret_patterns)? {
-                    return Ok(Some(format!("no access to key '{}'", key)));
-                }
-            }
-            // A keyless data request (list/search/run/export/import/…)
-            // touches every key in the environment, so it is only allowed
-            // when this level's pattern set is unrestricted.
-            None if request.action.accesses_secret_data() => {
-                if !member.secret_patterns.iter().any(|p| p == "*") {
-                    return Ok(Some(
-                        "bulk access to all keys requires unrestricted secret patterns".into(),
-                    ));
-                }
-            }
-            None => {}
-        }
-
-        Ok(None)
     }
 }
 

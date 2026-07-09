@@ -55,6 +55,7 @@ impl From<sigyn_engine::SigynError> for WebError {
             IdentityAlreadyExists(_) => WebError::BadRequest(err.to_string()),
             Decryption(_) => WebError::Unauthorized("decryption failed (wrong passphrase?)".into()),
             SignatureVerification => WebError::Forbidden("signature verification failed".into()),
+            AccessDenied(_) => WebError::Forbidden(err.to_string()),
             _ => WebError::Internal(err.to_string()),
         }
     }

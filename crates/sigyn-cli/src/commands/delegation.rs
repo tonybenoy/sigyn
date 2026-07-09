@@ -1553,7 +1553,7 @@ pub fn handle(
                 println!(
                     "\n{} granted env '{}', {} failed",
                     style(granted).green().bold(),
-                    &env,
+                    env,
                     if failed > 0 {
                         style(failed).red().bold()
                     } else {

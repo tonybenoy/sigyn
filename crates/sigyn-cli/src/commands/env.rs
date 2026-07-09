@@ -5,7 +5,7 @@ use sigyn_engine::audit::entry::AuditOutcome;
 use sigyn_engine::audit::{AuditAction, AuditLog};
 use sigyn_engine::environment::policy::EnvironmentPolicy;
 use sigyn_engine::environment::promotion::promote_env;
-use sigyn_engine::policy::engine::{AccessAction, AccessRequest, PolicyDecision, PolicyEngine};
+use sigyn_engine::policy::engine::AccessAction;
 use sigyn_engine::vault::{env_file, PlaintextEnv, VaultPaths};
 
 use super::secret::{check_access, unlock_vault, UnlockedVaultContext};
@@ -69,48 +69,13 @@ pub enum EnvCommands {
 /// secret values out of the source and into the target, so the actor must be
 /// able to both read the source and write the target.
 ///
-/// NOTE: this uses the flat single-vault [`PolicyEngine`]. For org-linked
-/// vaults (`manifest.org_path` set) the hierarchical org-level constraints are
-/// NOT re-evaluated here; the top-level `check_access(Promote)` call in the
-/// promote arm already performs the hierarchy-aware evaluation. A dedicated
-/// `secret::check_access_for_env(ctx, action, key, env)` helper would let this
-/// reuse the full hierarchy-aware path — see the security report.
+/// Delegates to [`secret::check_access_for_env`], which runs the same
+/// hierarchy-aware evaluation as every other access check (so org-level
+/// constraints on org-linked vaults are applied here too) and handles the MFA
+/// re-prompt. Promotion is a bulk env-to-env copy, so this is a keyless
+/// (all-keys) request — a pattern-restricted member is correctly denied.
 fn authorize_env_action(ctx: &UnlockedVaultContext, action: AccessAction, env: &str) -> Result<()> {
-    let make_request = |mfa_verified: bool| AccessRequest {
-        actor: ctx.fingerprint.clone(),
-        action: action.clone(),
-        env: env.to_string(),
-        // Promotion is a bulk env-to-env copy, so this is a keyless (all-keys)
-        // request. A pattern-restricted member is correctly denied bulk access.
-        key: None,
-        mfa_verified,
-    };
-
-    let engine = PolicyEngine::new(&ctx.policy, &ctx.manifest.owner);
-    let decide = |decision: PolicyDecision| -> Result<Option<()>> {
-        match decision {
-            PolicyDecision::Allow => Ok(Some(())),
-            PolicyDecision::AllowWithWarning(msg) => {
-                eprintln!("{} {}", style("WARNING").yellow().bold(), msg);
-                Ok(Some(()))
-            }
-            PolicyDecision::Deny(reason) => {
-                anyhow::bail!("access denied for env '{}': {}", env, reason)
-            }
-            PolicyDecision::RequiresMfa => Ok(None),
-        }
-    };
-
-    if let Some(()) = decide(engine.evaluate(&make_request(false))?)? {
-        return Ok(());
-    }
-
-    // Policy requires MFA for this action: prompt, then re-evaluate.
-    crate::commands::mfa::prompt_and_verify_mfa(&ctx.fingerprint, &ctx.loaded_identity)?;
-    match decide(engine.evaluate(&make_request(true))?)? {
-        Some(()) => Ok(()),
-        None => unreachable!("MFA was just verified"),
-    }
+    super::secret::check_access_for_env(ctx, action, None, env)
 }
 
 pub fn handle(

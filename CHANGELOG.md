@@ -113,10 +113,23 @@ the layers above the (already sound) cryptographic core. This release fixes them
   `default_vault` instead of the literal `"default"`.
 - Dependencies updated to their latest semver-compatible versions.
 
+### Internal / refactors
+
+- The policy-signer trust-anchor decision (finding C1) is now a single shared
+  routine in `sigyn-engine` (`vault::trust`), called by both the CLI and web unlock
+  paths, so the two surfaces can no longer diverge on it.
+- The single-vault and hierarchical policy engines now share one
+  `evaluate_member_grant` primitive for the role/env/pattern rules, instead of two
+  copies that had already drifted (which is how the `key: None` and cross-level
+  bugs slipped into only one engine).
+- `env promote` authorizes source/target through the shared, hierarchy-aware
+  `check_access_for_env`, so org-level constraints apply to promotion too.
+- Dependency-advisory scan (`cargo deny`): the git2 unsound advisories
+  RUSTSEC-2026-0183/0184 are ignored with justification — the fix is only in a
+  semver-breaking git2 0.21 that drops the ssh/https features Sigyn requires, and
+  the affected APIs (`Remote::list`, `BlameHunk`) are not used here.
+
 ### Notes
 
 - Pre-existing env files remain readable; newly written env files no longer store a
   redundant plaintext content hash.
-- The web GUI unlock path still duplicates the CLI unlock logic. Extracting a single
-  shared routine in `sigyn-engine` (so the two surfaces cannot diverge) is the
-  recommended follow-up.

@@ -12,6 +12,14 @@ ignore = [
     # Not applicable: we use OsRng exclusively, never thread_rng.
     # Blocked from upgrading to rand 0.9 by chacha20poly1305 depending on rand_core 0.6.
     "RUSTSEC-2026-0097",
+    # git2 potential-UB (unsound) advisories in the C bindings. No fixed release
+    # within our 0.20.x semver range — the fix landed only in git2 0.21.0, a
+    # semver-breaking bump that drops the default ssh/https/cred features Sigyn
+    # relies on. Not reachable here: our git usage (clone/fetch/push/commit/
+    # checkout/status via a controlled subset of the API) never calls
+    # Remote::list() or Blame::blame_buffer()/BlameHunk, the paths these concern.
+    "RUSTSEC-2026-0183", # Remote::list() null-slice UB when no refs advertised
+    "RUSTSEC-2026-0184", # Signature from a buffer-created BlameHunk null deref
 ]
 
 [licenses]
