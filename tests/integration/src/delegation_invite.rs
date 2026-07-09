@@ -16,8 +16,20 @@ fn make_signed_invitation(
     let envs: Vec<String> = envs.iter().map(|s| s.to_string()).collect();
     let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
 
+    // Timestamps are part of the v3 signed payload, so fix them before signing.
+    let created_at = chrono::Utc::now();
+    let expires_at: Option<chrono::DateTime<chrono::Utc>> = None;
     let payload = InvitationFile::signing_payload(
-        id, vault_name, vault_id, &fp, role, &envs, &patterns, depth,
+        id,
+        vault_name,
+        vault_id,
+        &fp,
+        role,
+        &envs,
+        &patterns,
+        depth,
+        &created_at,
+        &expires_at,
     );
     let signature = kp.sign(&payload);
 
@@ -31,8 +43,8 @@ fn make_signed_invitation(
         secret_patterns: patterns,
         max_delegation_depth: depth,
         signature,
-        created_at: chrono::Utc::now(),
-        expires_at: None,
+        created_at,
+        expires_at,
     }
 }
 
@@ -121,10 +133,32 @@ fn test_signing_payload_is_deterministic() {
     let envs = vec!["dev".to_string()];
     let patterns = vec!["*".to_string()];
 
-    let p1 =
-        InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::Auditor, &envs, &patterns, 0);
-    let p2 =
-        InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::Auditor, &envs, &patterns, 0);
+    let created_at = chrono::Utc::now();
+    let expires_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    let p1 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::Auditor,
+        &envs,
+        &patterns,
+        0,
+        &created_at,
+        &expires_at,
+    );
+    let p2 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::Auditor,
+        &envs,
+        &patterns,
+        0,
+        &created_at,
+        &expires_at,
+    );
 
     assert_eq!(p1, p2);
 }
@@ -135,8 +169,32 @@ fn test_different_roles_produce_different_payloads() {
     let vault_id = uuid::Uuid::new_v4();
     let fp = KeyFingerprint([0xCC; 16]);
 
-    let p1 = InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::ReadOnly, &[], &[], 0);
-    let p2 = InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::Owner, &[], &[], 0);
+    let ts = chrono::Utc::now();
+    let exp: Option<chrono::DateTime<chrono::Utc>> = None;
+    let p1 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::ReadOnly,
+        &[],
+        &[],
+        0,
+        &ts,
+        &exp,
+    );
+    let p2 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::Owner,
+        &[],
+        &[],
+        0,
+        &ts,
+        &exp,
+    );
 
     assert_ne!(p1, p2);
 }
@@ -149,10 +207,32 @@ fn test_different_envs_produce_different_payloads() {
     let envs_a = vec!["dev".to_string()];
     let envs_b = vec!["prod".to_string()];
 
-    let p1 =
-        InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::Contributor, &envs_a, &[], 0);
-    let p2 =
-        InvitationFile::signing_payload(id, "v", vault_id, &fp, Role::Contributor, &envs_b, &[], 0);
+    let ts = chrono::Utc::now();
+    let exp: Option<chrono::DateTime<chrono::Utc>> = None;
+    let p1 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::Contributor,
+        &envs_a,
+        &[],
+        0,
+        &ts,
+        &exp,
+    );
+    let p2 = InvitationFile::signing_payload(
+        id,
+        "v",
+        vault_id,
+        &fp,
+        Role::Contributor,
+        &envs_b,
+        &[],
+        0,
+        &ts,
+        &exp,
+    );
 
     assert_ne!(p1, p2);
 }

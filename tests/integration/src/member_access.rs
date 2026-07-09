@@ -34,7 +34,7 @@ fn test_multi_member_access() {
     let mut header = seal_v2(
         &vault_key,
         &env_keys,
-        &[owner_pub.clone()],
+        std::slice::from_ref(&owner_pub),
         &env_recipients,
         vault_id,
     )

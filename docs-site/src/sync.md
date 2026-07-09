@@ -246,21 +246,28 @@ Conflicts can be resolved using one of six strategies:
 
 ### Automatic vs Manual Resolution
 
-The LWW-Map CRDT resolves non-conflicting updates automatically. When vector clocks
-detect a true concurrent write (same key modified on two machines without syncing),
-the conflict is surfaced to the user.
+Sigyn syncs over plain Git. When histories diverge (the same vault modified on two
+machines without syncing in between), `sigyn sync pull` reports a conflict that must
+be reconciled — it will not silently overwrite either side, and it refuses to
+overwrite uncommitted local changes.
 
-Resolve manually:
+Automated secret-level conflict resolution is **not yet implemented**. Diverged
+histories are reconciled manually with Git:
 
 ```bash
-# List conflicts
+# See whether the vault has uncommitted local changes
 sigyn sync status
 
-# Resolve a specific conflict
-sigyn sync resolve DATABASE_URL --strategy local
-sigyn sync resolve API_KEY --strategy remote
-sigyn sync resolve CONFIG --strategy latest
+# Reconcile a diverged history manually in the vault's git repo
+cd ~/.sigyn/vaults/<vault>
+git log --oneline --graph --all      # inspect both sides
+git merge origin/main                # or rebase; resolve as normal
+sigyn sync push
 ```
+
+> `sigyn sync resolve` currently validates its arguments and then exits with an
+> error pointing you at the manual Git workflow above, rather than pretending to
+> resolve the conflict.
 
 ## Security Considerations
 

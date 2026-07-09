@@ -65,7 +65,10 @@ mod tests {
     fn test_backup_code_hashing() {
         let code = "abc12345";
         let hash = hash_backup_code(code);
-        assert_eq!(verify_backup_code(code, &[hash.clone()]), Some(0));
+        assert_eq!(
+            verify_backup_code(code, std::slice::from_ref(&hash)),
+            Some(0)
+        );
         assert_eq!(verify_backup_code("wrong", &[hash]), None);
     }
 }

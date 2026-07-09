@@ -1,7 +1,7 @@
 use crate::crypto::keys::KeyFingerprint;
 use crate::error::Result;
 use crate::policy::acl::matches_secret_pattern;
-use crate::policy::engine::{AccessRequest, PolicyDecision};
+use crate::policy::engine::{format_expiry_warning, AccessAction, AccessRequest, PolicyDecision};
 use crate::policy::member::MemberPolicy;
 use crate::policy::storage::VaultPolicy;
 
@@ -17,10 +17,12 @@ pub struct PolicyLevel {
 /// Rules:
 /// 1. Owner at any level → Allow
 /// 2. Collect all MemberPolicy entries for the actor across all levels
-/// 3. Take highest role (max by Role::level())
-/// 4. Union all allowed_envs (if any level grants "*", result is "*")
-/// 5. Union all secret_patterns (if any level grants "*", result is "*")
-/// 6. Build synthetic MemberPolicy, delegate to standard policy checks
+/// 3. Restrictions from every level apply: member/global constraint
+///    violations at any level deny, and MFA required at any level applies
+/// 4. Grants are per-level and atomic: some single level's (role,
+///    allowed_envs, secret_patterns) must permit the request on its own.
+///    The role from one level is never combined with the env/pattern scope
+///    of another level.
 pub struct HierarchicalPolicyEngine;
 
 impl HierarchicalPolicyEngine {
@@ -46,102 +48,8 @@ impl HierarchicalPolicyEngine {
             return Ok(PolicyDecision::Deny("not a member at any level".into()));
         }
 
-        // 3. Highest role wins
-        let highest_role = member_entries
-            .iter()
-            .map(|m| m.role)
-            .max_by_key(|r| r.level())
-            .unwrap(); // safe: member_entries is non-empty
-
-        // 4. Union allowed_envs
-        let mut has_wildcard_env = false;
-        let mut all_envs: Vec<String> = Vec::new();
-        for m in &member_entries {
-            for env in &m.allowed_envs {
-                if env == "*" {
-                    has_wildcard_env = true;
-                } else if !all_envs.contains(env) {
-                    all_envs.push(env.clone());
-                }
-            }
-        }
-        let merged_envs = if has_wildcard_env {
-            vec!["*".into()]
-        } else {
-            all_envs
-        };
-
-        // 5. Union secret_patterns
-        let mut has_wildcard_pattern = false;
-        let mut all_patterns: Vec<String> = Vec::new();
-        for m in &member_entries {
-            for pat in &m.secret_patterns {
-                if pat == "*" {
-                    has_wildcard_pattern = true;
-                } else if !all_patterns.contains(pat) {
-                    all_patterns.push(pat.clone());
-                }
-            }
-        }
-        let merged_patterns = if has_wildcard_pattern {
-            vec!["*".into()]
-        } else {
-            all_patterns
-        };
-
-        // 6. Check environment access
-        if !merged_envs.iter().any(|e| e == "*" || e == &request.env) {
-            return Ok(PolicyDecision::Deny(format!(
-                "no access to env '{}'",
-                request.env
-            )));
-        }
-
-        // 7. Check action capability based on merged highest role
-        use crate::policy::engine::AccessAction;
-        match &request.action {
-            AccessAction::Read => {
-                if !highest_role.can_read() {
-                    return Ok(PolicyDecision::Deny("role cannot read".into()));
-                }
-            }
-            AccessAction::Write | AccessAction::Delete => {
-                if !highest_role.can_write() {
-                    return Ok(PolicyDecision::Deny("role cannot write".into()));
-                }
-            }
-            AccessAction::ManageMembers => {
-                if !highest_role.can_manage_members() {
-                    return Ok(PolicyDecision::Deny("role cannot manage members".into()));
-                }
-            }
-            AccessAction::ManagePolicy => {
-                if !highest_role.can_manage_policy() {
-                    return Ok(PolicyDecision::Deny("role cannot manage policy".into()));
-                }
-            }
-            AccessAction::CreateEnv | AccessAction::Promote => {
-                if !highest_role.can_manage_members() {
-                    return Ok(PolicyDecision::Deny(
-                        "role cannot manage environments".into(),
-                    ));
-                }
-            }
-            AccessAction::Audit => {
-                if !highest_role.can_audit() {
-                    return Ok(PolicyDecision::Deny("role cannot access audit logs".into()));
-                }
-            }
-        }
-
-        // 8. Check secret patterns
-        if let Some(key) = &request.key {
-            if !matches_secret_pattern(key, &merged_patterns)? {
-                return Ok(PolicyDecision::Deny(format!("no access to key '{}'", key)));
-            }
-        }
-
-        // 9. Check constraints from all levels — any constraint violation denies
+        // 3. Restrictions apply across all levels — any member-level
+        //    constraint violation denies
         let now = chrono::Utc::now();
         for m in &member_entries {
             if let Some(constraints) = &m.constraints {
@@ -151,7 +59,7 @@ impl HierarchicalPolicyEngine {
             }
         }
 
-        // Check global constraints at all levels
+        // ... as does any global constraint violation at any level
         for level in chain {
             if let Some(global) = &level.policy.global_constraints {
                 if let Err(reason) = global.check(now) {
@@ -160,7 +68,29 @@ impl HierarchicalPolicyEngine {
             }
         }
 
-        // 10. Check per-action MFA requirement from any level
+        // 4. Grants are atomic per level: a single level must permit the
+        //    request with its own role, env scope, and secret patterns.
+        let mut first_denial: Option<String> = None;
+        let mut granted = false;
+        for m in &member_entries {
+            match Self::level_denial(m, request)? {
+                None => {
+                    granted = true;
+                    break;
+                }
+                Some(reason) => {
+                    // Report the vault-most level's reason (entries are
+                    // ordered vault → root org).
+                    first_denial.get_or_insert(reason);
+                }
+            }
+        }
+        if !granted {
+            // safe: member_entries is non-empty, so first_denial is Some
+            return Ok(PolicyDecision::Deny(first_denial.unwrap()));
+        }
+
+        // 5. Check per-action MFA requirement from any level
         if !request.mfa_verified {
             for m in &member_entries {
                 if m.constraints
@@ -182,16 +112,28 @@ impl HierarchicalPolicyEngine {
             }
         }
 
-        // 11. Check for expiring access (warning)
+        // 6. Check for expiring access (warning) — member constraints first,
+        //    then global constraints at any level (parity with PolicyEngine)
         let warn_threshold = chrono::Duration::hours(24);
         for m in &member_entries {
             if let Some(constraints) = &m.constraints {
                 if let Some(expires_at) = constraints.expires_at {
                     let remaining = expires_at - now;
                     if remaining > chrono::Duration::zero() && remaining < warn_threshold {
-                        return Ok(PolicyDecision::AllowWithWarning(format!(
-                            "access expires in {} hours",
-                            remaining.num_hours()
+                        return Ok(PolicyDecision::AllowWithWarning(format_expiry_warning(
+                            remaining,
+                        )));
+                    }
+                }
+            }
+        }
+        for level in chain {
+            if let Some(global) = &level.policy.global_constraints {
+                if let Some(expires_at) = global.expires_at {
+                    let remaining = expires_at - now;
+                    if remaining > chrono::Duration::zero() && remaining < warn_threshold {
+                        return Ok(PolicyDecision::AllowWithWarning(format_expiry_warning(
+                            remaining,
                         )));
                     }
                 }
@@ -199,6 +141,78 @@ impl HierarchicalPolicyEngine {
         }
 
         Ok(PolicyDecision::Allow)
+    }
+
+    /// Check whether a single level's member policy grants the request on
+    /// its own. Returns `None` when granted, or `Some(reason)` when denied.
+    fn level_denial(member: &MemberPolicy, request: &AccessRequest) -> Result<Option<String>> {
+        // Env scoping only applies to env-scoped actions; vault-wide
+        // administrative actions must not be blocked by the current env.
+        if !request.action.is_env_agnostic()
+            && !member
+                .allowed_envs
+                .iter()
+                .any(|e| e == "*" || e == &request.env)
+        {
+            return Ok(Some(format!("no access to env '{}'", request.env)));
+        }
+
+        match &request.action {
+            AccessAction::Read => {
+                if !member.role.can_read() {
+                    return Ok(Some("role cannot read".into()));
+                }
+            }
+            AccessAction::Write | AccessAction::Delete => {
+                if !member.role.can_write() {
+                    return Ok(Some("role cannot write".into()));
+                }
+            }
+            AccessAction::ManageMembers => {
+                if !member.role.can_manage_members() {
+                    return Ok(Some("role cannot manage members".into()));
+                }
+            }
+            AccessAction::ManagePolicy => {
+                if !member.role.can_manage_policy() {
+                    return Ok(Some("role cannot manage policy".into()));
+                }
+            }
+            AccessAction::CreateEnv | AccessAction::Promote => {
+                if !member.role.can_manage_members() {
+                    return Ok(Some(
+                        "role cannot create or promote environments (requires manager or higher)"
+                            .into(),
+                    ));
+                }
+            }
+            AccessAction::Audit => {
+                if !member.role.can_audit() {
+                    return Ok(Some("role cannot access audit logs".into()));
+                }
+            }
+        }
+
+        match &request.key {
+            Some(key) => {
+                if !matches_secret_pattern(key, &member.secret_patterns)? {
+                    return Ok(Some(format!("no access to key '{}'", key)));
+                }
+            }
+            // A keyless data request (list/search/run/export/import/…)
+            // touches every key in the environment, so it is only allowed
+            // when this level's pattern set is unrestricted.
+            None if request.action.accesses_secret_data() => {
+                if !member.secret_patterns.iter().any(|p| p == "*") {
+                    return Ok(Some(
+                        "bulk access to all keys requires unrestricted secret patterns".into(),
+                    ));
+                }
+            }
+            None => {}
+        }
+
+        Ok(None)
     }
 }
 
@@ -454,6 +468,202 @@ mod tests {
             HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
             PolicyDecision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn test_no_cross_level_grant_amplification() {
+        let member = fp(2);
+
+        // Vault level: ReadOnly, scoped to prod
+        let mut vault_policy = VaultPolicy::new();
+        let mut vp = MemberPolicy::new(member.clone(), Role::ReadOnly);
+        vp.allowed_envs = vec!["prod".into()];
+        vault_policy.add_member(vp);
+
+        // Org level: Admin, scoped to dev
+        let mut org_policy = VaultPolicy::new();
+        let mut op = MemberPolicy::new(member.clone(), Role::Admin);
+        op.allowed_envs = vec!["dev".into()];
+        org_policy.add_member(op);
+
+        let chain = vec![
+            PolicyLevel {
+                owner: fp(10),
+                policy: vault_policy,
+            },
+            PolicyLevel {
+                owner: fp(11),
+                policy: org_policy,
+            },
+        ];
+
+        // Write prod: vault level is ReadOnly (no write), org level has no
+        // prod access — combining Admin role with prod env must NOT be
+        // possible
+        let mut req = make_request(member.clone(), AccessAction::Write, "prod");
+        req.key = Some("DB_URL".into());
+        assert!(matches!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+
+        // Write dev: org level alone permits this (Admin + dev)
+        let mut req = make_request(member.clone(), AccessAction::Write, "dev");
+        req.key = Some("DB_URL".into());
+        assert_eq!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Allow
+        );
+
+        // Read prod: vault level alone permits this (ReadOnly + prod)
+        let mut req = make_request(member, AccessAction::Read, "prod");
+        req.key = Some("DB_URL".into());
+        assert_eq!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn test_no_cross_level_role_pattern_amplification() {
+        let member = fp(2);
+
+        // Vault level: Contributor restricted to DB_*
+        let mut vault_policy = VaultPolicy::new();
+        let mut vp = MemberPolicy::new(member.clone(), Role::Contributor);
+        vp.secret_patterns = vec!["DB_*".into()];
+        vault_policy.add_member(vp);
+
+        // Org level: ReadOnly with unrestricted patterns
+        let mut org_policy = VaultPolicy::new();
+        org_policy.add_member(MemberPolicy::new(member.clone(), Role::ReadOnly));
+
+        let chain = vec![
+            PolicyLevel {
+                owner: fp(10),
+                policy: vault_policy,
+            },
+            PolicyLevel {
+                owner: fp(11),
+                policy: org_policy,
+            },
+        ];
+
+        // Write API_KEY: vault level can write but not API_*; org level has
+        // unrestricted patterns but cannot write — must not combine
+        let mut req = make_request(member.clone(), AccessAction::Write, "dev");
+        req.key = Some("API_KEY".into());
+        assert!(matches!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+
+        // Read API_KEY: org level alone permits this
+        let mut req = make_request(member, AccessAction::Read, "dev");
+        req.key = Some("API_KEY".into());
+        assert_eq!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn test_bulk_access_requires_unrestricted_patterns_at_one_level() {
+        let member = fp(2);
+
+        // Vault level only: pattern-restricted Contributor
+        let mut vault_policy = VaultPolicy::new();
+        let mut vp = MemberPolicy::new(member.clone(), Role::Contributor);
+        vp.secret_patterns = vec!["DB_*".into()];
+        vault_policy.add_member(vp);
+
+        let chain = vec![PolicyLevel {
+            owner: fp(10),
+            policy: vault_policy,
+        }];
+
+        // Bulk read (key: None) denied for pattern-restricted member
+        let req = make_request(member.clone(), AccessAction::Read, "dev");
+        assert!(matches!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+
+        // Adding an org level with unrestricted patterns (default) grants
+        // bulk read via that level alone
+        let mut org_policy = VaultPolicy::new();
+        org_policy.add_member(MemberPolicy::new(member.clone(), Role::ReadOnly));
+        let mut chain = chain;
+        chain.push(PolicyLevel {
+            owner: fp(11),
+            policy: org_policy,
+        });
+
+        let req = make_request(member, AccessAction::Read, "dev");
+        assert_eq!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn test_env_agnostic_action_not_blocked_by_env_scope() {
+        let member = fp(2);
+
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::Manager);
+        mp.allowed_envs = vec!["staging".into()];
+        policy.add_member(mp);
+
+        let chain = vec![PolicyLevel {
+            owner: fp(10),
+            policy,
+        }];
+
+        // ManageMembers is vault-wide; the current env must not block it
+        let req = make_request(member.clone(), AccessAction::ManageMembers, "dev");
+        assert_eq!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Allow
+        );
+
+        // Env-scoped read is still restricted
+        let req = make_request(member, AccessAction::Read, "dev");
+        assert!(matches!(
+            HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_global_expiry_warning_parity() {
+        use crate::policy::constraints::{Constraints, MfaActions};
+
+        let member = fp(2);
+
+        let mut policy = VaultPolicy::new();
+        policy.add_member(MemberPolicy::new(member.clone(), Role::ReadOnly));
+        // Global constraints expiring in 30 minutes → warning in minutes
+        policy.global_constraints = Some(Constraints {
+            time_windows: vec![],
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            mfa_actions: MfaActions::default(),
+        });
+
+        let chain = vec![PolicyLevel {
+            owner: fp(10),
+            policy,
+        }];
+
+        let mut req = make_request(member, AccessAction::Read, "dev");
+        req.key = Some("DB_URL".into());
+        match HierarchicalPolicyEngine::evaluate(&chain, &req).unwrap() {
+            PolicyDecision::AllowWithWarning(msg) => {
+                assert!(msg.contains("access expires in"), "got: {}", msg);
+                assert!(msg.contains("minutes"), "expected minutes, got: {}", msg);
+            }
+            other => panic!("expected AllowWithWarning, got: {:?}", other),
+        }
     }
 
     #[test]

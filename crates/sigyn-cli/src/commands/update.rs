@@ -5,8 +5,30 @@ use console::style;
 const REPO: &str = "tonybenoy/sigyn";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Maximum archive size: 100 MiB. Reject anything larger before extraction.
+/// Maximum archive size: 100 MiB. Enforced *while streaming* the download so an
+/// oversized (or maliciously endless) body is aborted before it is fully buffered.
 const MAX_ARCHIVE_SIZE: usize = 100 * 1024 * 1024;
+
+/// Maximum size for the small text sidecar files (`checksums.sha256` and its
+/// `.sig`). These are tiny; cap them tightly to bound memory and abuse.
+const MAX_CHECKSUMS_SIZE: usize = 1024 * 1024;
+
+/// Ed25519 public key pinned into the binary. The release process MUST sign the
+/// `checksums.sha256` file with the matching private key and publish the detached
+/// 64-byte signature as `checksums.sha256.sig` next to the release assets. At
+/// self-update time we verify that signature against this key BEFORE trusting any
+/// checksum (and therefore before trusting the downloaded binary).
+///
+/// SECURITY: this is a PLACEHOLDER (all zeros). Until it is replaced with the real
+/// release-signing public key, `sigyn update` refuses to self-update (fail closed;
+/// see [`signing_key_is_placeholder`]). Do NOT ship a release with this value.
+///
+/// To configure the release pipeline:
+///   1. Generate an Ed25519 keypair; keep the private key offline/secret.
+///   2. For each release, sign the raw bytes of `checksums.sha256`, producing a
+///      64-byte detached signature, and upload it as `checksums.sha256.sig`.
+///   3. Replace the 32 bytes below with the public key bytes.
+const UPDATE_SIGNING_PUBKEY: [u8; 32] = [0u8; 32];
 
 #[derive(Args)]
 pub struct UpdateArgs {
@@ -108,15 +130,81 @@ async fn fetch_latest_version(client: &reqwest::Client) -> Result<String> {
     Ok(tag.to_string())
 }
 
-/// Download a file and return the bytes.
-async fn download_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    let resp = client.get(url).send().await.context("download failed")?;
+/// Append `chunk` to `buf`, failing if doing so would exceed `max_size`.
+///
+/// Network-free so the streaming size-cap logic can be unit tested. The check is
+/// performed *before* the bytes are appended, so `buf` never grows past the cap.
+fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], max_size: usize) -> Result<()> {
+    if buf.len().saturating_add(chunk.len()) > max_size {
+        anyhow::bail!(
+            "download exceeded maximum allowed size of {} bytes",
+            max_size
+        );
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
+/// Download a file, streaming the body and enforcing `max_size` as we go.
+///
+/// Unlike a plain `resp.bytes().await`, this never buffers more than `max_size`
+/// bytes: it aborts as soon as the accumulated body would exceed the cap, so a
+/// hostile or misconfigured server cannot exhaust memory.
+async fn download_bytes(client: &reqwest::Client, url: &str, max_size: usize) -> Result<Vec<u8>> {
+    let mut resp = client.get(url).send().await.context("download failed")?;
 
     if !resp.status().is_success() {
         anyhow::bail!("download returned HTTP {}", resp.status());
     }
 
-    Ok(resp.bytes().await?.to_vec())
+    // Fast-path rejection using the advertised length (advisory; not trusted).
+    if let Some(len) = resp.content_length() {
+        if len > max_size as u64 {
+            anyhow::bail!(
+                "download size ({} bytes) exceeds maximum allowed ({} bytes)",
+                len,
+                max_size
+            );
+        }
+    }
+
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .context("download failed while streaming body")?
+    {
+        push_capped(&mut buf, &chunk, max_size)?;
+    }
+
+    Ok(buf)
+}
+
+/// Verify a detached Ed25519 `signature` over `message` against `pubkey_bytes`.
+///
+/// The key parameter is passed explicitly (rather than reading the pinned const
+/// directly) so the verification path is unit-testable with an ephemeral keypair.
+/// Fails closed: any malformed key, malformed signature, or bad signature is an
+/// error. Uses the Ed25519 wrapper re-exported by sigyn-core.
+fn verify_detached_signature(
+    pubkey_bytes: &[u8; 32],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    use sigyn_engine::crypto::keys::VerifyingKeyWrapper;
+
+    let key = VerifyingKeyWrapper::from_bytes(pubkey_bytes)
+        .map_err(|e| anyhow::anyhow!("invalid pinned update signing key: {e}"))?;
+    key.verify(message, signature)
+        .map_err(|_| anyhow::anyhow!("checksums signature is not valid for the pinned key"))
+}
+
+/// True while [`UPDATE_SIGNING_PUBKEY`] is still the all-zeros placeholder.
+///
+/// Used to fail closed: we refuse to self-update until a real signing key is
+/// pinned, rather than silently skipping signature verification.
+fn signing_key_is_placeholder() -> bool {
+    UPDATE_SIGNING_PUBKEY == [0u8; 32]
 }
 
 /// Verify SHA-256 checksum of archive bytes against the checksums file.
@@ -266,6 +354,17 @@ pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
             return Ok(());
         }
 
+        // Fail closed: refuse to self-update until a real release-signing key is
+        // pinned. Skipping signature verification silently would be dishonest
+        // about the security posture, so we stop here instead.
+        if signing_key_is_placeholder() {
+            anyhow::bail!(
+                "self-update signature verification is not yet configured; \
+                 download releases manually from https://github.com/{}/releases",
+                REPO
+            );
+        }
+
         let target = detect_target()?;
         let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
         let archive_name = format!("sigyn-{}-{}.{}", latest_tag, target, ext);
@@ -277,36 +376,33 @@ pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
             "https://github.com/{}/releases/download/{}/checksums.sha256",
             REPO, latest_tag
         );
+        // Detached Ed25519 signature over the checksums file.
+        let checksums_sig_url = format!("{}.sig", checksums_url);
 
-        // Download archive
+        // Download archive (size-capped while streaming).
         eprint!("  {} downloading {}...", style("->").cyan(), archive_name);
-        let archive_bytes = download_bytes(&client, &archive_url).await?;
+        let archive_bytes = download_bytes(&client, &archive_url, MAX_ARCHIVE_SIZE).await?;
         eprintln!(" {}", style("done").green());
 
-        // Enforce archive size limit
-        if archive_bytes.len() > MAX_ARCHIVE_SIZE {
-            anyhow::bail!(
-                "archive size ({} bytes) exceeds maximum allowed ({} bytes)",
-                archive_bytes.len(),
-                MAX_ARCHIVE_SIZE
-            );
-        }
-
-        // Verify checksum
-        eprint!("  {} verifying checksum...", style("->").cyan());
-        match download_bytes(&client, &checksums_url).await {
-            Ok(checksum_bytes) => {
-                let checksums = String::from_utf8_lossy(&checksum_bytes);
-                verify_checksum(&archive_name, &archive_bytes, &checksums)?;
-                eprintln!(" {}", style("ok").green());
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "failed to download checksums (refusing to install unverified binary): {}",
-                    e
-                );
-            }
-        }
+        // Verify checksum. The checksums file is only trusted once its detached
+        // Ed25519 signature is verified against the pinned public key, so the
+        // checksum (and therefore the binary) is authenticated, not just
+        // transport-trusted. Any failure here fails closed.
+        eprint!("  {} verifying signature...", style("->").cyan());
+        let checksum_bytes = download_bytes(&client, &checksums_url, MAX_CHECKSUMS_SIZE)
+            .await
+            .context("failed to download checksums (refusing to install unverified binary)")?;
+        let sig_bytes = download_bytes(&client, &checksums_sig_url, MAX_CHECKSUMS_SIZE)
+            .await
+            .context(
+                "failed to download checksums signature \
+                 (refusing to install unverified binary)",
+            )?;
+        verify_detached_signature(&UPDATE_SIGNING_PUBKEY, &checksum_bytes, &sig_bytes)
+            .context("checksums signature verification failed (refusing to install)")?;
+        let checksums = String::from_utf8_lossy(&checksum_bytes);
+        verify_checksum(&archive_name, &archive_bytes, &checksums)?;
+        eprintln!(" {}", style("ok").green());
 
         // Extract binary
         eprint!("  {} extracting binary...", style("->").cyan());
@@ -338,4 +434,107 @@ pub fn handle(args: UpdateArgs, json: bool) -> Result<()> {
 
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sigyn_engine::crypto::keys::SigningKeyPair;
+
+    // --- Streaming size cap (push_capped) ---
+
+    #[test]
+    fn push_capped_allows_body_up_to_the_limit() {
+        let cap = 16;
+        let mut buf = Vec::new();
+        assert!(push_capped(&mut buf, b"aaaaaaaa", cap).is_ok());
+        assert!(push_capped(&mut buf, b"bbbbbbbb", cap).is_ok()); // exactly at the cap
+        assert_eq!(buf.len(), 16);
+    }
+
+    #[test]
+    fn push_capped_rejects_one_byte_over_the_limit() {
+        let cap = 16;
+        let mut buf = vec![0u8; 16];
+        let err = push_capped(&mut buf, b"c", cap);
+        assert!(err.is_err(), "one byte over the cap must be rejected");
+        // The buffer must not have grown past the cap.
+        assert_eq!(buf.len(), 16);
+    }
+
+    #[test]
+    fn streaming_cap_aborts_on_oversized_body() {
+        // Mirrors the real download loop: feed chunks until the cap is exceeded.
+        let cap = 16;
+        let chunks: [&[u8]; 3] = [b"aaaaaaaa", b"bbbbbbbb", b"cccccccc"]; // 24 bytes total
+        let mut buf = Vec::new();
+        let mut errored = false;
+        for chunk in chunks {
+            if push_capped(&mut buf, chunk, cap).is_err() {
+                errored = true;
+                break;
+            }
+        }
+        assert!(errored, "cumulative body over the cap must abort");
+        assert!(
+            buf.len() <= cap,
+            "buffer never exceeds the cap, got {}",
+            buf.len()
+        );
+    }
+
+    // --- Detached Ed25519 signature verification ---
+
+    fn keypair(seed: u8) -> (SigningKeyPair, [u8; 32]) {
+        let kp = SigningKeyPair::from_bytes(&[seed; 32]);
+        let pubkey = kp.verifying_key().to_bytes();
+        (kp, pubkey)
+    }
+
+    #[test]
+    fn signature_verifies_for_matching_key_and_message() {
+        let (kp, pubkey) = keypair(7);
+        let msg = b"abc123  sigyn-v1.0.0-x86_64-unknown-linux-gnu.tar.gz\n";
+        let sig = kp.sign(msg);
+        assert!(verify_detached_signature(&pubkey, msg, &sig).is_ok());
+    }
+
+    #[test]
+    fn signature_rejects_tampered_message() {
+        let (kp, pubkey) = keypair(7);
+        let sig = kp.sign(b"original checksums");
+        assert!(verify_detached_signature(&pubkey, b"tampered checksums", &sig).is_err());
+    }
+
+    #[test]
+    fn signature_rejects_tampered_signature() {
+        let (kp, pubkey) = keypair(7);
+        let msg = b"checksums file contents";
+        let mut sig = kp.sign(msg);
+        sig[0] ^= 0x01;
+        assert!(verify_detached_signature(&pubkey, msg, &sig).is_err());
+    }
+
+    #[test]
+    fn signature_rejects_wrong_key() {
+        let (kp_a, _pub_a) = keypair(1);
+        let (_kp_b, pub_b) = keypair(2);
+        let msg = b"checksums";
+        let sig = kp_a.sign(msg);
+        assert!(verify_detached_signature(&pub_b, msg, &sig).is_err());
+    }
+
+    #[test]
+    fn signature_rejects_malformed_signature_length() {
+        let (_kp, pubkey) = keypair(3);
+        assert!(verify_detached_signature(&pubkey, b"msg", b"too short").is_err());
+    }
+
+    // --- Fail-closed placeholder gate ---
+
+    #[test]
+    fn placeholder_key_is_detected_so_update_fails_closed() {
+        // Until the real release-signing key is pinned, self-update must refuse.
+        assert!(signing_key_is_placeholder());
+    }
 }

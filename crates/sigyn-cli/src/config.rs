@@ -135,11 +135,70 @@ pub fn save_config(config: &CliConfig) -> anyhow::Result<()> {
 
 /// Returns true if the terminal is interactive (safe to show prompts).
 ///
-/// Returns false when stderr is not a terminal, or when running in CI
-/// or with `SIGYN_NON_INTERACTIVE` set.
+/// Requires both stdin and stderr to be terminals: interactive prompts
+/// (e.g. `dialoguer::Confirm`) read their answer from stdin, so a piped
+/// stdin (`echo | sigyn run ...`) must be treated as non-interactive even
+/// when stderr is a TTY — otherwise piped data silently answers the prompt.
+/// Also returns false when running in CI or with `SIGYN_NON_INTERACTIVE` set.
 pub fn is_interactive() -> bool {
     use std::io::IsTerminal;
-    std::io::stderr().is_terminal()
+    std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
         && std::env::var("CI").is_err()
         && std::env::var("SIGYN_NON_INTERACTIVE").is_err()
+}
+
+/// One-time MFA code supplied via the environment, if any.
+///
+/// Only `SIGYN_MFA_CODE` is consulted — never `SIGYN_PASSPHRASE`. A
+/// passphrase is not a one-time code: falling back to it would silently
+/// feed the passphrase into TOTP/backup-code prompts and make MFA
+/// impossible to complete in any script or CI job that sets
+/// `SIGYN_PASSPHRASE`.
+fn mfa_code_from_env() -> Option<String> {
+    std::env::var("SIGYN_MFA_CODE").ok()
+}
+
+/// Read a one-time MFA code (TOTP or backup code).
+///
+/// Unlike `read_passphrase`, this never falls back to `SIGYN_PASSPHRASE`.
+/// For scripted/non-interactive use, supply the code via `SIGYN_MFA_CODE`.
+pub fn read_code(prompt: &str) -> anyhow::Result<String> {
+    if let Some(code) = mfa_code_from_env() {
+        return Ok(code);
+    }
+    rpassword::prompt_password(prompt).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read MFA code (set SIGYN_MFA_CODE for non-interactive use): {}",
+            e
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Single combined test so the env-var manipulation cannot race with a
+    // parallel test case touching the same variables.
+    #[test]
+    fn test_read_code_never_returns_sigyn_passphrase() {
+        std::env::set_var("SIGYN_PASSPHRASE", "super-secret-passphrase");
+
+        // Without SIGYN_MFA_CODE, the env fast-path must yield nothing —
+        // in particular it must never pick up SIGYN_PASSPHRASE. (The only
+        // remaining path in read_code is an interactive TTY prompt.)
+        std::env::remove_var("SIGYN_MFA_CODE");
+        assert_eq!(mfa_code_from_env(), None);
+
+        // With SIGYN_MFA_CODE set, read_code returns the code, not the
+        // passphrase, and never touches the TTY.
+        std::env::set_var("SIGYN_MFA_CODE", "123456");
+        let code = read_code("unused prompt: ").unwrap();
+        assert_eq!(code, "123456");
+        assert_ne!(code, "super-secret-passphrase");
+
+        std::env::remove_var("SIGYN_MFA_CODE");
+        std::env::remove_var("SIGYN_PASSPHRASE");
+    }
 }

@@ -29,17 +29,18 @@ fn read_header(
 }
 
 /// Write an envelope header as a signed (SGSN) file.
+///
+/// Uses `atomic_write` (temp file + fsync + rename, 0o600, symlink checks)
+/// so a crash cannot leave a truncated members file and the sealed data is
+/// never world-readable.
 fn write_header(
     path: &Path,
     header: &EnvelopeHeader,
     signing_key: &SigningKeyPair,
     domain_id: Uuid,
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let signed = envelope::sign_header(header, signing_key, domain_id)?;
-    std::fs::write(path, signed)?;
+    crate::io::atomic_write(path, &signed)?;
     Ok(())
 }
 

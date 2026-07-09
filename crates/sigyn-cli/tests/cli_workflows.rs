@@ -1297,8 +1297,8 @@ fn test_sync_resolve_local() {
             "myapp",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Resolved conflict"));
+        .failure()
+        .stderr(predicate::str::contains("not implemented"));
 }
 
 #[test]
@@ -1317,8 +1317,8 @@ fn test_sync_resolve_remote() {
             "myapp",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Resolved conflict"));
+        .failure()
+        .stderr(predicate::str::contains("not implemented"));
 }
 
 #[test]
@@ -1337,8 +1337,8 @@ fn test_sync_resolve_latest() {
             "myapp",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Resolved conflict"));
+        .failure()
+        .stderr(predicate::str::contains("not implemented"));
 }
 
 #[test]
@@ -2759,7 +2759,7 @@ fn test_delegation_invite_and_accept() {
         .args(["delegation", "accept", inv_path])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Invitation accepted"));
+        .stdout(predicate::str::contains("Invitation verified"));
 }
 
 #[test]

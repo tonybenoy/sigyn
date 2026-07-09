@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use console::style;
 
+use sigyn_engine::sync::git::PullResult;
 use sigyn_engine::vault::PinnedVaultsStore;
 
 #[derive(Subcommand)]
@@ -71,6 +72,22 @@ pub enum DeployKeyCommands {
     Remove,
 }
 
+/// Resolve the vault to operate on using the same priority as the rest of the
+/// CLI: flag > shell context > project config (.sigyn.toml) > global
+/// `default_vault`, falling back to the literal "default" for compatibility.
+fn resolve_vault_name(vault: Option<&str>) -> String {
+    vault
+        .map(String::from)
+        .or_else(|| crate::commands::context::load_context().and_then(|c| c.vault))
+        .or_else(|| {
+            crate::project_config::load_project_config()
+                .and_then(|p| p.project)
+                .and_then(|s| s.vault)
+        })
+        .or_else(|| crate::config::load_config().default_vault)
+        .unwrap_or_else(|| "default".to_string())
+}
+
 /// Load the device key and pinned vaults store (best-effort for sync ops).
 pub(crate) fn get_checkpoint_store() -> Option<(PinnedVaultsStore, [u8; 32])> {
     let home = crate::config::sigyn_home();
@@ -134,9 +151,9 @@ pub fn handle(
             branch,
             force,
         } => {
-            let vault_name = vault.unwrap_or("default");
+            let vault_name = resolve_vault_name(vault);
             let home = crate::config::sigyn_home();
-            let vault_dir = home.join("vaults").join(vault_name);
+            let vault_dir = home.join("vaults").join(&vault_name);
 
             if !vault_dir.exists() {
                 anyhow::bail!("vault '{}' not found", vault_name);
@@ -148,7 +165,7 @@ pub fn handle(
             // Update checkpoint after successful push
             if let Some((mut store, device_key)) = get_checkpoint_store() {
                 if let Ok(Some(oid)) = engine.head_oid() {
-                    let state = store.entry_mut(vault_name);
+                    let state = store.entry_mut(&vault_name);
                     let checkpoint = state.checkpoint.get_or_insert_with(Default::default);
                     checkpoint.vault_commit_oid = Some(oid);
                     persist_checkpoint_store(&store, &device_key);
@@ -156,14 +173,14 @@ pub fn handle(
 
                 // Also update audit checkpoint for split-repo layouts
                 let paths = sigyn_engine::vault::VaultPaths::new(home);
-                if paths.detect_layout(vault_name)
+                if paths.detect_layout(&vault_name)
                     == sigyn_engine::vault::path::VaultLayout::SplitRepo
                 {
                     let audit_engine = sigyn_engine::sync::git::GitSyncEngine::new(
-                        paths.audit_repo_dir(vault_name),
+                        paths.audit_repo_dir(&vault_name),
                     );
                     if let Ok(Some(oid)) = audit_engine.head_oid() {
-                        let state = store.entry_mut(vault_name);
+                        let state = store.entry_mut(&vault_name);
                         let checkpoint = state.checkpoint.get_or_insert_with(Default::default);
                         checkpoint.audit_commit_oid = Some(oid);
                         persist_checkpoint_store(&store, &device_key);
@@ -189,15 +206,15 @@ pub fn handle(
             branch,
             force,
         } => {
-            let vault_name = vault.unwrap_or("default");
+            let vault_name = resolve_vault_name(vault);
             let home = crate::config::sigyn_home();
-            let vault_dir = home.join("vaults").join(vault_name);
+            let vault_dir = home.join("vaults").join(&vault_name);
 
             if !vault_dir.exists() {
                 anyhow::bail!("vault '{}' not found", vault_name);
             }
 
-            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir);
+            let engine = sigyn_engine::sync::git::GitSyncEngine::new(vault_dir.clone());
 
             // Load checkpoint for rollback protection
             let checkpoint_oid = if force {
@@ -205,18 +222,32 @@ pub fn handle(
             } else {
                 get_checkpoint_store().and_then(|(store, _)| {
                     store
-                        .get(vault_name)
+                        .get(&vault_name)
                         .and_then(|s| s.checkpoint.as_ref())
                         .and_then(|c| c.vault_commit_oid.clone())
                 })
             };
 
             match engine.pull_with_rollback_check(&remote, &branch, checkpoint_oid.as_deref()) {
-                Ok(_pull_result) => {
+                Ok(PullResult::Conflict) => {
+                    eprintln!(
+                        "{} histories diverged — vault '{}' and remote '{}' both have new commits.",
+                        style("error:").red().bold(),
+                        vault_name,
+                        remote
+                    );
+                    eprintln!("Nothing was pulled; your local copy is unchanged and may be stale.");
+                    eprintln!(
+                        "Merge required: resolve manually with git in {}",
+                        vault_dir.display()
+                    );
+                    anyhow::bail!("histories diverged — merge required");
+                }
+                Ok(pull_result) => {
                     // Update checkpoint after successful pull
                     if let Some((mut store, device_key)) = get_checkpoint_store() {
                         if let Ok(Some(oid)) = engine.head_oid() {
-                            let state = store.entry_mut(vault_name);
+                            let state = store.entry_mut(&vault_name);
                             let checkpoint = state.checkpoint.get_or_insert_with(Default::default);
                             checkpoint.vault_commit_oid = Some(oid);
                             persist_checkpoint_store(&store, &device_key);
@@ -225,39 +256,52 @@ pub fn handle(
 
                     // Also pull audit repo for split layouts
                     let paths = sigyn_engine::vault::VaultPaths::new(home);
-                    if paths.detect_layout(vault_name)
+                    if paths.detect_layout(&vault_name)
                         == sigyn_engine::vault::path::VaultLayout::SplitRepo
                     {
                         let audit_engine = sigyn_engine::sync::git::GitSyncEngine::new(
-                            paths.audit_repo_dir(vault_name),
+                            paths.audit_repo_dir(&vault_name),
                         );
                         let audit_checkpoint = if force {
                             None
                         } else {
                             get_checkpoint_store().and_then(|(store, _)| {
                                 store
-                                    .get(vault_name)
+                                    .get(&vault_name)
                                     .and_then(|s| s.checkpoint.as_ref())
                                     .and_then(|c| c.audit_commit_oid.clone())
                             })
                         };
-                        if let Err(e) = audit_engine.pull_with_rollback_check(
+                        match audit_engine.pull_with_rollback_check(
                             &remote,
                             &branch,
                             audit_checkpoint.as_deref(),
                         ) {
-                            eprintln!(
-                                "{} audit repo pull failed: {}",
-                                style("warning:").yellow().bold(),
-                                e
-                            );
-                        } else if let Some((mut store, device_key)) = get_checkpoint_store() {
-                            if let Ok(Some(oid)) = audit_engine.head_oid() {
-                                let state = store.entry_mut(vault_name);
-                                let checkpoint =
-                                    state.checkpoint.get_or_insert_with(Default::default);
-                                checkpoint.audit_commit_oid = Some(oid);
-                                persist_checkpoint_store(&store, &device_key);
+                            Err(e) => {
+                                eprintln!(
+                                    "{} audit repo pull failed: {}",
+                                    style("warning:").yellow().bold(),
+                                    e
+                                );
+                            }
+                            Ok(PullResult::Conflict) => {
+                                eprintln!(
+                                    "{} audit repo histories diverged — nothing was pulled \
+                                     for it. Resolve manually with git in {}",
+                                    style("warning:").yellow().bold(),
+                                    paths.audit_repo_dir(&vault_name).display()
+                                );
+                            }
+                            Ok(_) => {
+                                if let Some((mut store, device_key)) = get_checkpoint_store() {
+                                    if let Ok(Some(oid)) = audit_engine.head_oid() {
+                                        let state = store.entry_mut(&vault_name);
+                                        let checkpoint =
+                                            state.checkpoint.get_or_insert_with(Default::default);
+                                        checkpoint.audit_commit_oid = Some(oid);
+                                        persist_checkpoint_store(&store, &device_key);
+                                    }
+                                }
                             }
                         }
                     }
@@ -267,7 +311,16 @@ pub fn handle(
                             "action": "pull",
                             "remote": remote,
                             "vault": vault_name,
+                            "result": match pull_result {
+                                PullResult::UpToDate => "up_to_date",
+                                _ => "fast_forward",
+                            },
                         }))?;
+                    } else if matches!(pull_result, PullResult::UpToDate) {
+                        crate::output::print_success(&format!(
+                            "Vault '{}' is already up to date with '{}'",
+                            vault_name, remote
+                        ));
                     } else {
                         crate::output::print_success(&format!(
                             "Pulled vault '{}' from '{}'",
@@ -357,18 +410,26 @@ pub fn handle(
             }
         }
         SyncCommands::Resolve { key, strategy } => {
-            let resolution = match strategy.as_str() {
-                "local" => sigyn_engine::sync::ConflictResolution::TakeLocal,
-                "remote" => sigyn_engine::sync::ConflictResolution::TakeRemote,
-                "latest" => sigyn_engine::sync::ConflictResolution::TakeLatestTimestamp,
+            // Validate the strategy argument so the error is helpful, but do NOT
+            // claim success: automated secret-level conflict resolution is not
+            // implemented (the CRDT merge machinery is not wired into sync).
+            // Reporting "Resolved" here would be actively misleading during an
+            // incident, so fail honestly and point at the real recovery path.
+            match strategy.as_str() {
+                "local" | "remote" | "latest" => {}
                 other => {
                     anyhow::bail!("unknown strategy: '{}'. Use: local, remote, latest", other)
                 }
             };
-            crate::output::print_success(&format!(
-                "Resolved conflict for '{}' using {:?}",
-                key, resolution
-            ));
+            let vault_name = resolve_vault_name(vault);
+            let vault_dir = crate::config::sigyn_home().join("vaults").join(&vault_name);
+            let _ = key;
+            anyhow::bail!(
+                "automated conflict resolution is not implemented.\n  \
+                 Diverged histories must be reconciled manually with git in:\n    {}\n  \
+                 Inspect the two sides, merge, then run `sigyn sync push`.",
+                vault_dir.display()
+            );
         }
         SyncCommands::Configure {
             remote_url,
@@ -376,9 +437,9 @@ pub fn handle(
             auto_sync,
         } => {
             if let Some(ref url) = remote_url {
-                let vault_name = vault.unwrap_or("default");
+                let vault_name = resolve_vault_name(vault);
                 let home = crate::config::sigyn_home();
-                let vault_dir = home.join("vaults").join(vault_name);
+                let vault_dir = home.join("vaults").join(&vault_name);
 
                 if !vault_dir.exists() {
                     anyhow::bail!("vault '{}' not found", vault_name);
@@ -393,11 +454,11 @@ pub fn handle(
             }
 
             if let Some(ref url) = audit_remote {
-                let vault_name = vault.unwrap_or("default");
+                let vault_name = resolve_vault_name(vault);
                 let home = crate::config::sigyn_home();
                 let paths = sigyn_engine::vault::VaultPaths::new(home);
 
-                if paths.detect_layout(vault_name)
+                if paths.detect_layout(&vault_name)
                     != sigyn_engine::vault::path::VaultLayout::SplitRepo
                 {
                     anyhow::bail!(
@@ -408,7 +469,7 @@ pub fn handle(
                 }
 
                 let audit_engine =
-                    sigyn_engine::sync::git::GitSyncEngine::new(paths.audit_repo_dir(vault_name));
+                    sigyn_engine::sync::git::GitSyncEngine::new(paths.audit_repo_dir(&vault_name));
                 if !audit_engine.is_repo() {
                     audit_engine.init()?;
                 }

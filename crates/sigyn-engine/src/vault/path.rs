@@ -170,7 +170,10 @@ impl VaultPaths {
     ///
     /// Since vault manifests are encrypted, this method checks for an `org_link` metadata
     /// file in the vault directory. This file is written when a vault is created with --org
-    /// or attached via `vault attach`. The org_link file is device-key encrypted.
+    /// or attached via `vault attach`. The org_link file is device-key encrypted, so
+    /// callers MUST pass the local device key — with `device_key = None`, encrypted
+    /// links (the only format written since sealing was introduced) are skipped and
+    /// only legacy plaintext links can match.
     pub fn list_vaults_for_org(
         &self,
         org_path: &str,
@@ -357,6 +360,76 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = VaultPaths::new(dir.path().to_path_buf());
         assert_eq!(paths.list_vaults().unwrap(), Vec::<String>::new());
+    }
+
+    fn make_vault(base: &Path, name: &str) {
+        let dir = base.join("vaults").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vault.toml"), format!("name = \"{}\"", name)).unwrap();
+    }
+
+    #[test]
+    fn test_list_vaults_for_org_encrypted_link_requires_device_key() {
+        let dir = tempfile::tempdir().unwrap();
+        make_vault(dir.path(), "app");
+        let paths = VaultPaths::new(dir.path().to_path_buf());
+
+        let device_key = [7u8; 32];
+        write_org_link(
+            &paths.vault_dir("app").join(".org_link"),
+            "acme/platform",
+            &device_key,
+        )
+        .unwrap();
+
+        // With the device key, both the exact path and ancestor paths match.
+        assert_eq!(
+            paths
+                .list_vaults_for_org("acme/platform", Some(&device_key))
+                .unwrap(),
+            vec!["app".to_string()]
+        );
+        assert_eq!(
+            paths
+                .list_vaults_for_org("acme", Some(&device_key))
+                .unwrap(),
+            vec!["app".to_string()]
+        );
+        // A different org never matches.
+        assert!(paths
+            .list_vaults_for_org("other", Some(&device_key))
+            .unwrap()
+            .is_empty());
+        // Without the device key, the sealed link cannot be read: linkage is invisible.
+        assert!(paths.list_vaults_for_org("acme", None).unwrap().is_empty());
+        // A wrong device key also yields no match (decryption fails).
+        let wrong_key = [9u8; 32];
+        assert!(paths
+            .list_vaults_for_org("acme", Some(&wrong_key))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_list_vaults_for_org_legacy_plaintext_link() {
+        let dir = tempfile::tempdir().unwrap();
+        make_vault(dir.path(), "legacy");
+        let paths = VaultPaths::new(dir.path().to_path_buf());
+
+        std::fs::write(paths.vault_dir("legacy").join(".org_link"), "acme\n").unwrap();
+
+        // Legacy plaintext links resolve with or without a device key.
+        assert_eq!(
+            paths.list_vaults_for_org("acme", None).unwrap(),
+            vec!["legacy".to_string()]
+        );
+        let device_key = [7u8; 32];
+        assert_eq!(
+            paths
+                .list_vaults_for_org("acme", Some(&device_key))
+                .unwrap(),
+            vec!["legacy".to_string()]
+        );
     }
 
     #[test]

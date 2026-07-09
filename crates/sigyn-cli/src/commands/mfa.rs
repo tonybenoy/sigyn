@@ -9,8 +9,8 @@ use sigyn_engine::identity::session::MfaSessionStore;
 use sigyn_engine::identity::LoadedIdentity;
 use totp_rs::{Algorithm, Secret, TOTP};
 
-use crate::commands::identity::{load_identity, read_passphrase};
-use crate::config::sigyn_home;
+use crate::commands::identity::load_identity;
+use crate::config::{read_code, sigyn_home};
 
 #[derive(Subcommand)]
 pub enum MfaCommands {
@@ -38,18 +38,27 @@ fn mfa_store() -> MfaStore {
 }
 
 /// Derive a 32-byte HMAC key from the device key for MFA session authentication.
-fn session_hmac_key() -> [u8; 32] {
+fn session_hmac_key() -> Result<[u8; 32]> {
     let home = sigyn_home();
-    let device_key = sigyn_engine::device::load_or_create_device_key(&home)
-        .expect("failed to load device key for session HMAC");
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home).with_context(|| {
+        format!(
+            "failed to load device key from {} for MFA session verification \
+             (the file may be corrupt or unreadable; removing it will generate \
+             a new device key and invalidate existing MFA sessions)",
+            home.join(".device_key").display()
+        )
+    })?;
     let cipher =
         sigyn_engine::crypto::sealed::derive_file_cipher(&device_key, b"sigyn-session-hmac-v1")
-            .expect("failed to derive session HMAC key");
-    *cipher.key_bytes()
+            .context("failed to derive MFA session HMAC key from the device key")?;
+    Ok(*cipher.key_bytes())
 }
 
-fn session_store() -> MfaSessionStore {
-    MfaSessionStore::new(sigyn_home().join("sessions"), session_hmac_key())
+fn session_store() -> Result<MfaSessionStore> {
+    Ok(MfaSessionStore::new(
+        sigyn_home().join("sessions"),
+        session_hmac_key()?,
+    ))
 }
 
 fn encryption_key_bytes(loaded: &LoadedIdentity) -> [u8; 32] {
@@ -109,7 +118,7 @@ fn setup(identity: Option<&str>, json: bool) -> Result<()> {
     }
 
     // Prompt user to verify with a code
-    let code = read_passphrase("Enter TOTP code to verify: ")?;
+    let code = read_code("Enter TOTP code to verify: ")?;
     let code = code.trim();
 
     if !totp
@@ -169,7 +178,7 @@ fn disable(identity: Option<&str>, json: bool) -> Result<()> {
         .ok_or_else(|| SigynError::MfaNotEnrolled(fp.to_hex()))?;
 
     // Verify with current TOTP code
-    let code = read_passphrase("Enter TOTP code to confirm disable: ")?;
+    let code = read_code("Enter TOTP code to confirm disable: ")?;
     let code = code.trim();
 
     if !verify_totp_or_backup(code, &state) {
@@ -177,7 +186,7 @@ fn disable(identity: Option<&str>, json: bool) -> Result<()> {
     }
 
     mfa_store.remove(&fp)?;
-    session_store().clear(&fp)?;
+    session_store()?.clear(&fp)?;
 
     if json {
         crate::output::print_json(&serde_json::json!({"status": "disabled"}))?;
@@ -197,7 +206,7 @@ fn status(identity: Option<&str>, json: bool) -> Result<()> {
     let mfa_store = mfa_store();
 
     let enrolled = mfa_store.exists(&fp);
-    let session_valid = session_store().is_valid(
+    let session_valid = session_store()?.is_valid(
         &fp,
         sigyn_engine::identity::session::DEFAULT_GRACE_PERIOD_SECS,
     );
@@ -260,7 +269,7 @@ fn backup(identity: Option<&str>, json: bool) -> Result<()> {
         .ok_or_else(|| SigynError::MfaNotEnrolled(fp.to_hex()))?;
 
     // Verify with current TOTP code
-    let code = read_passphrase("Enter TOTP code to confirm: ")?;
+    let code = read_code("Enter TOTP code to confirm: ")?;
     let code = code.trim();
 
     if !verify_totp_or_backup(code, &state) {
@@ -354,7 +363,7 @@ fn generate_backup_codes(count: usize) -> Vec<String> {
 /// This is called from `check_access()` when RequiresMfa is returned.
 pub fn prompt_and_verify_mfa(fingerprint: &KeyFingerprint, loaded: &LoadedIdentity) -> Result<()> {
     let mfa_store = mfa_store();
-    let session_store = session_store();
+    let session_store = session_store()?;
 
     // Check session grace period first
     if session_store.is_valid(
@@ -369,7 +378,7 @@ pub fn prompt_and_verify_mfa(fingerprint: &KeyFingerprint, loaded: &LoadedIdenti
         .load(fingerprint, &enc_key)?
         .ok_or_else(|| SigynError::MfaNotEnrolled(fingerprint.to_hex()))?;
 
-    let code = read_passphrase("MFA code: ")?;
+    let code = read_code("MFA code: ")?;
     let code = code.trim();
 
     if !verify_and_consume_backup(code, &mut state) {

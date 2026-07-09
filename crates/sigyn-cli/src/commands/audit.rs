@@ -138,20 +138,39 @@ pub fn handle(
             };
 
             match log.verify_chain_with_keys(Some(lookup)) {
-                Ok(count) => {
+                Ok(v) => {
+                    let unverifiable = v.unverifiable.len();
                     if json {
                         crate::output::print_json(&serde_json::json!({
                             "valid": true,
-                            "entries_verified": count,
+                            "entries_verified": v.total,
+                            "signatures_verified": v.signatures_verified,
+                            "unverifiable": v.unverifiable,
                         }))?;
                     } else {
                         crate::output::print_success(&format!(
-                            "Audit chain verified: {} entries, all hashes valid",
-                            count
+                            "Audit chain verified: {} entries, {} signatures valid",
+                            v.total, v.signatures_verified
                         ));
+                        // Unavailable signing keys are NOT tampering — the hash
+                        // chain still covers these entries. Warn, don't fail.
+                        if unverifiable > 0 {
+                            eprintln!(
+                                "{} {} entr{} authored by members whose signing key \
+                                 is not available locally — authorship unconfirmed \
+                                 (sequences: {:?})",
+                                style("warning:").yellow().bold(),
+                                unverifiable,
+                                if unverifiable == 1 { "y" } else { "ies" },
+                                v.unverifiable
+                            );
+                        }
                     }
                 }
                 Err(e) => {
+                    // Genuine tampering: broken hash linkage or an invalid
+                    // signature. Report AND exit non-zero (finding H7) so a
+                    // `sigyn audit verify && deploy` gate cannot pass.
                     let err_msg = e.to_string();
                     if json {
                         crate::output::print_json(&serde_json::json!({
@@ -165,6 +184,49 @@ pub fn handle(
                             err_msg
                         );
                     }
+                    anyhow::bail!("audit chain verification failed: {}", err_msg);
+                }
+            }
+
+            // Tail-truncation check (H8): the hash chain above validates any
+            // prefix, so dropping the last N entries still "passes". Compare the
+            // log against the device-local tip — stored outside the synced repo,
+            // so a malicious remote can't rewrite it — and advance the tip.
+            let audit_cipher = derive_audit_cipher(&ctx)?;
+            match sigyn_engine::audit::checkpoint::verify_and_advance_local_tip(
+                &crate::config::sigyn_home(),
+                &ctx.vault_name,
+                &audit_path,
+                &audit_cipher,
+            ) {
+                Ok(status) => {
+                    if let Some((seq, _)) = status.previous {
+                        if !json {
+                            eprintln!(
+                                "{} device-local audit tip present through sequence {} — \
+                                 no tail truncation detected",
+                                style("\u{2713}").green().bold(),
+                                seq
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        crate::output::print_json(&serde_json::json!({
+                            "valid": false,
+                            "error": e.to_string(),
+                            "truncation_suspected": true,
+                        }))?;
+                    } else {
+                        eprintln!(
+                            "{} audit log is missing entries recorded on this device — \
+                             possible tail truncation: {}",
+                            style("ERROR").red().bold(),
+                            e
+                        );
+                    }
+                    anyhow::bail!("audit continuity check failed: {}", e);
                 }
             }
         }
@@ -249,9 +311,13 @@ pub fn handle(
             .map_err(|e| anyhow::anyhow!("failed to derive witness cipher: {}", e))?;
             let mut witness_log =
                 sigyn_engine::audit::WitnessLog::open(&witnesses_path, witness_cipher)?;
+            // Quorum threshold defaults to 1 until a policy field drives it;
+            // the count is now deduplicated by fingerprint in core.
+            let required_witnesses = 1;
             witness_log.add_witness_signed(
                 latest.entry_hash,
                 witness_sig,
+                required_witnesses,
                 ctx.loaded_identity.signing_key(),
             )?;
 

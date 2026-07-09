@@ -15,26 +15,33 @@ use sigyn_engine::vault::PlaintextEnv;
 ///     - `QUIT` / `EXIT` — shuts down the server
 pub fn serve_secrets(env: &PlaintextEnv, socket_path: &str) -> Result<()> {
     // Bind the socket in a secure directory (typically under ~/.sigyn/).
-    // Try to bind first; if EADDRINUSE, verify the socket is stale before removing.
-    let listener = match UnixListener::bind(socket_path) {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // Check if the existing socket is actively in use
-            match std::os::unix::net::UnixStream::connect(socket_path) {
-                Ok(_) => {
-                    anyhow::bail!(
+    // Set a restrictive umask around bind() so the socket file is created
+    // owner-only (0600) atomically — otherwise there is a brief window under a
+    // lax umask where the socket is world-accessible before we chmod it.
+    let listener = {
+        // SAFETY: umask is a simple process-global getter/setter; we restore it
+        // immediately after binding.
+        let prev_umask = unsafe { libc::umask(0o177) };
+        let result = match UnixListener::bind(socket_path) {
+            Ok(l) => Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // Check if the existing socket is actively in use
+                match std::os::unix::net::UnixStream::connect(socket_path) {
+                    Ok(_) => Err(anyhow::anyhow!(
                         "socket {} is already in use by another process",
                         socket_path
-                    );
-                }
-                Err(_) => {
-                    // Stale socket — safe to remove and rebind
-                    std::fs::remove_file(socket_path)?;
-                    UnixListener::bind(socket_path)?
+                    )),
+                    Err(_) => {
+                        // Stale socket — safe to remove and rebind
+                        std::fs::remove_file(socket_path)?;
+                        UnixListener::bind(socket_path).map_err(anyhow::Error::from)
+                    }
                 }
             }
-        }
-        Err(e) => return Err(e.into()),
+            Err(e) => Err(e.into()),
+        };
+        unsafe { libc::umask(prev_umask) };
+        result?
     };
 
     // Restrict socket permissions to owner only (rw-------)

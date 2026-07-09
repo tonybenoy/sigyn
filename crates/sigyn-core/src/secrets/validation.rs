@@ -29,6 +29,18 @@ pub fn validate_key_name(key: &str) -> Result<()> {
             key
         )));
     }
+    // Keys may contain single '/' separators, but reject anything that could
+    // be interpreted as path traversal if a future layout maps keys to files:
+    // a '..' path component, a leading '/', or an empty ('//') component.
+    if key.starts_with('/')
+        || key.contains("//")
+        || key.split('/').any(|component| component == "..")
+    {
+        return Err(SigynError::InvalidKeyName(format!(
+            "'{}' must not contain path traversal ('..'), a leading '/', or an empty segment",
+            key
+        )));
+    }
     Ok(())
 }
 
@@ -69,6 +81,18 @@ mod tests {
         assert!(validate_key_name("123starts_with_num").is_err());
         assert!(validate_key_name("has spaces").is_err());
         assert!(validate_key_name("special!char").is_err());
+    }
+
+    #[test]
+    fn test_rejects_path_traversal() {
+        // '..' components and leading/empty segments are traversal vectors.
+        assert!(validate_key_name("../etc/passwd").is_err());
+        assert!(validate_key_name("a/../../b").is_err());
+        assert!(validate_key_name("nested/../x").is_err());
+        assert!(validate_key_name("/leading").is_err());
+        assert!(validate_key_name("double//slash").is_err());
+        // A single-slash separator is still allowed.
+        assert!(validate_key_name("nested/key").is_ok());
     }
 
     #[test]

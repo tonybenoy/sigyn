@@ -66,12 +66,26 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
+    fn nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    // Decode over raw bytes: slicing a &str by byte offset panics on multi-byte
+    // UTF-8 characters, and from_str_radix is too lenient (accepts leading '+').
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err("odd length hex string".into());
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| match (nibble(pair[0]), nibble(pair[1])) {
+            (Some(hi), Some(lo)) => Ok((hi << 4) | lo),
+            _ => Err("invalid hex character".to_string()),
+        })
         .collect()
 }
 
@@ -255,5 +269,43 @@ mod tests {
         let hex = fp.to_hex();
         let fp2 = KeyFingerprint::from_hex(&hex).unwrap();
         assert_eq!(fp, fp2);
+    }
+
+    #[test]
+    fn test_from_hex_rejects_multibyte_utf8() {
+        // Must return Err rather than panic on a UTF-8 char boundary
+        // ("€" is 3 bytes, so "€€" has even byte length and reaches decoding).
+        assert!(KeyFingerprint::from_hex("€€").is_err());
+        assert!(KeyFingerprint::from_hex(&"€".repeat(16)).is_err());
+        assert!(KeyFingerprint::from_hex("aé").is_err());
+    }
+
+    #[test]
+    fn test_from_hex_rejects_odd_length() {
+        assert!(KeyFingerprint::from_hex("abc").is_err());
+        assert!(KeyFingerprint::from_hex("a").is_err());
+    }
+
+    #[test]
+    fn test_from_hex_rejects_non_hex_chars() {
+        assert!(KeyFingerprint::from_hex(&"zz".repeat(16)).is_err());
+        // from_str_radix would accept a leading '+'; strict decoding must not
+        assert!(KeyFingerprint::from_hex(&"+1".repeat(16)).is_err());
+        assert!(KeyFingerprint::from_hex(&" 1".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn test_from_hex_rejects_wrong_length() {
+        // Valid hex but not 16 bytes
+        assert!(KeyFingerprint::from_hex("aabb").is_err());
+        assert!(KeyFingerprint::from_hex(&"ab".repeat(17)).is_err());
+        assert!(KeyFingerprint::from_hex("").is_err());
+    }
+
+    #[test]
+    fn test_from_hex_accepts_uppercase() {
+        let fp = KeyFingerprint([0xABu8; 16]);
+        let upper = fp.to_hex().to_uppercase();
+        assert_eq!(KeyFingerprint::from_hex(&upper).unwrap(), fp);
     }
 }

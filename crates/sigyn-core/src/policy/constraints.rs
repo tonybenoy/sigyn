@@ -239,6 +239,16 @@ impl Constraints {
 
         Ok(())
     }
+
+    /// Structural validation, to be called before persisting a policy. Rejects
+    /// malformed time windows (out-of-range hours, no days) so they can't be
+    /// saved and then silently misbehave at evaluation time.
+    pub fn validate(&self) -> Result<(), String> {
+        for window in &self.time_windows {
+            window.validate()?;
+        }
+        Ok(())
+    }
 }
 
 impl TimeWindow {

@@ -8,7 +8,12 @@ use crate::secrets::types::{SecretEntry, SecretMetadata, SecretValue};
 #[derive(Serialize, Deserialize)]
 pub struct EncryptedEnvFile {
     pub nonce_and_ciphertext: Vec<u8>,
-    pub content_hash: [u8; 32],
+    /// Legacy plaintext BLAKE3 of the contents. No longer written: it was
+    /// redundant (ChaCha20-Poly1305 already authenticates the ciphertext) and
+    /// leaked content-equality between env files stored in the clear. Still
+    /// read and verified when present so pre-existing files keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<[u8; 32]>,
     pub env_name: String,
 }
 
@@ -95,13 +100,16 @@ pub fn encrypt_env(
     ciborium::into_writer(env, &mut plaintext_bytes)
         .map_err(|e| SigynError::CborEncode(e.to_string()))?;
 
-    let content_hash = blake3::hash(&plaintext_bytes);
+    // The env name is bound as AAD. Note the actual cross-environment swap
+    // guarantee comes from per-env keys (a file sealed with env A's key cannot
+    // be opened with env B's key); the AAD is defense-in-depth. No plaintext
+    // content hash is written — the AEAD tag already authenticates the bytes.
     let aad = env_name.as_bytes();
     let nonce_and_ciphertext = cipher.encrypt(&plaintext_bytes, aad)?;
 
     Ok(EncryptedEnvFile {
         nonce_and_ciphertext,
-        content_hash: *content_hash.as_bytes(),
+        content_hash: None,
         env_name: env_name.to_string(),
     })
 }
@@ -110,9 +118,13 @@ pub fn decrypt_env(encrypted: &EncryptedEnvFile, cipher: &VaultCipher) -> Result
     let aad = encrypted.env_name.as_bytes();
     let plaintext_bytes = cipher.decrypt(&encrypted.nonce_and_ciphertext, aad)?;
 
-    let actual_hash = blake3::hash(&plaintext_bytes);
-    if actual_hash.as_bytes() != &encrypted.content_hash {
-        return Err(SigynError::Decryption("content hash mismatch".into()));
+    // Verify the legacy content hash if a pre-existing file still carries one.
+    // (Newly written files rely solely on the AEAD tag.)
+    if let Some(expected) = &encrypted.content_hash {
+        let actual_hash = blake3::hash(&plaintext_bytes);
+        if actual_hash.as_bytes() != expected {
+            return Err(SigynError::Decryption("content hash mismatch".into()));
+        }
     }
 
     ciborium::from_reader(plaintext_bytes.as_slice())

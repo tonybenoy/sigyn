@@ -26,6 +26,27 @@ pub enum AccessAction {
 }
 
 impl AccessAction {
+    /// Actions that read or modify secret values. A request for one of these
+    /// with `key: None` is a bulk operation (list/search/run/export/import/…)
+    /// that touches every key in the environment.
+    pub fn accesses_secret_data(&self) -> bool {
+        matches!(
+            self,
+            AccessAction::Read | AccessAction::Write | AccessAction::Delete
+        )
+    }
+
+    /// Vault-wide administrative actions that are not scoped to a particular
+    /// environment, so per-member env restrictions do not apply to them.
+    /// Note: CreateEnv/Promote are intentionally NOT env-agnostic — env clone
+    /// and promote read secret data from the request's environment.
+    pub fn is_env_agnostic(&self) -> bool {
+        matches!(
+            self,
+            AccessAction::ManageMembers | AccessAction::ManagePolicy | AccessAction::Audit
+        )
+    }
+
     /// Check if this action requires MFA given the per-action MFA config.
     pub fn requires_mfa(&self, mfa: &MfaActions) -> bool {
         match self {
@@ -47,6 +68,19 @@ pub enum PolicyDecision {
     Deny(String),
     AllowWithWarning(String),
     RequiresMfa,
+}
+
+/// Format an "access expires in …" warning, using minutes when less than
+/// one hour remains (instead of a misleading "0 hours").
+pub(crate) fn format_expiry_warning(remaining: chrono::Duration) -> String {
+    if remaining < chrono::Duration::hours(1) {
+        format!(
+            "access expires in {} minutes",
+            remaining.num_minutes().max(1)
+        )
+    } else {
+        format!("access expires in {} hours", remaining.num_hours())
+    }
 }
 
 pub struct PolicyEngine<'a> {
@@ -83,10 +117,13 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
-        if !member
-            .allowed_envs
-            .iter()
-            .any(|e| e == "*" || e == &request.env)
+        // Env scoping only applies to env-scoped actions; vault-wide
+        // administrative actions must not be blocked by the current env.
+        if !request.action.is_env_agnostic()
+            && !member
+                .allowed_envs
+                .iter()
+                .any(|e| e == "*" || e == &request.env)
         {
             return Ok(PolicyDecision::Deny(format!(
                 "no access to env '{}'",
@@ -118,7 +155,8 @@ impl<'a> PolicyEngine<'a> {
             AccessAction::CreateEnv | AccessAction::Promote => {
                 if !member.role.can_manage_members() {
                     return Ok(PolicyDecision::Deny(
-                        "role cannot manage environments".into(),
+                        "role cannot create or promote environments (requires manager or higher)"
+                            .into(),
                     ));
                 }
             }
@@ -129,10 +167,23 @@ impl<'a> PolicyEngine<'a> {
             }
         }
 
-        if let Some(key) = &request.key {
-            if !matches_secret_pattern(key, &member.secret_patterns)? {
-                return Ok(PolicyDecision::Deny(format!("no access to key '{}'", key)));
+        match &request.key {
+            Some(key) => {
+                if !matches_secret_pattern(key, &member.secret_patterns)? {
+                    return Ok(PolicyDecision::Deny(format!("no access to key '{}'", key)));
+                }
             }
+            // A keyless data request (list/search/run/export/import/…) touches
+            // every key in the environment, so it is only allowed when the
+            // member's pattern set is unrestricted.
+            None if request.action.accesses_secret_data() => {
+                if !member.secret_patterns.iter().any(|p| p == "*") {
+                    return Ok(PolicyDecision::Deny(
+                        "bulk access to all keys requires unrestricted secret patterns".into(),
+                    ));
+                }
+            }
+            None => {}
         }
 
         // Check if access is expiring soon (within 24 hours) for AllowWithWarning
@@ -143,7 +194,7 @@ impl<'a> PolicyEngine<'a> {
             if let Some(expires_at) = constraints.expires_at {
                 let remaining = expires_at - now;
                 if remaining > chrono::Duration::zero() && remaining < warn_threshold {
-                    warning = Some(format!("access expires in {} hours", remaining.num_hours()));
+                    warning = Some(format_expiry_warning(remaining));
                 }
             }
         }
@@ -152,8 +203,7 @@ impl<'a> PolicyEngine<'a> {
                 if let Some(expires_at) = global.expires_at {
                     let remaining = expires_at - now;
                     if remaining > chrono::Duration::zero() && remaining < warn_threshold {
-                        warning =
-                            Some(format!("access expires in {} hours", remaining.num_hours()));
+                        warning = Some(format_expiry_warning(remaining));
                     }
                 }
             }
@@ -352,6 +402,199 @@ mod tests {
             engine.evaluate(&req).unwrap(),
             PolicyDecision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn test_bulk_access_requires_unrestricted_patterns() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([7u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::Contributor);
+        mp.secret_patterns = vec!["DB_*".into()];
+        policy.add_member(mp);
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Keyed read within pattern is allowed
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: Some("DB_URL".into()),
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+        // Keyed read outside pattern is denied
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: Some("API_KEY".into()),
+            mfa_verified: false,
+        };
+        assert!(matches!(
+            engine.evaluate(&req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+
+        // Bulk read (key: None — list --reveal, run, export, …) must be
+        // denied for a pattern-restricted member
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert!(matches!(
+            engine.evaluate(&req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+
+        // Bulk write (key: None — import, edit) must also be denied
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Write,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert!(matches!(
+            engine.evaluate(&req).unwrap(),
+            PolicyDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn test_unrestricted_member_bulk_access_allowed() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([8u8; 16]);
+        let mut policy = VaultPolicy::new();
+        // Default MemberPolicy has secret_patterns ["*"] (unrestricted)
+        policy.add_member(MemberPolicy::new(member.clone(), Role::Contributor));
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let req = AccessRequest {
+            actor: member.clone(),
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+
+        let req = AccessRequest {
+            actor: member,
+            action: AccessAction::Write,
+            env: "dev".into(),
+            key: None,
+            mfa_verified: false,
+        };
+        assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_pattern_restriction_does_not_block_admin_actions() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([9u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::Manager);
+        mp.secret_patterns = vec!["DB_*".into()];
+        policy.add_member(mp);
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Administrative actions legitimately pass key: None and must not be
+        // caught by the bulk-access rule
+        for action in [
+            AccessAction::ManageMembers,
+            AccessAction::CreateEnv,
+            AccessAction::Promote,
+            AccessAction::Audit,
+        ] {
+            let req = AccessRequest {
+                actor: member.clone(),
+                action,
+                env: "dev".into(),
+                key: None,
+                mfa_verified: false,
+            };
+            assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+        }
+    }
+
+    #[test]
+    fn test_env_agnostic_actions_skip_env_check() {
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([10u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::Manager);
+        mp.allowed_envs = vec!["staging".into()];
+        policy.add_member(mp);
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        // Vault-wide actions must not be blocked because the current env
+        // happens to be outside the member's env scope
+        for action in [AccessAction::ManageMembers, AccessAction::Audit] {
+            let req = AccessRequest {
+                actor: member.clone(),
+                action,
+                env: "dev".into(),
+                key: None,
+                mfa_verified: false,
+            };
+            assert_eq!(engine.evaluate(&req).unwrap(), PolicyDecision::Allow);
+        }
+
+        // Env-scoped actions still enforce the env restriction
+        for action in [
+            AccessAction::Read,
+            AccessAction::CreateEnv,
+            AccessAction::Promote,
+        ] {
+            let req = AccessRequest {
+                actor: member.clone(),
+                action,
+                env: "dev".into(),
+                key: None,
+                mfa_verified: false,
+            };
+            assert!(matches!(
+                engine.evaluate(&req).unwrap(),
+                PolicyDecision::Deny(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_expiry_warning_uses_minutes_under_one_hour() {
+        use crate::policy::constraints::{Constraints, MfaActions};
+
+        let owner = KeyFingerprint([0u8; 16]);
+        let member = KeyFingerprint([11u8; 16]);
+        let mut policy = VaultPolicy::new();
+        let mut mp = MemberPolicy::new(member.clone(), Role::ReadOnly);
+        mp.constraints = Some(Constraints {
+            time_windows: vec![],
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            mfa_actions: MfaActions::default(),
+        });
+        policy.add_member(mp);
+        let engine = PolicyEngine::new(&policy, &owner);
+
+        let req = AccessRequest {
+            actor: member,
+            action: AccessAction::Read,
+            env: "dev".into(),
+            key: Some("DB_URL".into()),
+            mfa_verified: false,
+        };
+        match engine.evaluate(&req).unwrap() {
+            PolicyDecision::AllowWithWarning(msg) => {
+                assert!(msg.contains("minutes"), "expected minutes, got: {}", msg);
+                assert!(!msg.contains("0 hours"), "got misleading msg: {}", msg);
+            }
+            other => panic!("expected AllowWithWarning, got: {:?}", other),
+        }
     }
 
     #[test]

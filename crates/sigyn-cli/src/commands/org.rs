@@ -69,7 +69,7 @@ pub enum OrgPolicyCommands {
         #[arg(long)]
         path: String,
     },
-    /// Add a member at a hierarchy level (cascades slot addition)
+    /// Add a member to the policy at a hierarchy level (policy entry only; does not add envelope key slots)
     MemberAdd {
         /// Member fingerprint (hex)
         fingerprint: String,
@@ -80,7 +80,7 @@ pub enum OrgPolicyCommands {
         #[arg(long)]
         path: String,
     },
-    /// Remove a member from a hierarchy level (cascades slot removal)
+    /// Remove a member from the policy at a hierarchy level (policy entry only; does not remove envelope key slots or rotate keys)
     MemberRemove {
         /// Member fingerprint (hex)
         fingerprint: String,
@@ -365,9 +365,10 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     );
                 }
 
-                // Check no linked vaults
+                // Check no linked vaults (org links are device-key encrypted)
                 let vault_paths = sigyn_engine::vault::VaultPaths::new(home.clone());
-                let linked = vault_paths.list_vaults_for_org(&path, None)?;
+                let device_key = sigyn_engine::device::load_or_create_device_key(&home)?;
+                let linked = vault_paths.list_vaults_for_org(&path, Some(&device_key))?;
                 if !linked.is_empty() {
                     anyhow::bail!(
                         "cannot remove '{}': {} vault(s) are linked. Detach them first.",
@@ -380,14 +381,10 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 if let Some(parent_path) = org_path.parent() {
                     let parent_manifest_path = hierarchy_paths.manifest_path(&parent_path);
                     if parent_manifest_path.exists() {
-                        let parent_content = std::fs::read_to_string(&parent_manifest_path)?;
-                        let mut parent_manifest = NodeManifest::from_toml(&parent_content)?;
+                        let mut parent_manifest = load_org_manifest(&parent_manifest_path)?;
                         let node_name = org_path.segments().last().unwrap();
                         parent_manifest.children.retain(|c| c.name != *node_name);
-                        crate::config::secure_write(
-                            &parent_manifest_path,
-                            parent_manifest.to_toml()?.as_bytes(),
-                        )?;
+                        save_org_manifest(&parent_manifest_path, &parent_manifest)?;
                     }
                 }
 
@@ -560,7 +557,14 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                 let owner_vk = resolve_owner_verifying_key(&manifest, &loaded, &store);
 
                 let role = sigyn_engine::policy::Role::from_str_name(&role)
-                    .ok_or_else(|| anyhow::anyhow!("unknown role: use readonly, auditor, operator, contributor, manager, admin, owner"))?;
+                    .ok_or_else(|| anyhow::anyhow!("unknown role: use readonly, auditor, operator, contributor, manager, admin"))?;
+
+                // Ownership is never grantable via member-add (mirrors `delegation invite`)
+                if role == sigyn_engine::policy::Role::Owner {
+                    anyhow::bail!(
+                        "cannot add a member with 'owner' role — ownership is not delegable"
+                    );
+                }
 
                 let fp = sigyn_engine::crypto::KeyFingerprint::from_hex(&fingerprint)?;
 
@@ -578,6 +582,24 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                     &owner_vk,
                     &manifest.node_id,
                 )?;
+
+                // A non-owner cannot grant a role at or above their own
+                let actor_fp = &loaded.identity.fingerprint;
+                if *actor_fp != manifest.owner {
+                    if let Some(actor) = policy.get_member(actor_fp) {
+                        if role.level() >= actor.role.level() {
+                            anyhow::bail!(
+                                "cannot add a member with role '{}' (level {}) — your role '{}' (level {}) must be higher",
+                                role,
+                                role.level(),
+                                actor.role,
+                                actor.role.level()
+                            );
+                        }
+                    } else {
+                        anyhow::bail!("you are not a member of node '{}'", path);
+                    }
+                }
 
                 let member = sigyn_engine::policy::MemberPolicy::new(fp.clone(), role);
                 policy.add_member(member);
@@ -653,6 +675,14 @@ pub fn handle(cmd: OrgCommands, identity: Option<&str>, json: bool) -> Result<()
                         path
                     ));
                 }
+                eprintln!(
+                    "{} policy entry removed, but the member's envelope key slots were NOT removed.",
+                    style("warning:").yellow().bold()
+                );
+                eprintln!(
+                    "         They can still decrypt data at '{}' until its keys are rotated.",
+                    path
+                );
             }
 
             OrgPolicyCommands::Effective { fingerprint, path } => {
@@ -851,13 +881,13 @@ fn print_tree(
         format!("{}│   ", prefix)
     };
 
-    // Also show linked vaults (requires unlock, so just list vault dirs)
+    // Also show linked vaults. Org links are device-key encrypted, so decrypt
+    // them with the local device key (best-effort).
     let home = sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home).ok();
     let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
-    // Note: vault manifests are encrypted, so we can't filter by org_path without unlocking.
-    // Show all vaults under this org dir as potential matches.
-    if let Ok(vaults) = vault_paths.list_vaults_for_org(&org_str, None) {
+    if let Ok(vaults) = vault_paths.list_vaults_for_org(&org_str, device_key.as_ref()) {
         let direct_vaults: Vec<_> = vaults;
 
         let total_items = children.len() + direct_vaults.len();
@@ -896,12 +926,13 @@ fn build_tree_json(paths: &HierarchyPaths, org_path: &OrgPath) -> Result<serde_j
         children_json.push(build_tree_json(paths, &child_path)?);
     }
 
-    // List directly linked vaults
+    // List directly linked vaults (org links are device-key encrypted)
     let home = sigyn_home();
+    let device_key = sigyn_engine::device::load_or_create_device_key(&home).ok();
     let vault_paths = sigyn_engine::vault::VaultPaths::new(home);
     let org_str = org_path.as_str();
     let direct_vaults: Vec<String> = vault_paths
-        .list_vaults_for_org(&org_str, None)
+        .list_vaults_for_org(&org_str, device_key.as_ref())
         .unwrap_or_default();
 
     Ok(serde_json::json!({

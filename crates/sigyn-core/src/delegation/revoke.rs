@@ -43,10 +43,22 @@ fn collect_cascade(root: &KeyFingerprint, policy: &VaultPolicy) -> Vec<KeyFinger
 /// This:
 /// 1. Determines which environments the revoked member(s) had access to
 /// 2. Removes them from the policy
-/// 3. Removes their vault_key_slots (no vault key rotation — it only protects metadata)
+/// 3. Removes their vault_key_slots and rotates the vault key for the remaining members
 /// 4. For each affected environment: rotates that env's key and re-seals for remaining members
 ///
-/// The caller must re-encrypt only the affected env files with the new ciphers.
+/// This function only mutates the in-memory `policy` and `header`. The caller must then,
+/// from a single consistent state:
+/// - re-encrypt the affected env files with `rotated_env_ciphers`
+/// - re-seal everything protected by the vault key (manifest, policy, audit log, deploy key)
+///   with `new_vault_cipher`
+/// - persist the updated header (which wraps the rotated keys) together with those files
+///
+/// IMPORTANT for batch callers: every call rotates the vault key again. When revoking
+/// several members, thread the returned `new_vault_cipher` / `rotated_env_ciphers` through
+/// the loop and only re-encrypt files ONCE at the end with the final ciphers — the files on
+/// disk are still sealed under the pre-batch keys. Re-sealing inside the loop while saving
+/// the header only at the end leaves the header and data files sealed under different keys,
+/// which permanently locks everyone (including the owner) out of the vault.
 ///
 /// `member_env_access` maps fingerprint → list of env names they had access to (from allowed_envs).
 /// `remaining_pubkeys` includes all members (before revocation) with their pubkeys.

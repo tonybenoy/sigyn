@@ -103,6 +103,78 @@ pub async fn get_vault(
     Ok(Json(info))
 }
 
+/// Enforce the device-pinned policy-signer trust anchor (finding C1).
+///
+/// A policy must never vouch for its own signer. Owner-signed policies refresh
+/// the recorded admin set; a non-owner ("admin-signed") policy is trusted only
+/// if its signer was an admin in the last policy accepted on this device, and
+/// it may not add or elevate privileged (Admin+) members. Shares the same
+/// `pinned_vaults.cbor` store as the CLI, so the two surfaces stay consistent.
+fn enforce_policy_trust_anchor(
+    sigyn_home: &std::path::Path,
+    vault_name: &str,
+    owner: &KeyFingerprint,
+    policy: &VaultPolicy,
+    policy_signer_fp: &KeyFingerprint,
+) -> Result<(), WebError> {
+    let admin_signers: std::collections::HashMap<String, u8> = policy
+        .members
+        .iter()
+        .filter(|(_, m)| m.role.can_manage_policy())
+        .map(|(fp_hex, m)| (fp_hex.clone(), m.role.level()))
+        .collect();
+
+    let device_key = sigyn_engine::device::load_or_create_device_key(sigyn_home)
+        .map_err(|e| WebError::Internal(format!("device key unavailable: {}", e)))?;
+    let mut store = sigyn_engine::vault::local_state::load_pinned_store(sigyn_home, &device_key)
+        .map_err(|e| WebError::Internal(format!("pinned local state unavailable: {}", e)))?;
+
+    if policy_signer_fp == owner {
+        store.entry_mut(vault_name).policy_anchor = Some(sigyn_engine::vault::PolicyTrustAnchor {
+            admin_signers,
+            updated_at: chrono::Utc::now(),
+        });
+        let _ =
+            sigyn_engine::vault::local_state::save_pinned_store(&store, sigyn_home, &device_key);
+        return Ok(());
+    }
+
+    let state = store.entry_mut(vault_name);
+    match &state.policy_anchor {
+        Some(anchor) => {
+            let signer_hex = policy_signer_fp.to_hex();
+            if !anchor.admin_signers.contains_key(&signer_hex) {
+                return Err(WebError::Forbidden(
+                    "policy signed by an identity that was not an admin in the last \
+                     policy accepted on this device — possible privilege escalation"
+                        .into(),
+                ));
+            }
+            for (fp_hex, level) in &admin_signers {
+                match anchor.admin_signers.get(fp_hex) {
+                    Some(anchored_level) if level <= anchored_level => {}
+                    _ => {
+                        return Err(WebError::Forbidden(
+                            "admin-signed policy adds or elevates a privileged member — \
+                             only an owner-signed policy may change the admin set"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+        None => {
+            // First access with an admin-signed policy: TOFU-pin the admin set.
+        }
+    }
+    state.policy_anchor = Some(sigyn_engine::vault::PolicyTrustAnchor {
+        admin_signers,
+        updated_at: chrono::Utc::now(),
+    });
+    let _ = sigyn_engine::vault::local_state::save_pinned_store(&store, sigyn_home, &device_key);
+    Ok(())
+}
+
 /// Unlock a vault using the session's loaded identity and cache the result.
 /// This replicates the core logic from CLI's `unlock_vault()` but without
 /// CLI-specific concerns (config resolution, terminal output, project config).
@@ -213,17 +285,25 @@ pub fn unlock_and_cache_vault(
             WebError::Forbidden("header signature verification failed: no known signer".into())
         })?;
 
-    // Load and verify policy
-    let policy_candidates: Vec<sigyn_engine::crypto::keys::VerifyingKeyWrapper> = {
+    // Load and verify policy, recording WHICH key verified it. The signer's
+    // authority is checked against the device-pinned trust anchor below —
+    // never against the freshly loaded policy itself (finding C1).
+    let policy_candidates: Vec<(
+        KeyFingerprint,
+        sigyn_engine::crypto::keys::VerifyingKeyWrapper,
+    )> = {
         let mut pc = Vec::new();
         // Header signer first
         if let Some(signer) = identities
             .iter()
             .find(|id| id.fingerprint == header_signer_fp)
         {
-            pc.push(signer.signing_pubkey.clone());
+            pc.push((signer.fingerprint.clone(), signer.signing_pubkey.clone()));
         } else if loaded_identity_fingerprint == header_signer_fp {
-            pc.push(loaded_identity_signing_pubkey.clone());
+            pc.push((
+                loaded_identity_fingerprint.clone(),
+                loaded_identity_signing_pubkey.clone(),
+            ));
         }
         // Owner if different
         if header_signer_fp != manifest.owner {
@@ -231,30 +311,27 @@ pub fn unlock_and_cache_vault(
                 .iter()
                 .find(|id| id.fingerprint == manifest.owner)
             {
-                pc.push(owner.signing_pubkey.clone());
+                pc.push((owner.fingerprint.clone(), owner.signing_pubkey.clone()));
             }
         }
         // All others
         for id in &identities {
-            if !pc
-                .iter()
-                .any(|k| k.to_bytes() == id.signing_pubkey.to_bytes())
-            {
-                pc.push(id.signing_pubkey.clone());
+            if !pc.iter().any(|(fp, _)| *fp == id.fingerprint) {
+                pc.push((id.fingerprint.clone(), id.signing_pubkey.clone()));
             }
         }
-        if !pc
-            .iter()
-            .any(|k| k.to_bytes() == loaded_identity_signing_pubkey.to_bytes())
-        {
-            pc.push(loaded_identity_signing_pubkey);
+        if !pc.iter().any(|(fp, _)| *fp == loaded_identity_fingerprint) {
+            pc.push((
+                loaded_identity_fingerprint.clone(),
+                loaded_identity_signing_pubkey,
+            ));
         }
         pc
     };
 
-    let policy = policy_candidates
+    let (policy, policy_signer_fp) = policy_candidates
         .iter()
-        .find_map(|key| {
+        .find_map(|(fp, key)| {
             VaultPolicy::load_signed(
                 &paths.policy_path(vault_name),
                 &vault_cipher,
@@ -262,10 +339,26 @@ pub fn unlock_and_cache_vault(
                 &manifest.vault_id,
             )
             .ok()
+            .map(|p| (p, fp.clone()))
         })
         .ok_or_else(|| WebError::Forbidden("policy signature verification failed".into()))?;
 
-    // Verify header signer is authorized (owner or admin+)
+    // --- Policy-signer trust anchor (finding C1) ---
+    // Mirror of the CLI unlock check: a policy may not vouch for its own
+    // signer. Owner-signed policies refresh the device-local admin set; a
+    // non-owner ("admin-signed") policy is only trusted if its signer was an
+    // admin in the last policy accepted on this device, and it may not add or
+    // elevate privileged members.
+    enforce_policy_trust_anchor(
+        &state.sigyn_home,
+        vault_name,
+        &manifest.owner,
+        &policy,
+        &policy_signer_fp,
+    )?;
+
+    // Verify header signer is authorized (owner or admin+). The policy consulted
+    // here has itself been anchored above.
     if header_signer_fp != manifest.owner {
         match policy.get_member(&header_signer_fp) {
             Some(member) if member.role.can_manage_policy() => {}

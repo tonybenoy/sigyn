@@ -77,18 +77,32 @@ impl WitnessLog {
         })
     }
 
-    /// Add a witness signature for the given entry hash. If no WitnessedEntry exists
-    /// for that hash yet, one is created with `required_witnesses = 1`.
-    pub fn add_witness(&mut self, entry_hash: [u8; 32], witness: WitnessSignature) -> Result<()> {
+    /// Insert a witness signature into the entry for `entry_hash`, creating the
+    /// entry if needed. Signatures are deduplicated by witness fingerprint (a
+    /// repeat signature from the same witness replaces the old one) and an
+    /// entry's quorum requirement can only be raised, never lowered.
+    fn upsert(&mut self, entry_hash: [u8; 32], witness: WitnessSignature, required_witnesses: u32) {
+        let required = required_witnesses.max(1);
         if let Some(existing) = self.entries.iter_mut().find(|e| e.entry_hash == entry_hash) {
-            existing.signatures.push(witness);
+            existing.required_witnesses = existing.required_witnesses.max(required);
+            existing.upsert_signature(witness);
         } else {
-            self.entries.push(WitnessedEntry {
-                entry_hash,
-                signatures: vec![witness],
-                required_witnesses: 1,
-            });
+            let mut entry = WitnessedEntry::new(entry_hash, required);
+            entry.upsert_signature(witness);
+            self.entries.push(entry);
         }
+    }
+
+    /// Add a witness signature for the given entry hash. If no WitnessedEntry
+    /// exists for that hash yet, one is created requiring `required_witnesses`
+    /// distinct witnesses (minimum 1).
+    pub fn add_witness(
+        &mut self,
+        entry_hash: [u8; 32],
+        witness: WitnessSignature,
+        required_witnesses: u32,
+    ) -> Result<()> {
+        self.upsert(entry_hash, witness, required_witnesses);
         self.save()
     }
 
@@ -97,27 +111,31 @@ impl WitnessLog {
         &mut self,
         entry_hash: [u8; 32],
         witness: WitnessSignature,
+        required_witnesses: u32,
         signing_key: &SigningKeyPair,
     ) -> Result<()> {
-        if let Some(existing) = self.entries.iter_mut().find(|e| e.entry_hash == entry_hash) {
-            existing.signatures.push(witness);
-        } else {
-            self.entries.push(WitnessedEntry {
-                entry_hash,
-                signatures: vec![witness],
-                required_witnesses: 1,
-            });
-        }
+        self.upsert(entry_hash, witness, required_witnesses);
         self.save_signed(signing_key)
     }
 
-    /// Return all witness signatures recorded for a particular entry hash.
+    /// Return the witness signatures recorded for a particular entry hash,
+    /// deduplicated by witness fingerprint (latest signature wins). Files
+    /// written before deduplication may contain repeats from one witness;
+    /// they must never be reported (or counted) more than once.
     pub fn witnesses_for(&self, entry_hash: &[u8; 32]) -> Vec<&WitnessSignature> {
-        self.entries
-            .iter()
-            .filter(|e| &e.entry_hash == entry_hash)
-            .flat_map(|e| e.signatures.iter())
-            .collect()
+        let mut out: Vec<&WitnessSignature> = Vec::new();
+        for entry in self.entries.iter().filter(|e| &e.entry_hash == entry_hash) {
+            for sig in &entry.signatures {
+                if let Some(existing) = out.iter_mut().find(|s| s.witness == sig.witness) {
+                    if sig.timestamp > existing.timestamp {
+                        *existing = sig;
+                    }
+                } else {
+                    out.push(sig);
+                }
+            }
+        }
+        out
     }
 
     /// Return all witnessed entries.
@@ -200,7 +218,7 @@ mod tests {
                 signature: vec![0u8; 64],
                 timestamp: chrono::Utc::now(),
             };
-            log.add_witness(entry_hash, sig).unwrap();
+            log.add_witness(entry_hash, sig, 1).unwrap();
         }
 
         // Reopen and check
@@ -210,6 +228,57 @@ mod tests {
             assert_eq!(witnesses.len(), 1);
             assert_eq!(witnesses[0].witness, witness_fp);
         }
+    }
+
+    #[test]
+    fn test_duplicate_witness_collapses_and_quorum_honored() {
+        let tmp = tempdir().unwrap();
+        let log_path = tmp.path().join("witness.json");
+        let entry_hash = [0xEEu8; 32];
+        let fp = KeyFingerprint([7u8; 16]);
+
+        let mut log = WitnessLog::open(&log_path, make_cipher()).unwrap();
+        // Same witness signs three times against a 3-witness requirement.
+        for _ in 0..3 {
+            let sig = WitnessSignature {
+                witness: fp.clone(),
+                signature: vec![0u8; 64],
+                timestamp: chrono::Utc::now(),
+            };
+            log.add_witness(entry_hash, sig, 3).unwrap();
+        }
+
+        let log = WitnessLog::open(&log_path, make_cipher()).unwrap();
+        assert_eq!(log.witnesses_for(&entry_hash).len(), 1);
+        let entry = log
+            .entries()
+            .iter()
+            .find(|e| e.entry_hash == entry_hash)
+            .unwrap();
+        assert_eq!(
+            entry.required_witnesses, 3,
+            "requested quorum must be honored"
+        );
+        assert!(
+            !entry.is_fully_witnessed(),
+            "one witness signing 3 times must not satisfy 3-of-M"
+        );
+
+        // The quorum requirement must not be lowered by a later request.
+        let mut log = WitnessLog::open(&log_path, make_cipher()).unwrap();
+        let sig = WitnessSignature {
+            witness: KeyFingerprint([8u8; 16]),
+            signature: vec![0u8; 64],
+            timestamp: chrono::Utc::now(),
+        };
+        log.add_witness(entry_hash, sig, 1).unwrap();
+        let entry = log
+            .entries()
+            .iter()
+            .find(|e| e.entry_hash == entry_hash)
+            .unwrap();
+        assert_eq!(entry.required_witnesses, 3);
+        assert_eq!(entry.unique_witness_count(), 2);
     }
 
     #[test]
@@ -225,7 +294,7 @@ mod tests {
                 signature: vec![0u8; 64],
                 timestamp: chrono::Utc::now(),
             };
-            log.add_witness(entry_hash, sig).unwrap();
+            log.add_witness(entry_hash, sig, 1).unwrap();
         }
 
         // Tamper with the encrypted file
@@ -253,7 +322,7 @@ mod tests {
                 signature: vec![0u8; 64],
                 timestamp: chrono::Utc::now(),
             };
-            log.add_witness(entry_hash, sig).unwrap();
+            log.add_witness(entry_hash, sig, 1).unwrap();
         }
 
         // Try to open with a different key

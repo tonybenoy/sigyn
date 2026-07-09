@@ -205,7 +205,10 @@ returns `RequiresMfa` instead of `Allow`. The CLI then:
 3. Prompts for a TOTP code or single-use backup code.
 4. On success, creates a session file (HMAC-protected with a key derived via
    HKDF from the device key with context `b"sigyn-session-hmac-v1"`) so subsequent
-   operations within the grace period skip the prompt.
+   operations within the grace period skip the prompt. The HMAC covers the
+   identity **fingerprint** as well as the verification timestamp, so a session
+   file is bound to the identity that created it — copying `alice.session` to
+   `bob.session` no longer validates for Bob.
 
 MFA state is stored per identity at `~/.sigyn/identities/<fingerprint>.mfa`,
 encrypted with ChaCha20-Poly1305 using the identity's fingerprint as AEAD
@@ -413,13 +416,25 @@ from `members.cbor` before decrypting `vault.toml` — breaking the circular dep
 that would otherwise require the manifest to be plaintext. The signature is verified
 after vault unlock using the owner's signing key from the local identity store.
 
+**Policy-signer trust anchor.** A vault policy is signed by the owner or an admin.
+Because every member holds the vault key, the authority of a *non-owner* signer is
+never taken from the freshly loaded policy itself (which the signer could rewrite) —
+it is checked against a device-local trust anchor recorded from the last policy
+accepted on this device (kept in the never-synced `pinned_vaults.cbor`). An
+owner-signed policy refreshes the trusted admin set; an admin-signed policy is
+accepted only if its signer was an admin in that recorded set, and it may not add or
+elevate Admin+ members. This closes a self-escalation path where a member could sign
+a policy granting themselves admin and have every other device accept it. The same
+check is applied by both the CLI and the local web GUI.
+
 Invitation acceptance requires the inviter's identity to be present locally for
 signature verification. This prevents accepting tampered invitations even when the
-inviter is offline. Invitations use a length-prefixed signing payload (v2 format)
+inviter is offline. Invitations use a length-prefixed signing payload (v3 format)
 where every variable-length field is preceded by its byte length as a little-endian
 `u32`, and list fields include an element count prefix. This prevents field boundary
 ambiguity attacks where crafted values in one field could be interpreted as part of
-another.
+another. As of v3 the `created_at` and `expires_at` timestamps are part of the
+signed payload, so an invitee cannot extend or remove the expiry.
 
 Hierarchy node `members.cbor` files also use the SGSN signed format with Ed25519
 signatures, always verified on read. Hierarchy policy files (`policy.cbor`) at every
@@ -490,15 +505,23 @@ an SSH-style warning banner:
 
 The user must explicitly pass `--force` to accept the new remote state.
 
-### Audit Checkpoints
+### Audit Checkpoints (tail-truncation defense)
 
-Sigyn writes signed audit checkpoints (`audit.checkpoint`) after policy changes and
-key rotations. A checkpoint records the current audit log sequence number and entry
-hash, CBOR-serialized and Ed25519-signed (SGSN format bound to the vault UUID).
+The hash chain makes any *prefix* of the audit log verify, so simply dropping the
+most recent entries — for example a sync remote deleting the entry that recorded a
+sensitive access — would otherwise pass verification. To detect this, Sigyn records
+the audit chain **tip** `(sequence, entry_hash)` after every append in device-local
+state (`pinned_vaults.cbor`), which is encrypted with the device key and **never
+synced** through the vault's git repo. An attacker who truncates the shared log
+therefore cannot also rewrite the recorded tip.
 
-After a pull, the audit chain is verified against the stored checkpoint. If the entry
-at the expected sequence no longer has the expected hash, the audit log has been
-tampered with or rolled back.
+On `sigyn audit verify` (and after a pull), the log must still contain the recorded
+tip sequence with the recorded hash; if it no longer does, verification fails with a
+non-zero exit. The tip is a monotonic low-water mark: because other members also
+append entries, the check requires the chain to still *contain* the recorded tip,
+then advances it to the current head. A signed `AuditCheckpoint` (CBOR + Ed25519,
+SGSN, bound to the vault UUID) is also available for exchanging a checkpoint
+out-of-band.
 
 ### Git Commit Signing
 

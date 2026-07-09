@@ -65,10 +65,11 @@ The audit chain is tamper-evident by construction:
 
 1. Each entry's `prev_hash` must match the `entry_hash` of the preceding entry.
 2. Each entry's `entry_hash` must be a valid blake3 hash of the entry content.
-3. Each entry's `signature` must be a valid Ed25519 signature from the claimed `actor`. Entries by actors not present in the vault policy are rejected (prevents forged entries by outsiders).
+3. Each entry's `signature` must be a valid Ed25519 signature from the claimed `actor`. A signature that fails against a known key is treated as tampering; an entry whose signing key is merely not available on this device is reported as *unverifiable* (a warning), not as tampering.
 4. All sequence numbers from 0 to N must be present with no gaps, detecting selective deletion of individual entries.
+5. **Tail truncation** — dropping the most recent entries leaves an otherwise-valid prefix, so Sigyn also records the audit chain tip `(sequence, hash)` in device-local state that is never synced through the vault's git repo. On verify (and after pull), the log must still contain that tip; if it no longer does, verification fails.
 
-If any check fails, `sigyn audit verify` reports the broken link with the sequence number and reason.
+If any check fails, `sigyn audit verify` prints the broken link with the sequence number and reason **and exits with a non-zero status**, so it is safe to use in a gate such as `sigyn audit verify && deploy`. Unverifiable-key warnings do not cause a non-zero exit.
 
 ## Witness Countersigning
 

@@ -367,9 +367,14 @@ pub fn handle(
                         Some(&ctx.vault_cipher),
                         Some(ctx.manifest.vault_id),
                     );
-                    let mut schedule = RotationSchedule::new(&cron, grace_hours);
+                    let mut schedule = RotationSchedule::new(&cron, grace_hours)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                     schedule.key_pattern = key.clone();
-                    schedule.hooks = hooks;
+                    // Validated setter rejects hooks with shell metacharacters
+                    // or path traversal (finding: validate_hook was never called).
+                    schedule
+                        .set_hooks(hooks)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                     schedules.insert(key.clone(), schedule);
                     save_schedules(
                         &vault_dir,
