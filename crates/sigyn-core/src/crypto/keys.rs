@@ -80,9 +80,8 @@ fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
     if !bytes.len().is_multiple_of(2) {
         return Err("odd length hex string".into());
     }
-    bytes
-        .chunks_exact(2)
-        .map(|pair| match (nibble(pair[0]), nibble(pair[1])) {
+    (0..bytes.len() / 2)
+        .map(|i| match (nibble(bytes[2 * i]), nibble(bytes[2 * i + 1])) {
             (Some(hi), Some(lo)) => Ok((hi << 4) | lo),
             _ => Err("invalid hex character".to_string()),
         })
