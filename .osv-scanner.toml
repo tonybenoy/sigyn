@@ -4,3 +4,14 @@
 # Blocked from upgrading to rand 0.9 by chacha20poly1305 depending on rand_core 0.6.
 id = "RUSTSEC-2026-0097"
 reason = "Only affects thread_rng with custom loggers; we use OsRng exclusively"
+
+[[IgnoredVulns]]
+# git2 UB advisories in C bindings; fix only in git2 0.21.0 (semver-breaking,
+# drops default ssh/https features). Not reachable: we never call
+# Remote::list() or BlameHunk APIs. Mirrors deny.toml.
+id = "RUSTSEC-2026-0183"
+reason = "Remote::list() not used; fix requires breaking git2 0.21"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0184"
+reason = "BlameHunk APIs not used; fix requires breaking git2 0.21"
