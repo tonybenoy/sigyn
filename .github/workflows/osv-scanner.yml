@@ -36,7 +36,6 @@ jobs:
     with:
       scan-args: |-
         -r
-        --skip-git
         --config=.osv-scanner.toml
         ./
   scan-pr:
@@ -45,6 +44,5 @@ jobs:
     with:
       scan-args: |-
         -r
-        --skip-git
         --config=.osv-scanner.toml
         ./
