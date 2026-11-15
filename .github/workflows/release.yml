@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -77,10 +78,6 @@ jobs:
             archive: tar.gz
             cross: true
             vendored-openssl: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-            install-x86-openssl: true
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -100,14 +97,6 @@ jobs:
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked --version 0.2.5
-
-      - name: Install x86_64 OpenSSL (macOS cross-compile)
-        if: matrix.install-x86-openssl
-        run: |
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install openssl@3
-          echo "OPENSSL_DIR=/usr/local/opt/openssl@3" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
 
       - name: Build
         run: |

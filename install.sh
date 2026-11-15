@@ -38,6 +38,10 @@ detect_target() {
         *)             err "unsupported architecture: $arch" ;;
     esac
 
+    if [ "$os_part" = "apple-darwin" ] && [ "$arch_part" = "x86_64" ]; then
+        err "prebuilt binaries are no longer published for Intel macOS; build from source with 'cargo install --git https://github.com/${REPO}'"
+    fi
+
     echo "${arch_part}-${os_part}"
 }
 

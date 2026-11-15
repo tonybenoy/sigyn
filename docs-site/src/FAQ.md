@@ -20,7 +20,7 @@ Unlike hosted secret managers, Sigyn requires no server infrastructure and has n
 
 ### What platforms does Sigyn support?
 
-Sigyn runs on macOS (Intel and Apple Silicon), Linux (x86_64 and ARM64), and Windows (x86_64). Install with a single command:
+Sigyn runs on macOS (Apple Silicon; Intel Macs must build from source), Linux (x86_64 and ARM64), and Windows (x86_64). Install with a single command:
 
 ```bash
 # macOS / Linux
