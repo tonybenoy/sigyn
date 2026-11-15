@@ -5,6 +5,22 @@ All notable changes to Sigyn are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-11-15
+
+Dependency security release.
+
+### Security
+
+- Updated `rustls` to 0.23.46 (session `Debug` secret exposure, ServerHello
+  key-exchange downgrade, pre-auth Brotli allocation), plus `rustls-webpki`,
+  `webpki-root-certs`, `tokio`, `libz-sys`, and yanked crates `clipboard-win`
+  and `libssh2-sys`.
+
+### Changed
+
+- Hex decoding no longer uses `chunks_exact` (new clippy lint) — no MSRV change.
+- Removed an unused `RUSTSEC-2026-0097` ignore from `deny.toml`.
+
 ## [0.15.0] - 2026-07-09
 
 Security hardening release. A full workspace security and code review surfaced a
