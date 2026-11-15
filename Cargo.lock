@@ -3276,7 +3276,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-cli"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-core"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "argon2",
  "base64",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-engine"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "argon2",
  "base64",
@@ -3398,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-recovery"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "sigyn-web"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "axum",
